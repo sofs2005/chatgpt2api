@@ -54,6 +54,14 @@ def is_token_invalid_error(message: str) -> bool:
     )
 
 
+def image_stream_error_message(message: str) -> str:
+    text = str(message or "")
+    lower = text.lower()
+    if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
+        return "upstream image connection failed, please retry later"
+    return text or "image generation failed"
+
+
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
@@ -577,10 +585,10 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
-                raise ImageGenerationError(last_error or "image generation failed") from exc
+                raise ImageGenerationError(image_stream_error_message(last_error)) from exc
 
     if not emitted:
-        raise ImageGenerationError(last_error or "image generation failed")
+        raise ImageGenerationError(image_stream_error_message(last_error))
 
 
 def stream_image_chunks(outputs: Iterable[ImageOutput]) -> Iterator[dict[str, Any]]:

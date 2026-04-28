@@ -463,7 +463,9 @@ class PlatformRegistrar:
         }
         resp, error = request_with_local_retry(self.session, "get", f"{auth_base}/api/accounts/authorize?{urlencode(params)}", headers=self._navigate_headers(f"{platform_base}/"), allow_redirects=True, verify=False)
         if resp is None or resp.status_code != 200:
-            raise RuntimeError(error or f"platform_authorize_http_{getattr(resp, 'status_code', 'unknown')}")
+            err = _response_json(resp).get("error", {}) if resp is not None else {}
+            detail = f": {err.get('code', '')} - {err.get('message', '')}".strip(" -") if err else ""
+            raise RuntimeError(error or f"platform_authorize_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         step(index, "platform authorize 完成")
 
     def _register_user(self, email: str, password: str, index: int) -> None:
@@ -472,7 +474,11 @@ class PlatformRegistrar:
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
         resp, error = request_with_local_retry(self.session, "post", f"{auth_base}/api/accounts/user/register", json={"username": email, "password": password}, headers=headers, verify=False)
         if resp is None or resp.status_code != 200:
-            raise RuntimeError(error or f"user_register_http_{getattr(resp, 'status_code', 'unknown')}")
+            data = _response_json(resp) if resp is not None else {}
+            if data.get("message") == "Failed to create account. Please try again.":
+                step(index, "注册失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
+            detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
+            raise RuntimeError(error or f"user_register_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         step(index, "提交注册密码完成")
 
     def _send_otp(self, index: int) -> None:
@@ -495,7 +501,11 @@ class PlatformRegistrar:
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
         resp, error = request_with_local_retry(self.session, "post", f"{auth_base}/api/accounts/create_account", json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
         if resp is None or resp.status_code not in (200, 302):
-            raise RuntimeError(error or f"create_account_http_{getattr(resp, 'status_code', 'unknown')}")
+            data = _response_json(resp) if resp is not None else {}
+            if data.get("message") == "Failed to create account. Please try again.":
+                step(index, "创建账号失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
+            detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
+            raise RuntimeError(error or f"create_account_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         step(index, "创建账号资料完成")
 
     def _login_and_exchange_tokens(self, email: str, password: str, mailbox: dict, index: int) -> dict:

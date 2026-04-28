@@ -13,7 +13,7 @@ import (
 func TestImageTaskServiceIdempotencyOwnerIsolationAndCompletion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 4)
-	handler := func(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		handlerCalls <- payload
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
@@ -80,7 +80,7 @@ func TestImageTaskServiceRestoresUnfinishedTasksAsErrors(t *testing.T) {
 	}
 }
 
-func failingImageTaskHandler(context.Context, map[string]any) (map[string]any, error) {
+func failingImageTaskHandler(context.Context, Identity, map[string]any) (map[string]any, error) {
 	return nil, errors.New("unexpected handler call")
 }
 

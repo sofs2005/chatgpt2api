@@ -21,7 +21,7 @@ const (
 	TaskStatusError   = "error"
 )
 
-type ImageTaskHandler func(context.Context, map[string]any) (map[string]any, error)
+type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
 
 type ImageTaskService struct {
 	mu              sync.RWMutex
@@ -116,17 +116,17 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 	_ = s.saveLocked()
 	result := publicTask(task)
 	s.mu.Unlock()
-	go s.runTask(context.Background(), key, mode, payload)
+	go s.runTask(context.Background(), key, mode, identity, payload)
 	return result, nil
 }
 
-func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, payload map[string]any) {
+func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identity Identity, payload map[string]any) {
 	s.updateTask(key, map[string]any{"status": TaskStatusRunning, "error": ""})
 	handler := s.generation
 	if mode == "edit" {
 		handler = s.edit
 	}
-	result, err := handler(ctx, payload)
+	result, err := handler(ctx, identity, payload)
 	if err != nil {
 		s.updateTask(key, map[string]any{"status": TaskStatusError, "error": err.Error(), "data": []any{}})
 		return

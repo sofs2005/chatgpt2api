@@ -60,14 +60,14 @@ func NewApp() (*App, error) {
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
 	app.register = service.NewRegisterService(cfg.DataDir, accounts)
 	app.tasks = service.NewImageTaskService(filepath.Join(cfg.DataDir, "image_tasks.json"),
-		func(ctx context.Context, payload map[string]any) (map[string]any, error) {
-			return app.runLoggedImageTask(ctx, payload, "/api/image-tasks/generations", "文生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
+		func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
+			return app.runLoggedImageTask(ctx, identity, payload, "/api/image-tasks/generations", "文生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
 				result, _, err := engine.HandleImageGenerations(ctx, payload)
 				return result, err
 			})
 		},
-		func(ctx context.Context, payload map[string]any) (map[string]any, error) {
-			return app.runLoggedImageTask(ctx, payload, "/api/image-tasks/edits", "图生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
+		func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
+			return app.runLoggedImageTask(ctx, identity, payload, "/api/image-tasks/edits", "图生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
 				images, _ := payload["images"].([]protocol.UploadedImage)
 				result, _, err := engine.HandleImageEdits(ctx, payload, images)
 				return result, err
@@ -156,11 +156,12 @@ func (a *App) applyCORS(w http.ResponseWriter) {
 }
 
 func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireIdentity(w, r, ""); !ok {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
 		return
 	}
 	result, err := a.engine.ListModels(r.Context())
-	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", "模型列表")
+	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表")
 }
 
 func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +176,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	body["base_url"] = a.resolveImageBaseURL(r)
 	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", util.Clean(body["model"]), callSummary("文生图", identity))
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", util.Clean(body["model"]), identity, "文生图")
 }
 
 func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
@@ -198,7 +199,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	body["base_url"] = a.resolveImageBaseURL(r)
 	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", util.Clean(body["model"]), callSummary("图生图", identity))
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", util.Clean(body["model"]), identity, "图生图")
 }
 
 func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +214,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, callSummary("文本生成", identity))
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成")
 }
 
 func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +229,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleResponses(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, callSummary("Responses", identity))
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses")
 }
 
 func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -247,18 +248,18 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleMessages(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, callSummary("Messages", identity))
+	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages")
 }
 
-func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model, summary string) {
+func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary string) {
 	start := time.Now()
 	if err != nil {
-		a.logCall(summary, endpoint, model, start, "failed", err.Error(), nil)
+		a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), nil)
 		a.writeProtocolError(w, err)
 		return
 	}
 	if stream == nil {
-		a.logCall(summary, endpoint, model, start, "success", "", collectURLs(result))
+		a.logCall(identity, summary, endpoint, model, start, "success", "", collectURLs(result))
 		util.WriteJSON(w, http.StatusOK, result)
 		return
 	}
@@ -277,12 +278,12 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			}
 		}
 		if err := <-stream.Err; err != nil {
-			a.logCall(summary, endpoint, model, start, "failed", err.Error(), urls)
+			a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), urls)
 			fmt.Fprintf(w, "event: error\n")
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
 			return
 		}
-		a.logCall(summary, endpoint, model, start, "success", "", urls)
+		a.logCall(identity, summary, endpoint, model, start, "success", "", urls)
 		return
 	}
 	fmt.Fprint(w, ": stream-open\n\n")
@@ -298,10 +299,10 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		}
 	}
 	if err := <-stream.Err; err != nil {
-		a.logCall(summary, endpoint, model, start, "failed", err.Error(), urls)
+		a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), urls)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
-		a.logCall(summary, endpoint, model, start, "success", "", urls)
+		a.logCall(identity, summary, endpoint, model, start, "success", "", urls)
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 }
@@ -554,12 +555,9 @@ func openAIErrorForStream(err error) map[string]any {
 	return map[string]any{"error": map[string]any{"message": err.Error(), "type": fmt.Sprintf("%T", err)}}
 }
 
-func callSummary(summary string, identity service.Identity) string {
-	return summary
-}
-
-func (a *App) logCall(summary, endpoint, model string, started time.Time, status, errText string, urls []string) {
+func (a *App) logCall(identity service.Identity, summary, endpoint, model string, started time.Time, status, errText string, urls []string) {
 	detail := map[string]any{"endpoint": endpoint, "model": model, "started_at": started.Format("2006-01-02 15:04:05"), "ended_at": time.Now().Format("2006-01-02 15:04:05"), "duration_ms": time.Since(started).Milliseconds(), "status": status}
+	addIdentityLogDetail(detail, identity)
 	if errText != "" {
 		detail["error"] = errText
 	}
@@ -573,21 +571,33 @@ func (a *App) logCall(summary, endpoint, model string, started time.Time, status
 	a.logs.Add(service.LogTypeCall, summary+suffix, detail)
 }
 
-func (a *App) runLoggedImageTask(ctx context.Context, payload map[string]any, endpoint, summary string, run func(context.Context, map[string]any) (map[string]any, error)) (map[string]any, error) {
+func addIdentityLogDetail(detail map[string]any, identity service.Identity) {
+	if name := util.Clean(identity.Name); name != "" {
+		detail["key_name"] = name
+	}
+	if role := util.Clean(identity.Role); role != "" {
+		detail["key_role"] = role
+	}
+	if id := util.Clean(identity.ID); id != "" {
+		detail["key_id"] = id
+	}
+}
+
+func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity, payload map[string]any, endpoint, summary string, run func(context.Context, map[string]any) (map[string]any, error)) (map[string]any, error) {
 	start := time.Now()
 	model := util.Clean(payload["model"])
 	result, err := run(ctx, payload)
 	if err != nil {
-		a.logCall(summary, endpoint, model, start, "failed", err.Error(), nil)
+		a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), nil)
 		return result, err
 	}
 	urls := collectURLs(result)
 	if len(util.AsMapSlice(result["data"])) == 0 {
 		message := firstNonEmpty(util.Clean(result["message"]), "image task returned no image data")
-		a.logCall(summary, endpoint, model, start, "failed", message, urls)
+		a.logCall(identity, summary, endpoint, model, start, "failed", message, urls)
 		return result, nil
 	}
-	a.logCall(summary, endpoint, model, start, "success", "", urls)
+	a.logCall(identity, summary, endpoint, model, start, "success", "", urls)
 	return result, nil
 }
 

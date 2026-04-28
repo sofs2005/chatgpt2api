@@ -191,8 +191,13 @@ func TestImageTaskFailureWritesCallLog(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 
+	_, rawKey, err := app.auth.CreateKey("user", "frontend")
+	if err != nil {
+		t.Fatalf("CreateKey() error = %v", err)
+	}
+
 	req := httptest.NewRequest(http.MethodPost, "/api/image-tasks/generations", strings.NewReader(`{"client_task_id":"task-log-test","prompt":"test image"}`))
-	req.Header.Set("Authorization", "Bearer admin-secret")
+	req.Header.Set("Authorization", "Bearer "+rawKey)
 	res := httptest.NewRecorder()
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
@@ -228,6 +233,47 @@ func TestImageTaskFailureWritesCallLog(t *testing.T) {
 	detail, _ := item["detail"].(map[string]any)
 	if detail["endpoint"] != "/api/image-tasks/generations" || detail["status"] != "failed" {
 		t.Fatalf("unexpected call log detail: %#v", detail)
+	}
+	if detail["key_name"] != "frontend" || detail["key_role"] != "user" {
+		t.Fatalf("call log did not include user key identity: %#v", detail)
+	}
+}
+
+func TestModelsCallLogIncludesUserKeyName(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	_, rawKey, err := app.auth.CreateKey("user", "frontend")
+	if err != nil {
+		t.Fatalf("CreateKey() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("models status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/logs?type=call", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("logs status = %d body = %s", res.Code, res.Body.String())
+	}
+	var logs map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("logs json: %v", err)
+	}
+	items := logItems(logs)
+	if len(items) == 0 {
+		t.Fatalf("expected models call to write a call log, got %#v", logs)
+	}
+	detail, _ := items[0]["detail"].(map[string]any)
+	if detail["endpoint"] != "/v1/models" || detail["key_name"] != "frontend" || detail["key_role"] != "user" {
+		t.Fatalf("models call log did not include user key identity: %#v", detail)
 	}
 }
 

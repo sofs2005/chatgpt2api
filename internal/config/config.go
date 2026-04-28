@@ -45,22 +45,27 @@ func NewStore() (*Store, error) {
 		return nil, err
 	}
 
+	envFile := filepath.Join(root, ".env")
+	envFileValues := readEnvObject(envFile)
 	s := &Store{
 		RootDir:         root,
 		DataDir:         filepath.Join(root, "data"),
-		EnvFile:         filepath.Join(root, ".env"),
+		EnvFile:         envFile,
 		data:            map[string]any{},
 		externalEnvKeys: map[string]struct{}{},
 	}
 	for _, item := range os.Environ() {
-		key, _, _ := strings.Cut(item, "=")
+		key, value, _ := strings.Cut(item, "=")
+		if fileValue, ok := envFileValues[key]; ok && value == fileValue {
+			continue
+		}
 		s.externalEnvKeys[key] = struct{}{}
 	}
 	if err := os.MkdirAll(s.DataDir, 0o755); err != nil {
 		return nil, err
 	}
 	s.loadEnvFile()
-	s.data = settingsFromEnvValues(readEnvObject(s.EnvFile))
+	s.data = settingsFromEnvValues(envFileValues)
 	if s.AuthKey() == "" {
 		return nil, errors.New("auth-key 未设置，请设置 CHATGPT2API_AUTH_KEY 或在 .env 中填写 CHATGPT2API_AUTH_KEY")
 	}

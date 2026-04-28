@@ -18,7 +18,7 @@ COPY web ./
 RUN npm run build
 
 
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.26.2-bookworm AS go-build
 
 ARG TARGETOS
 ARG TARGETARCH

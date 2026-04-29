@@ -1,5 +1,5 @@
 export const IMAGE_SIZE_OPTIONS = [
-  { value: "", label: "未指定" },
+  { value: "", label: "Auto" },
   { value: "1:1", label: "1:1 (正方形)" },
   { value: "16:9", label: "16:9 (横版)" },
   { value: "4:3", label: "4:3 (横版)" },

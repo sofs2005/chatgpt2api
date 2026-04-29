@@ -198,27 +198,40 @@ function imageDataIndexForTask(images: StoredImage[], imageIndex: number) {
   return images.slice(0, imageIndex + 1).filter((image) => (image.taskId || image.id) === taskId).length - 1;
 }
 
+const STORED_IMAGE_FIELDS: Array<keyof StoredImage> = [
+  "id",
+  "taskId",
+  "status",
+  "b64_json",
+  "url",
+  "revised_prompt",
+  "error",
+  "text_response",
+];
+
+function updateStoredImage(image: StoredImage, updates: Partial<StoredImage>): StoredImage {
+  const next = { ...image, ...updates };
+  return STORED_IMAGE_FIELDS.every((field) => image[field] === next[field]) ? image : next;
+}
+
 function taskDataToStoredImage(image: StoredImage, task: ImageTask, dataIndex = 0): StoredImage {
   if (task.status === "success") {
     const item = task.data?.[dataIndex];
     if (!item?.b64_json && !item?.url) {
       if (dataIndex > 0 && image.taskId !== image.id) {
-        return {
-          ...image,
+        return updateStoredImage(image, {
           taskId: image.id,
           status: "loading",
           error: undefined,
-        };
+        });
       }
-      return {
-        ...image,
+      return updateStoredImage(image, {
         taskId: task.id,
         status: "error",
         error: `未返回第 ${dataIndex + 1} 张图片数据`,
-      };
+      });
     }
-    return {
-      ...image,
+    return updateStoredImage(image, {
       taskId: task.id,
       status: "success",
       b64_json: item.b64_json,
@@ -226,13 +239,12 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask, dataIndex = 
       revised_prompt: item.revised_prompt,
       text_response: undefined,
       error: undefined,
-    };
+    });
   }
 
   if (task.status === "error") {
     if (task.output_type === "text") {
-      return {
-        ...image,
+      return updateStoredImage(image, {
         taskId: task.id,
         status: "message",
         text_response: task.error || "",
@@ -240,12 +252,11 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask, dataIndex = 
         url: undefined,
         revised_prompt: undefined,
         error: undefined,
-      };
+      });
     }
     const item = task.data?.[dataIndex];
     if (item?.b64_json || item?.url) {
-      return {
-        ...image,
+      return updateStoredImage(image, {
         taskId: task.id,
         status: "success",
         b64_json: item.b64_json,
@@ -253,22 +264,20 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask, dataIndex = 
         revised_prompt: item.revised_prompt,
         text_response: undefined,
         error: undefined,
-      };
+      });
     }
-    return {
-      ...image,
+    return updateStoredImage(image, {
       taskId: task.id,
       status: "error",
       text_response: undefined,
       error: formatImageTaskErrorMessage(task.error || "生成失败"),
-    };
+    });
   }
 
   if (task.status === "cancelled") {
     const item = task.data?.[dataIndex];
     if (item?.b64_json || item?.url) {
-      return {
-        ...image,
+      return updateStoredImage(image, {
         taskId: task.id,
         status: "success",
         b64_json: item.b64_json,
@@ -276,23 +285,21 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask, dataIndex = 
         revised_prompt: item.revised_prompt,
         text_response: undefined,
         error: undefined,
-      };
+      });
     }
-    return {
-      ...image,
+    return updateStoredImage(image, {
       taskId: task.id,
       status: "cancelled",
       error: task.error || "任务已终止",
-    };
+    });
   }
 
-  return {
-    ...image,
+  return updateStoredImage(image, {
     taskId: task.id,
     status: "loading",
     text_response: undefined,
     error: undefined,
-  };
+  });
 }
 
 function sleep(ms: number) {
@@ -460,6 +467,7 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
   const taskMap = new Map(taskList.items.map((task) => [task.id, task]));
   let changed = false;
   const normalized = items.map((conversation) => {
+    let completedActiveTurn = false;
     const turns = conversation.turns.map((turn) => {
       let turnChanged = false;
       const images = turn.images.map((image, imageIndex) => {
@@ -481,20 +489,29 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
       }
       changed = true;
       const derived = deriveTurnStatus({ ...turn, images });
-      return {
+      const nextTurn = {
         ...turn,
         ...derived,
         images,
       };
+      if (isTurnInProgress(turn) && !isTurnInProgress(nextTurn)) {
+        completedActiveTurn = true;
+      }
+      return nextTurn;
     });
     if (turns === conversation.turns || !turns.some((turn, index) => turn !== conversation.turns[index])) {
       return conversation;
     }
-    return {
+    const nextConversation = {
       ...conversation,
       turns,
-      updatedAt: new Date().toISOString(),
     };
+    return completedActiveTurn
+      ? {
+          ...nextConversation,
+          updatedAt: new Date().toISOString(),
+        }
+      : nextConversation;
   });
 
   if (changed) {
@@ -1070,6 +1087,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         const taskMap = new Map(tasks.map((task) => [task.id, task]));
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
+          let completedActiveTurn = false;
           const turns = conversation.turns.map((turn) => {
             if (turn.id !== activeTurn.id) {
               return turn;
@@ -1077,20 +1095,30 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             const images = turn.images.map((image, imageIndex) => {
               const taskId = image.taskId || image.id;
               const task = taskMap.get(taskId);
-              return task ? taskDataToStoredImage({ ...image, taskId }, task, imageDataIndexForTask(turn.images, imageIndex)) : image;
+              const taskImage = image.taskId === taskId ? image : { ...image, taskId };
+              return task ? taskDataToStoredImage(taskImage, task, imageDataIndexForTask(turn.images, imageIndex)) : image;
             });
             const derived = deriveTurnStatus({ ...turn, status: "generating", images });
-            return {
+            const nextTurn = {
               ...turn,
               ...derived,
               images,
             };
+            if (isTurnInProgress(turn) && !isTurnInProgress(nextTurn)) {
+              completedActiveTurn = true;
+            }
+            return nextTurn;
           });
-          return {
+          const nextConversation = {
             ...conversation,
-            updatedAt: new Date().toISOString(),
             turns,
           };
+          return completedActiveTurn
+            ? {
+                ...nextConversation,
+                updatedAt: new Date().toISOString(),
+              }
+            : nextConversation;
         });
       };
 
@@ -1099,7 +1127,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           const conversation = current ?? snapshot;
           return {
             ...conversation,
-            updatedAt: new Date().toISOString(),
             turns: conversation.turns.map((turn) =>
               turn.id === activeTurn.id
                 ? {

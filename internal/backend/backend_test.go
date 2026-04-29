@@ -108,9 +108,11 @@ func TestImageModelSlugSupportsSelection(t *testing.T) {
 		{model: "auto", want: "gpt-image-2"},
 		{model: "gpt-image-2", want: "gpt-image-2"},
 		{model: "codex-gpt-image-2", want: "codex-gpt-image-2"},
-		{model: "gpt-5", want: "gpt-5"},
-		{model: "gpt-5-3-mini", want: "gpt-5-3-mini"},
-		{model: "unknown", want: "auto"},
+		{model: "gpt-5", want: "gpt-image-2"},
+		{model: "gpt-5-3-mini", want: "gpt-image-2"},
+		{model: "gpt-5.4", want: "gpt-image-2"},
+		{model: "gpt-5.5", want: "gpt-image-2"},
+		{model: "unknown", want: "gpt-image-2"},
 	} {
 		t.Run(tc.model, func(t *testing.T) {
 			if got := client.imageModelSlug(tc.model); got != tc.want {

@@ -320,7 +320,7 @@ export function ImageResults({
         const cancelledCount = visualImages.filter(({ image }) => image.status === "cancelled").length;
         const resultCount = visualImages.length || (turnBusy ? turn.count : 0);
         const outcomeLabel = getTurnOutcomeLabel(successCount, failedCount, cancelledCount);
-        const showResultSummary = visualImages.length > 0 || turnBusy;
+        const showResultSummary = turn.mode !== "chat" && (visualImages.length > 0 || turnBusy);
         const progressStartedAt =
           progress && Number.isFinite(progress.startedAt) ? progress.startedAt : null;
         const elapsedClock = turnBusy
@@ -497,7 +497,9 @@ export function ImageResults({
                       >
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">
-                            <span className="rounded-full bg-stone-100 px-2.5 py-0.5 text-stone-600">模型文本回复</span>
+                            <span className="rounded-full bg-stone-100 px-2.5 py-0.5 text-stone-600">
+                              {turn.mode === "chat" ? "对话回复" : "模型文本回复"}
+                            </span>
                           </div>
                           <Button
                             type="button"
@@ -508,7 +510,7 @@ export function ImageResults({
                             onClick={() => void onRetryImage(selectedConversation.id, turn.id, index)}
                           >
                             <RotateCcw className="size-3.5" />
-                            重试生成
+                            {turn.mode === "chat" ? "重新发送" : "重试生成"}
                           </Button>
                         </div>
                         <div className="whitespace-pre-wrap break-words">{image.text_response}</div>
@@ -658,7 +660,15 @@ export function ImageResults({
                               <LoaderCircle className="size-5 animate-spin" />
                             )}
                           </div>
-                          <p className="text-sm">{turn.status === "queued" ? "已加入当前对话队列..." : "正在处理图片..."}</p>
+                          <p className="text-sm">
+                            {turn.mode === "chat"
+                              ? turn.status === "queued"
+                                ? "已加入当前对话队列..."
+                                : "正在等待回复..."
+                              : turn.status === "queued"
+                                ? "已加入当前对话队列..."
+                                : "正在处理图片..."}
+                          </p>
                           {elapsedClock ? (
                             <p className="min-w-[7.5rem] rounded-full bg-white/70 px-2.5 py-1 font-mono text-xs tabular-nums text-stone-400">
                               已等待 {elapsedClock}
@@ -748,6 +758,9 @@ function getTurnOutcomeLabel(successCount: number, failedCount: number, cancelle
 }
 
 function getTurnModeLabel(turn: ImageTurn) {
+  if (turn.mode === "chat") {
+    return "对话";
+  }
   if (turn.mode === "generate") {
     return "文生图";
   }

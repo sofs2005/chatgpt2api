@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUp, Check, ChevronDown, CircleHelp, ImagePlus, Sparkles, Store, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, CircleHelp, Image as ImageIcon, ImagePlus, MessageCircle, Store, X } from "lucide-react";
 import {
   useEffect,
   useMemo,
@@ -18,11 +18,11 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { IMAGE_SIZE_OPTIONS } from "@/app/image/image-options";
-import type { ImagePromptPreset } from "@/app/image/image-presets";
 import type { ImageModel, ImageQuality } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ImageComposerProps = {
+  composerMode: "chat" | "image";
   prompt: string;
   imageCount: string;
   imageModel: ImageModel;
@@ -31,11 +31,10 @@ type ImageComposerProps = {
   imageQuality: ImageQuality;
   imageQualityOptions: ReadonlyArray<{ value: ImageQuality; label: string; description: string }>;
   imageOutputHint: ReactNode;
-  availableQuota: string;
   referenceImages: Array<{ name: string; dataUrl: string }>;
-  promptPresets: readonly ImagePromptPreset[];
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
+  onComposerModeChange: (mode: "chat" | "image") => void;
   onPromptChange: (value: string) => void;
   onImageCountChange: (value: string) => void;
   onImageModelChange: (value: ImageModel) => void;
@@ -44,7 +43,6 @@ type ImageComposerProps = {
   onSubmit: () => void | Promise<void>;
   onPickReferenceImage: () => void;
   onOpenPromptMarket: () => void;
-  onApplyPromptPreset: (preset: ImagePromptPreset) => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
   onRemoveReferenceImage: (index: number) => void;
 };
@@ -72,6 +70,7 @@ function ImageComposerDock({ children }: { children: ReactNode }) {
 }
 
 export function ImageComposer({
+  composerMode,
   prompt,
   imageCount,
   imageModel,
@@ -80,11 +79,10 @@ export function ImageComposer({
   imageQuality,
   imageQualityOptions,
   imageOutputHint,
-  availableQuota,
   referenceImages,
-  promptPresets,
   textareaRef,
   fileInputRef,
+  onComposerModeChange,
   onPromptChange,
   onImageCountChange,
   onImageModelChange,
@@ -93,7 +91,6 @@ export function ImageComposer({
   onSubmit,
   onPickReferenceImage,
   onOpenPromptMarket,
-  onApplyPromptPreset,
   onReferenceImageChange,
   onRemoveReferenceImage,
 }: ImageComposerProps) {
@@ -102,7 +99,6 @@ export function ImageComposer({
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [isSizeMenuOpen, setIsSizeMenuOpen] = useState(false);
   const [isQualityMenuOpen, setIsQualityMenuOpen] = useState(false);
-  const [isPresetMenuOpen, setIsPresetMenuOpen] = useState(false);
   const [promptAreaHeight, setPromptAreaHeight] = useState(PROMPT_AREA_DEFAULT_HEIGHT);
   const [isPromptAreaResizing, setIsPromptAreaResizing] = useState(false);
   const composerPanelRef = useRef<HTMLDivElement>(null);
@@ -169,6 +165,9 @@ export function ImageComposer({
   }, [isPromptAreaResizing]);
 
   const handleTextareaPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (composerMode === "chat") {
+      return;
+    }
     const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
     if (imageFiles.length === 0) {
       return;
@@ -250,11 +249,13 @@ export function ImageComposer({
         multiple
         className="hidden"
         onChange={(event) => {
-          void onReferenceImageChange(Array.from(event.target.files || []));
+          if (composerMode === "image") {
+            void onReferenceImageChange(Array.from(event.target.files || []));
+          }
         }}
       />
 
-      {referenceImages.length > 0 ? (
+      {composerMode === "image" && referenceImages.length > 0 ? (
         <div className="hide-scrollbar mb-2 flex max-h-[4.5rem] gap-2 overflow-x-auto px-1 pb-1 sm:mb-3">
           {referenceImages.map((image, index) => (
             <div key={`${image.name}-${index}`} className="relative size-14 shrink-0 sm:size-16">
@@ -332,7 +333,9 @@ export function ImageComposer({
             onChange={(event) => onPromptChange(event.target.value)}
             onPaste={handleTextareaPaste}
             placeholder={
-              referenceImages.length > 0
+              composerMode === "chat"
+                ? "输入你想聊的内容"
+                : referenceImages.length > 0
                 ? "描述你希望如何修改参考图"
                 : "输入你想要生成的画面，也可直接粘贴图片"
             }
@@ -353,79 +356,52 @@ export function ImageComposer({
           >
             <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 sm:items-center sm:gap-3">
               <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
-                <Popover open={isPresetMenuOpen} onOpenChange={setIsPresetMenuOpen}>
-                  <PopoverTrigger asChild>
+                <div className="inline-flex h-8 shrink-0 items-center rounded-full bg-[#f0f0f0] p-0.5 text-xs font-medium text-[#45515e]">
+                  {[
+                    { value: "chat" as const, label: "对话", icon: MessageCircle },
+                    { value: "image" as const, label: "作画", icon: ImageIcon },
+                  ].map((option) => {
+                    const Icon = option.icon;
+                    const active = composerMode === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={cn(
+                          "inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 transition",
+                          active ? "bg-white text-[#18181b] shadow-sm" : "text-[#45515e] hover:text-[#18181b]",
+                        )}
+                        onClick={() => onComposerModeChange(option.value)}
+                        aria-pressed={active}
+                      >
+                        <Icon className="size-3.5" />
+                        <span>{option.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {composerMode === "image" ? (
+                  <>
                     <Button
                       type="button"
                       variant="outline"
                       className="h-8 shrink-0 rounded-full border-[#e5e7eb] bg-white px-3 text-xs font-medium text-[#45515e] shadow-none hover:bg-black/[0.05]"
+                      onClick={onOpenPromptMarket}
                     >
-                      <Sparkles className="size-3.5" />
-                      <span>预设</span>
+                      <Store className="size-3.5" />
+                      <span>市场</span>
                     </Button>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    align="start"
-                    className="w-[min(calc(100vw-2rem),620px)] p-3"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {promptPresets.map((preset) => (
-                        <button
-                          key={preset.id}
-                          type="button"
-                          className="group grid min-h-[92px] grid-cols-[104px_minmax(0,1fr)] overflow-hidden rounded-[18px] border border-[#f2f3f5] bg-white text-left shadow-[0_4px_6px_rgba(0,0,0,0.08)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_16px_-4px_rgba(36,36,36,0.08)]"
-                          onClick={() => {
-                            onApplyPromptPreset(preset);
-                            setIsPresetMenuOpen(false);
-                          }}
-                          aria-label={`套用预设：${preset.title}`}
-                        >
-                          <div className="relative h-full min-h-[92px] overflow-hidden bg-[#f0f0f0]">
-                            <img
-                              src={preset.imageSrc}
-                              alt={preset.title}
-                              loading="lazy"
-                              className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
-                            />
-                          </div>
-                          <div className="flex min-w-0 flex-col gap-2 p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="font-display truncate text-sm font-semibold text-[#222222]">
-                                {preset.title}
-                              </div>
-                              <span className="shrink-0 rounded-full bg-[#f0f0f0] px-2 py-0.5 text-[10px] font-medium text-[#45515e]">
-                                {preset.size || "Auto"}
-                              </span>
-                            </div>
-                            <p className="line-clamp-2 text-xs leading-5 text-[#45515e]">{preset.hint}</p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </PopoverContent>
-                </Popover>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-8 shrink-0 rounded-full border-[#e5e7eb] bg-white px-3 text-xs font-medium text-[#45515e] shadow-none hover:bg-black/[0.05]"
-                  onClick={onOpenPromptMarket}
-                >
-                  <Store className="size-3.5" />
-                  <span>市场</span>
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-8 shrink-0 rounded-full border-[#e5e7eb] bg-white px-3 text-xs font-medium text-[#45515e] shadow-none hover:bg-black/[0.05]"
-                  onClick={onPickReferenceImage}
-                >
-                  <ImagePlus className="size-3.5" />
-                  <span>上传</span>
-                </Button>
-                <div className="inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-full bg-[#f0f0f0] px-3 text-[10px] font-medium text-[#45515e] sm:text-xs">
-                  <span>剩余额度</span> {availableQuota}
-                </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-8 shrink-0 rounded-full border-[#e5e7eb] bg-white px-3 text-xs font-medium text-[#45515e] shadow-none hover:bg-black/[0.05]"
+                      onClick={onPickReferenceImage}
+                    >
+                      <ImagePlus className="size-3.5" />
+                      <span>上传</span>
+                    </Button>
+                  </>
+                ) : null}
                 <div
                   ref={modelMenuRef}
                   className="relative flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] sm:text-xs"
@@ -468,19 +444,21 @@ export function ImageComposer({
                       </div>
                     ) : null}
                   </div>
-                  <div className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5">
-                    <span className="text-[11px] font-medium text-[#45515e] sm:text-xs">张数</span>
-                    <Input
-                      type="number"
-                      inputMode="numeric"
-                      min="1"
-                      max="10"
-                      step="1"
-                      value={imageCount}
-                      onChange={(event) => onImageCountChange(event.target.value)}
-                      className="h-7 w-[36px] border-0 bg-transparent px-0 text-center text-xs font-semibold text-[#18181b] shadow-none focus-visible:ring-0 sm:w-[46px]"
-                    />
-                  </div>
+                  {composerMode === "image" ? (
+                    <>
+                      <div className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5">
+                        <span className="text-[11px] font-medium text-[#45515e] sm:text-xs">张数</span>
+                        <Input
+                          type="number"
+                          inputMode="numeric"
+                          min="1"
+                          max="10"
+                          step="1"
+                          value={imageCount}
+                          onChange={(event) => onImageCountChange(event.target.value)}
+                          className="h-7 w-[36px] border-0 bg-transparent px-0 text-center text-xs font-semibold text-[#18181b] shadow-none focus-visible:ring-0 sm:w-[46px]"
+                        />
+                      </div>
                   <div
                     ref={sizeMenuRef}
                     className="relative flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] sm:text-xs"
@@ -591,6 +569,8 @@ export function ImageComposer({
                       </div>
                     ) : null}
                   </div>
+                  </>
+                  ) : null}
               </div>
 
               <button
@@ -598,7 +578,9 @@ export function ImageComposer({
                 onClick={() => void onSubmit()}
                 disabled={!prompt.trim()}
                 className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-[#181e25] text-white shadow-[0_4px_10px_rgba(24,30,37,0.12)] transition hover:bg-[#2a323d] disabled:cursor-not-allowed disabled:bg-[#d1d5db] sm:size-10"
-                aria-label={referenceImages.length > 0 ? "编辑图片" : "生成图片"}
+                aria-label={
+                  composerMode === "chat" ? "发送对话" : referenceImages.length > 0 ? "编辑图片" : "生成图片"
+                }
               >
                 <ArrowUp className="size-3.5 sm:size-4" />
               </button>

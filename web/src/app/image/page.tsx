@@ -34,20 +34,24 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import {
   cancelImageTask,
+  CHAT_MODEL_OPTIONS,
+  createChatCompletion,
   createImageEditTask,
   createImageGenerationTask,
+  DEFAULT_CHAT_MODEL,
   DEFAULT_IMAGE_MODEL,
-  fetchAccounts,
   fetchImageTasks,
-  IMAGE_MODEL_OPTIONS,
+  IMAGE_TASK_MODEL_OPTIONS,
+  isChatModel,
   isImageModel,
   isImageQuality,
-  type Account,
+  isImageTaskModel,
   type ImageModel,
   type ImageQuality,
   type ImageTask,
   type ImageTaskMessage,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
@@ -65,18 +69,23 @@ import {
 } from "@/store/image-conversations";
 
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
+const COMPOSER_MODE_STORAGE_KEY = "chatgpt2api:image_composer_mode";
 const IMAGE_MODEL_STORAGE_KEY = "chatgpt2api:image_last_model";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_QUALITY_STORAGE_KEY = "chatgpt2api:image_last_quality";
+const QUOTA_REFRESH_EVENT = "chatgpt2api:quota-refresh";
 const DEFAULT_IMAGE_QUALITY: ImageQuality = "high";
 const activeConversationQueueIds = new Set<string>();
 const EMPTY_IMAGE_SIZE_SELECT_VALUE = "__empty__";
+
+type ComposerMode = "chat" | "image";
 
 type EditingTurnDraft = {
   conversationId: string;
   turnId: string;
   prompt: string;
   model: ImageModel;
+  mode: ImageConversationMode;
   count: string;
   size: string;
   quality: ImageQuality;
@@ -102,11 +111,6 @@ function formatConversationTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
-}
-
-function formatAvailableQuota(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status !== "禁用");
-  return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
 function createId() {
@@ -355,6 +359,13 @@ function getStoredImageModel(): ImageModel {
   return isImageModel(storedModel) ? storedModel : DEFAULT_IMAGE_MODEL;
 }
 
+function getStoredComposerMode(): ComposerMode {
+  if (typeof window === "undefined") {
+    return "image";
+  }
+  return window.localStorage.getItem(COMPOSER_MODE_STORAGE_KEY) === "chat" ? "chat" : "image";
+}
+
 function getStoredImageQuality(): ImageQuality {
   if (typeof window === "undefined") {
     return DEFAULT_IMAGE_QUALITY;
@@ -448,11 +459,37 @@ function isMissingBatchImageDataError(error?: string) {
   return typeof error === "string" && error.startsWith("未返回第 ") && error.endsWith(" 张图片数据");
 }
 
-function getComposerConversationMode(referenceImages: StoredReferenceImage[]): ImageConversationMode {
+function getComposerConversationMode(composerMode: ComposerMode, referenceImages: StoredReferenceImage[]): ImageConversationMode {
+  if (composerMode === "chat") {
+    return "chat";
+  }
   if (referenceImages.length === 0) {
     return "generate";
   }
   return referenceImages.some((image) => image.source === "conversation") ? "edit" : "image";
+}
+
+function chatCompletionContentToText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return "";
+      }
+      const block = item as { text?: unknown };
+      return typeof block.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function chatCompletionResponseText(response: Awaited<ReturnType<typeof createChatCompletion>>) {
+  return chatCompletionContentToText(response.choices?.[0]?.message?.content).trim();
 }
 
 function buildImageTaskMessages(conversation: ImageConversation, activeTurnId: string): ImageTaskMessage[] {
@@ -631,10 +668,10 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 }
 
 
-function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
-  const didLoadQuotaRef = useRef(false);
+function ImagePageContent() {
   const isSubmitDispatchingRef = useRef(false);
   const retryingImageIdsRef = useRef(new Set<string>());
+  const cancelledTurnIdsRef = useRef(new Set<string>());
   const conversationsRef = useRef<ImageConversation[]>([]);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const composerDockRef = useRef<HTMLDivElement>(null);
@@ -643,6 +680,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const editFileInputRef = useRef<HTMLInputElement>(null);
 
   const [imagePrompt, setImagePrompt] = useState("");
+  const [composerMode, setComposerMode] = useState<ComposerMode>(getStoredComposerMode);
   const [imageModel, setImageModel] = useState<ImageModel>(getStoredImageModel);
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("");
@@ -653,7 +691,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
-  const [availableQuota, setAvailableQuota] = useState("加载中...");
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -664,6 +701,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [composerDockHeight, setComposerDockHeight] = useState(0);
 
   const parsedCount = useMemo(() => normalizeRequestedImageCount(imageCount), [imageCount]);
+  const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_TASK_MODEL_OPTIONS;
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
@@ -783,36 +821,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     };
   }, []);
 
-  const loadQuota = useCallback(async () => {
-    if (!isAdmin) {
-      setAvailableQuota("--");
-      return;
-    }
-    try {
-      const data = await fetchAccounts();
-      setAvailableQuota(formatAvailableQuota(data.items));
-    } catch {
-      setAvailableQuota((prev) => (prev === "加载中..." ? "--" : prev));
-    }
-  }, [isAdmin]);
-
-  useEffect(() => {
-    if (didLoadQuotaRef.current) {
-      return;
-    }
-    didLoadQuotaRef.current = true;
-
-    const handleFocus = () => {
-      void loadQuota();
-    };
-
-    void loadQuota();
-    window.addEventListener("focus", handleFocus);
-    return () => {
-      window.removeEventListener("focus", handleFocus);
-    };
-  }, [isAdmin, loadQuota]);
-
   useEffect(() => {
     if (!selectedConversationId) {
       return;
@@ -835,6 +843,33 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
     }
   }, [selectedConversationId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(COMPOSER_MODE_STORAGE_KEY, composerMode);
+  }, [composerMode]);
+
+  useEffect(() => {
+    if (composerMode === "chat") {
+      if (!isChatModel(imageModel)) {
+        setImageModel(DEFAULT_CHAT_MODEL);
+      }
+      if (referenceImages.length > 0) {
+        setReferenceImages([]);
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
+      }
+      return;
+    }
+
+    if (!isImageTaskModel(imageModel)) {
+      setImageModel(DEFAULT_IMAGE_MODEL);
+    }
+  }, [composerMode, imageModel, referenceImages.length]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -940,6 +975,16 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     clearComposerInputs();
   }, [clearComposerInputs]);
 
+  const handleComposerModeChange = useCallback((mode: ComposerMode) => {
+    setComposerMode(mode);
+    if (mode === "chat") {
+      setReferenceImages([]);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  }, []);
+
   const handleCreateDraft = () => {
     setSelectedConversationId(null);
     resetComposer();
@@ -948,6 +993,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   const handleApplyPromptPreset = useCallback((preset: ImagePromptPreset) => {
     setSelectedConversationId(null);
+    setComposerMode("image");
     setImagePrompt(preset.prompt);
     setImageCount(String(preset.count));
     setImageSize(preset.size);
@@ -960,6 +1006,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   const handleApplyMarketPrompt = useCallback(async (prompt: BananaPrompt) => {
     setSelectedConversationId(null);
+    setComposerMode("image");
     setImagePrompt(prompt.prompt);
     setImageCount("1");
     setImageSize("");
@@ -1066,6 +1113,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         })),
       );
 
+      setComposerMode("image");
       setReferenceImages((prev) => [...prev, ...previews]);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -1111,6 +1159,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         }
 
         setSelectedConversationId(conversationId);
+        setComposerMode("image");
         setReferenceImages((prev) => [
           ...prev,
           {
@@ -1154,11 +1203,19 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       conversationId,
       turnId,
       prompt: targetTurn.prompt,
-      model: targetTurn.model,
-      count: String(normalizeRequestedImageCount(targetTurn.count || targetTurn.images.length || 1)),
-      size: targetTurn.size,
+      model:
+        targetTurn.mode === "chat"
+          ? isChatModel(targetTurn.model)
+            ? targetTurn.model
+            : DEFAULT_CHAT_MODEL
+          : isImageTaskModel(targetTurn.model)
+            ? targetTurn.model
+            : DEFAULT_IMAGE_MODEL,
+      mode: targetTurn.mode,
+      count: targetTurn.mode === "chat" ? "1" : String(normalizeRequestedImageCount(targetTurn.count || targetTurn.images.length || 1)),
+      size: targetTurn.mode === "chat" ? "" : targetTurn.size,
       quality: targetTurn.quality || DEFAULT_IMAGE_QUALITY,
-      referenceImages: targetTurn.referenceImages,
+      referenceImages: targetTurn.mode === "chat" ? [] : targetTurn.referenceImages,
     });
   }, []);
 
@@ -1220,9 +1277,13 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       }
 
       activeConversationQueueIds.add(conversationId);
+      const activeTurnKey = imageTurnProgressKey(conversationId, activeTurn.id);
       updateTurnProgress(conversationId, activeTurn.id, {
-        message: "正在准备生成任务",
-        detail: `准备处理 ${activeTurn.images.filter((image) => image.status === "loading").length || activeTurn.count} 张图片`,
+        message: activeTurn.mode === "chat" ? "正在准备对话请求" : "正在准备生成任务",
+        detail:
+          activeTurn.mode === "chat"
+            ? "正在整理上下文"
+            : `准备处理 ${activeTurn.images.filter((image) => image.status === "loading").length || activeTurn.count} 张图片`,
       });
       const applyTasks = async (tasks: ImageTask[]) => {
         const taskMap = new Map(tasks.map((task) => [task.id, task]));
@@ -1276,7 +1337,13 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                     error: undefined,
                     images: turn.images.map((image, imageIndex) =>
                       image.status === "loading"
-                        ? { ...image, taskId: imageTaskIdForImage(turn.id, turn.images, imageIndex) }
+                        ? {
+                            ...image,
+                            taskId:
+                              activeTurn.mode === "chat"
+                                ? undefined
+                                : imageTaskIdForImage(turn.id, turn.images, imageIndex),
+                          }
                         : image,
                     ),
                   }
@@ -1284,6 +1351,54 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             ),
           };
         });
+
+        if (activeTurn.mode === "chat") {
+          updateTurnProgress(conversationId, activeTurn.id, {
+            message: "正在请求对话回复",
+            detail: "请求已提交，等待模型返回文本",
+          });
+          const response = await createChatCompletion(activeTurn.model, buildImageTaskMessages(snapshot, activeTurn.id));
+          if (cancelledTurnIdsRef.current.has(activeTurnKey)) {
+            return;
+          }
+          const text = chatCompletionResponseText(response);
+          if (!text) {
+            throw new Error("模型没有返回文本内容");
+          }
+          await updateConversation(conversationId, (current) => {
+            const conversation = current ?? snapshot;
+            return {
+              ...conversation,
+              updatedAt: new Date().toISOString(),
+              turns: conversation.turns.map((turn) => {
+                if (turn.id !== activeTurn.id) {
+                  return turn;
+                }
+                const images = turn.images.map((image) =>
+                  image.status === "loading"
+                    ? {
+                        ...image,
+                        taskId: undefined,
+                        status: "message" as const,
+                        text_response: text,
+                        error: undefined,
+                      }
+                    : image,
+                );
+                return {
+                  ...turn,
+                  ...deriveTurnStatus({ ...turn, images }),
+                  images,
+                };
+              }),
+            };
+          });
+          updateTurnProgress(conversationId, activeTurn.id, {
+            message: "回复完成",
+            detail: "正在刷新会话",
+          });
+          return;
+        }
 
         updateTurnProgress(conversationId, activeTurn.id, {
           message: usesReferenceImages(activeTurn.mode) ? "正在整理参考图" : "正在准备生成请求",
@@ -1410,11 +1525,11 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
         updateTurnProgress(conversationId, activeTurn.id, {
           message: "生成完成",
-          detail: "正在刷新账号额度",
+          detail: "正在刷新会话",
         });
-        await loadQuota();
+        window.dispatchEvent(new Event(QUOTA_REFRESH_EVENT));
       } catch (error) {
-        const message = formatImageTaskError(error);
+        const message = formatImageTaskError(error, activeTurn.mode === "chat" ? "对话请求失败" : "生成图片失败");
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
           return {
@@ -1437,6 +1552,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         toast.error(message);
       } finally {
         clearTurnProgress(conversationId, activeTurn.id);
+        cancelledTurnIdsRef.current.delete(activeTurnKey);
         activeConversationQueueIds.delete(conversationId);
         for (const conversation of conversationsRef.current) {
           if (
@@ -1452,7 +1568,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         }
       }
     },
-    [clearTurnProgress, loadQuota, updateConversation, updateTurnProgress],
+    [clearTurnProgress, updateConversation, updateTurnProgress],
   );
   useEffect(() => {
     for (const conversation of conversations) {
@@ -1481,6 +1597,38 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         new Set(targetTurn.images.flatMap((image) => (image.status === "loading" && image.taskId ? [image.taskId] : []))),
       );
       if (taskIds.length === 0) {
+        if (targetTurn.mode === "chat") {
+          const turnKey = imageTurnProgressKey(conversationId, turnId);
+          cancelledTurnIdsRef.current.add(turnKey);
+          clearTurnProgress(conversationId, turnId);
+          await updateConversation(conversationId, (current) => {
+            const conversation = current ?? targetConversation;
+            return {
+              ...conversation,
+              updatedAt: new Date().toISOString(),
+              turns: conversation.turns.map((turn) => {
+                if (turn.id !== turnId) {
+                  return turn;
+                }
+                const images = turn.images.map((image) =>
+                  image.status === "loading"
+                    ? {
+                        ...image,
+                        status: "cancelled" as const,
+                        error: "请求已终止",
+                      }
+                    : image,
+                );
+                return {
+                  ...turn,
+                  ...deriveTurnStatus({ ...turn, images }),
+                  images,
+                };
+              }),
+            };
+          });
+          toast.success("已终止对话请求");
+        }
         return;
       }
 
@@ -1531,7 +1679,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         toast.success("已终止生成任务");
       }
     },
-    [updateConversation],
+    [clearTurnProgress, updateConversation],
   );
 
   const handleRetryImage = useCallback(
@@ -1582,7 +1730,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 index === imageIndex
                   ? {
                       ...image,
-                      taskId: retryTaskId,
+                      taskId: turn.mode === "chat" ? undefined : retryTaskId,
                       status: "loading" as const,
                       b64_json: undefined,
                       url: undefined,
@@ -1647,7 +1795,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               return turn;
             }
 
-            const imageCount = normalizeRequestedImageCount(turn.count || turn.images.length || 1);
+            const imageCount = turn.mode === "chat" ? 1 : normalizeRequestedImageCount(turn.count || turn.images.length || 1);
             return {
               ...turn,
               count: imageCount,
@@ -1657,7 +1805,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 const imageId = `${turn.id}-${regenerationId}-${index}`;
                 return {
                   id: imageId,
-                  taskId: imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
+                  taskId: turn.mode === "chat" ? undefined : imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
                   status: "loading" as const,
                 };
               }),
@@ -1694,8 +1842,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         return;
       }
 
-      const imageCount = normalizeRequestedImageCount(draft.count);
-      const mode = getComposerConversationMode(draft.referenceImages);
+      const imageCount = draft.mode === "chat" ? 1 : normalizeRequestedImageCount(draft.count);
+      const mode = draft.mode === "chat" ? "chat" : getComposerConversationMode("image", draft.referenceImages);
       const referenceImages = usesReferenceImages(mode) ? draft.referenceImages : [];
       const now = new Date().toISOString();
       const regenerationId = createId();
@@ -1718,8 +1866,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               mode,
               referenceImages,
               count: imageCount,
-              size: draft.size,
-              quality: draft.quality,
+              size: mode === "chat" ? "" : draft.size,
+              quality: mode === "chat" ? undefined : draft.quality,
             };
             if (!regenerate) {
               return baseTurn;
@@ -1732,7 +1880,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 const imageId = `${turn.id}-${regenerationId}-${index}`;
                 return {
                   id: imageId,
-                  taskId: imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
+                  taskId: mode === "chat" ? undefined : imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
                   status: "loading" as const,
                 };
               }),
@@ -1769,7 +1917,16 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     let draftProgressTarget: { conversationId: string; turnId: string } | null = null;
 
     try {
-      const effectiveImageMode = getComposerConversationMode(referenceImages);
+      const effectiveImageMode = getComposerConversationMode(composerMode, referenceImages);
+      const effectiveModel =
+        effectiveImageMode === "chat"
+          ? isChatModel(imageModel)
+            ? imageModel
+            : DEFAULT_CHAT_MODEL
+          : isImageTaskModel(imageModel)
+            ? imageModel
+            : DEFAULT_IMAGE_MODEL;
+      const requestedCount = effectiveImageMode === "chat" ? 1 : parsedCount;
 
       const targetConversation = selectedConversationId
         ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
@@ -1780,17 +1937,17 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       const draftTurn: ImageTurn = {
         id: turnId,
         prompt,
-        model: imageModel,
+        model: effectiveModel,
         mode: effectiveImageMode,
         referenceImages: usesReferenceImages(effectiveImageMode) ? referenceImages : [],
-        count: parsedCount,
-        size: imageSize,
-        quality: imageQuality,
-        images: Array.from({ length: parsedCount }, (_, index) => {
+        count: requestedCount,
+        size: effectiveImageMode === "chat" ? "" : imageSize,
+        quality: effectiveImageMode === "chat" ? undefined : imageQuality,
+        images: Array.from({ length: requestedCount }, (_, index) => {
           const imageId = `${turnId}-${index}`;
           return {
             id: imageId,
-            taskId: imageTaskBatchId(turnId, index),
+            taskId: effectiveImageMode === "chat" ? undefined : imageTaskBatchId(turnId, index),
             status: "loading" as const,
           };
         }),
@@ -1815,7 +1972,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       draftProgressTarget = { conversationId, turnId };
       updateTurnProgress(conversationId, turnId, {
         message: "正在创建本地记录",
-        detail: "正在保存提示词和生成参数",
+        detail: effectiveImageMode === "chat" ? "正在保存对话内容" : "正在保存提示词和生成参数",
       });
       setSelectedConversationId(conversationId);
       clearComposerInputs();
@@ -1827,7 +1984,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       if (targetStats.running > 0 || targetStats.queued > 1) {
         toast.success("已加入当前对话队列");
       } else if (!targetConversation) {
-        toast.success("已创建新对话并开始处理");
+        toast.success(effectiveImageMode === "chat" ? "已创建新对话并发送" : "已创建新对话并开始处理");
       } else {
         toast.success("已发送到当前对话");
       }
@@ -1891,8 +2048,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           <Dialog open onOpenChange={(open) => (!open ? setEditingTurnDraft(null) : null)}>
             <DialogContent className="flex max-h-[88dvh] w-[min(92vw,640px)] flex-col overflow-hidden rounded-[28px] p-0">
               <DialogHeader className="px-6 pt-6 pb-2">
-                <DialogTitle>编辑生成设置</DialogTitle>
-                <DialogDescription>修改本轮提示词、参考图和生成参数。</DialogDescription>
+                <DialogTitle>{editingTurnDraft.mode === "chat" ? "编辑对话" : "编辑生成设置"}</DialogTitle>
+                <DialogDescription>
+                  {editingTurnDraft.mode === "chat" ? "修改本轮消息和对话模型。" : "修改本轮提示词、参考图和生成参数。"}
+                </DialogDescription>
               </DialogHeader>
               <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
                 <div className="flex flex-col gap-5">
@@ -1909,6 +2068,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                     />
                   </label>
 
+                  {editingTurnDraft.mode !== "chat" ? (
                   <div className="flex flex-col gap-3">
                     <input
                       ref={editFileInputRef}
@@ -1970,8 +2130,10 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                       </div>
                     ) : null}
                   </div>
+                  ) : null}
 
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-[120px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]">
+                  <div className={cn("grid grid-cols-1 gap-3", editingTurnDraft.mode === "chat" ? "sm:grid-cols-1" : "sm:grid-cols-[120px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]")}>
+                    {editingTurnDraft.mode !== "chat" ? (
                     <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
                       张数
                       <Input
@@ -1988,6 +2150,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                         }
                       />
                     </label>
+                    ) : null}
                     <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
                       模型
                       <Select
@@ -2003,7 +2166,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>
-                            {IMAGE_MODEL_OPTIONS.map((option) => (
+                            {(editingTurnDraft.mode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_TASK_MODEL_OPTIONS).map((option) => (
                               <SelectItem key={option.value} value={option.value}>
                                 {option.label}
                               </SelectItem>
@@ -2012,6 +2175,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                         </SelectContent>
                       </Select>
                     </label>
+                    {editingTurnDraft.mode !== "chat" ? (
+                    <>
                     <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
                       比例
                       <Select
@@ -2068,6 +2233,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                         </SelectContent>
                       </Select>
                     </label>
+                    </>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -2078,7 +2245,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 <Button variant="outline" onClick={() => void handleSaveEditingTurn(false)}>
                   保存
                 </Button>
-                <Button onClick={() => void handleSaveEditingTurn(true)}>保存并重新生成</Button>
+                <Button onClick={() => void handleSaveEditingTurn(true)}>
+                  {editingTurnDraft.mode === "chat" ? "保存并重新发送" : "保存并重新生成"}
+                </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -2154,19 +2323,19 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           >
             <div className="pointer-events-auto mx-auto w-full max-w-[900px]">
               <ImageComposer
+                composerMode={composerMode}
                 prompt={imagePrompt}
                 imageCount={imageCount}
                 imageModel={imageModel}
-                imageModelOptions={IMAGE_MODEL_OPTIONS}
+                imageModelOptions={composerModelOptions}
                 imageSize={imageSize}
                 imageQuality={imageQuality}
                 imageQualityOptions={IMAGE_QUALITY_OPTIONS}
                 imageOutputHint={imageOutputHint}
-                availableQuota={availableQuota}
                 referenceImages={referenceImages}
-                promptPresets={IMAGE_PROMPT_PRESETS}
                 textareaRef={textareaRef}
                 fileInputRef={fileInputRef}
+                onComposerModeChange={handleComposerModeChange}
                 onPromptChange={setImagePrompt}
                 onImageCountChange={setImageCount}
                 onImageModelChange={setImageModel}
@@ -2175,7 +2344,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 onSubmit={handleSubmit}
                 onPickReferenceImage={() => fileInputRef.current?.click()}
                 onOpenPromptMarket={() => setIsPromptMarketOpen(true)}
-                onApplyPromptPreset={handleApplyPromptPreset}
                 onReferenceImageChange={handleReferenceImageChange}
                 onRemoveReferenceImage={handleRemoveReferenceImage}
               />
@@ -2233,5 +2401,5 @@ export default function ImagePage() {
     );
   }
 
-  return <ImagePageContent isAdmin={session.role === "admin"} />;
+  return <ImagePageContent />;
 }

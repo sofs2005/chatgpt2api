@@ -2,9 +2,18 @@
 
 import localforage from "localforage";
 
-import { DEFAULT_IMAGE_MODEL, isImageModel, isImageQuality, type ImageModel, type ImageQuality } from "@/lib/api";
+import {
+  DEFAULT_CHAT_MODEL,
+  DEFAULT_IMAGE_MODEL,
+  isChatModel,
+  isImageModel,
+  isImageQuality,
+  isImageTaskModel,
+  type ImageModel,
+  type ImageQuality,
+} from "@/lib/api";
 
-export type ImageConversationMode = "generate" | "image" | "edit";
+export type ImageConversationMode = "chat" | "generate" | "image" | "edit";
 export type StoredReferenceImageSource = "upload" | "conversation";
 
 export type StoredReferenceImage = {
@@ -94,6 +103,9 @@ function normalizeReferenceImage(image: StoredReferenceImage & Record<string, un
 }
 
 function normalizeImageMode(value: unknown, referenceImages: StoredReferenceImage[]): ImageConversationMode {
+  if (value === "chat") {
+    return "chat";
+  }
   if (value === "generate") {
     return "generate";
   }
@@ -144,6 +156,15 @@ function getLegacyReferenceImages(source: Record<string, unknown>): StoredRefere
 function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
   const normalizedImages = Array.isArray(turn.images) ? turn.images.map(normalizeStoredImage) : [];
   const referenceImages = getLegacyReferenceImages(turn);
+  const mode = normalizeImageMode(turn.mode, referenceImages);
+  const model =
+    mode === "chat"
+      ? isChatModel(turn.model)
+        ? turn.model
+        : DEFAULT_CHAT_MODEL
+      : isImageTaskModel(turn.model)
+        ? turn.model
+        : DEFAULT_IMAGE_MODEL;
   const derivedStatus: ImageTurnStatus =
     normalizedImages.some((image) => image.status === "loading")
       ? "generating"
@@ -158,8 +179,8 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
   return {
     id: String(turn.id || `${Date.now()}`),
     prompt: String(turn.prompt || ""),
-    model: isImageModel(turn.model) ? turn.model : DEFAULT_IMAGE_MODEL,
-    mode: normalizeImageMode(turn.mode, referenceImages),
+    model,
+    mode,
     referenceImages,
     count: Math.max(1, Number(turn.count || normalizedImages.length || 1)),
     size: typeof turn.size === "string" ? turn.size : "",
@@ -181,14 +202,19 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
 
 function normalizeConversation(conversation: ImageConversation & Record<string, unknown>): ImageConversation {
   const legacyReferenceImages = getLegacyReferenceImages(conversation);
+  const legacyMode = normalizeImageMode(conversation.mode, legacyReferenceImages);
   const turns = Array.isArray(conversation.turns)
     ? conversation.turns.map((turn) => normalizeTurn(turn as ImageTurn & Record<string, unknown>))
     : [
         normalizeTurn({
           id: String(conversation.id || `${Date.now()}`),
           prompt: String(conversation.prompt || ""),
-          model: isImageModel(conversation.model) ? conversation.model : DEFAULT_IMAGE_MODEL,
-          mode: normalizeImageMode(conversation.mode, legacyReferenceImages),
+          model: isImageModel(conversation.model)
+            ? conversation.model
+            : legacyMode === "chat"
+              ? DEFAULT_CHAT_MODEL
+              : DEFAULT_IMAGE_MODEL,
+          mode: legacyMode,
           referenceImages: legacyReferenceImages,
           count: Number(conversation.count || 1),
           size: typeof conversation.size === "string" ? conversation.size : "",

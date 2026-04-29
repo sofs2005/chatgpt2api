@@ -203,7 +203,7 @@ export function AnnouncementsCard() {
               </div>
               <div>
                 <h2 className="text-lg font-semibold tracking-tight">公告管理</h2>
-                <p className="text-sm text-stone-500">创建多条公告，并分别选择显示在登录页或画图主页。</p>
+                <p className="text-sm text-stone-500">创建多条公告，并分别选择显示在登录页或创作台。</p>
               </div>
             </div>
             <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={openCreateDialog}>
@@ -218,7 +218,7 @@ export function AnnouncementsCard() {
             </div>
           ) : items.length === 0 ? (
             <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
-              暂无公告。添加后可选择在登录页、画图主页或两个位置同时展示。
+              暂无公告。添加后可选择在登录页、创作台或两个位置同时展示。
             </div>
           ) : (
             <div className="flex flex-col gap-3">
@@ -233,7 +233,7 @@ export function AnnouncementsCard() {
                           {item.enabled ? "已启用" : "已停用"}
                         </Badge>
                         {item.show_login ? <Badge variant="warning" className="rounded-md">登录页</Badge> : null}
-                        {item.show_image ? <Badge variant="info" className="rounded-md">画图主页</Badge> : null}
+                        {item.show_image ? <Badge variant="info" className="rounded-md">创作台</Badge> : null}
                       </div>
                       <p className="mt-2 line-clamp-2 whitespace-pre-wrap break-words text-sm leading-6 text-stone-600">
                         {item.content}
@@ -318,7 +318,7 @@ export function AnnouncementsCard() {
               </label>
               <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm text-stone-700">
                 <Checkbox checked={form.show_image} onCheckedChange={(checked) => updateForm({ show_image: Boolean(checked) })} />
-                画图主页显示
+                创作台显示
               </label>
             </div>
           </div>

@@ -7,6 +7,7 @@ import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import webConfig from "@/constants/common-env";
 import { clearStoredAuthSession, getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 import { Button } from "@/components/ui/button";
+import { fetchAccounts, type Account } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   applyColorTheme,
@@ -16,7 +17,7 @@ import {
 } from "@/lib/theme";
 
 const adminNavItems = [
-  { href: "/image", label: "画图" },
+  { href: "/image", label: "创作台" },
   { href: "/accounts", label: "号池管理" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
@@ -24,7 +25,13 @@ const adminNavItems = [
   { href: "/settings", label: "设置" },
 ];
 
-const userNavItems = [{ href: "/image", label: "画图" }];
+const userNavItems = [{ href: "/image", label: "创作台" }];
+const QUOTA_REFRESH_EVENT = "chatgpt2api:quota-refresh";
+
+function formatAvailableQuota(accounts: Account[]) {
+  const availableAccounts = accounts.filter((account) => account.status !== "禁用");
+  return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+}
 
 function ThemeToggleButton({
   theme,
@@ -58,6 +65,7 @@ export function TopNav() {
   const pathname = location.pathname.replace(/\/+$/, "") || "/";
   const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
   const [theme, setTheme] = useState<ColorTheme>(() => getPreferredColorTheme());
+  const [availableQuota, setAvailableQuota] = useState("--");
 
   useEffect(() => {
     applyColorTheme(theme);
@@ -87,6 +95,40 @@ export function TopNav() {
       active = false;
     };
   }, [pathname]);
+
+  useEffect(() => {
+    if (!session || session.role !== "admin") {
+      setAvailableQuota("--");
+      return;
+    }
+
+    let active = true;
+    const loadQuota = async () => {
+      try {
+        const data = await fetchAccounts();
+        if (active) {
+          setAvailableQuota(formatAvailableQuota(data.items));
+        }
+      } catch {
+        if (active) {
+          setAvailableQuota((current) => (current === "加载中..." ? "--" : current));
+        }
+      }
+    };
+    const handleRefresh = () => {
+      void loadQuota();
+    };
+
+    setAvailableQuota("加载中...");
+    void loadQuota();
+    window.addEventListener("focus", handleRefresh);
+    window.addEventListener(QUOTA_REFRESH_EVENT, handleRefresh);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", handleRefresh);
+      window.removeEventListener(QUOTA_REFRESH_EVENT, handleRefresh);
+    };
+  }, [pathname, session]);
 
   const handleLogout = async () => {
     await clearStoredAuthSession();
@@ -166,6 +208,9 @@ export function TopNav() {
           <ThemeToggleButton theme={theme} onToggle={handleThemeToggle} />
           <span className="hidden rounded-full bg-[#f0f0f0] px-2.5 py-1 text-[11px] font-medium text-[#45515e] sm:inline-block dark:bg-secondary dark:text-secondary-foreground">
             {roleLabel}
+          </span>
+          <span className="hidden rounded-full bg-[#f0f0f0] px-2.5 py-1 text-[11px] font-medium text-[#45515e] sm:inline-block dark:bg-secondary dark:text-secondary-foreground">
+            剩余额度 {availableQuota}
           </span>
           <span className="hidden rounded-full bg-[#f0f0f0] px-2.5 py-1 text-[11px] font-medium text-[#45515e] sm:inline-block dark:bg-secondary dark:text-secondary-foreground">
             v{webConfig.appVersion}

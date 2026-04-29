@@ -6,19 +6,44 @@ export const IMAGE_MODEL_OPTIONS = [
   { value: "auto", label: "Auto" },
   { value: "gpt-image-2", label: "gpt-image-2" },
   { value: "codex-gpt-image-2", label: "codex-gpt-image-2" },
+  { value: "gpt-5-mini", label: "gpt-5-mini" },
+  { value: "gpt-5-3-mini", label: "gpt-5-3-mini" },
   { value: "gpt-5", label: "gpt-5" },
   { value: "gpt-5-1", label: "gpt-5-1" },
   { value: "gpt-5-2", label: "gpt-5-2" },
   { value: "gpt-5-3", label: "gpt-5-3" },
-  { value: "gpt-5-3-mini", label: "gpt-5-3-mini" },
-  { value: "gpt-5-mini", label: "gpt-5-mini" },
+  { value: "gpt-5.4", label: "gpt-5.4" },
+  { value: "gpt-5.5", label: "gpt-5.5" },
 ] as const;
 export type ImageModel = (typeof IMAGE_MODEL_OPTIONS)[number]["value"];
 export const DEFAULT_IMAGE_MODEL: ImageModel = "auto";
+export const DEFAULT_CHAT_MODEL: ImageModel = "auto";
 const IMAGE_MODEL_VALUES = new Set<string>(IMAGE_MODEL_OPTIONS.map((option) => option.value));
+const IMAGE_TASK_MODEL_VALUES = new Set<ImageModel>(["auto", "gpt-image-2", "codex-gpt-image-2"]);
+const CHAT_MODEL_VALUES = new Set<ImageModel>([
+  "auto",
+  "gpt-5-mini",
+  "gpt-5-3-mini",
+  "gpt-5",
+  "gpt-5-1",
+  "gpt-5-2",
+  "gpt-5-3",
+  "gpt-5.4",
+  "gpt-5.5",
+]);
+export const IMAGE_TASK_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => IMAGE_TASK_MODEL_VALUES.has(option.value));
+export const CHAT_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => CHAT_MODEL_VALUES.has(option.value));
 
 export function isImageModel(value: unknown): value is ImageModel {
   return typeof value === "string" && IMAGE_MODEL_VALUES.has(value);
+}
+
+export function isImageTaskModel(value: unknown): value is ImageModel {
+  return isImageModel(value) && IMAGE_TASK_MODEL_VALUES.has(value);
+}
+
+export function isChatModel(value: unknown): value is ImageModel {
+  return isImageModel(value) && CHAT_MODEL_VALUES.has(value);
 }
 
 export type ImageQuality = "low" | "medium" | "high";
@@ -131,6 +156,14 @@ export type ImageTask = {
 export type ImageTaskMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+};
+
+export type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
 };
 
 type ImageTaskListResponse = {
@@ -401,6 +434,17 @@ export async function createImageEditTask(
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",
     body: formData,
+  });
+}
+
+export async function createChatCompletion(model: ImageModel, messages: ImageTaskMessage[]) {
+  return httpRequest<ChatCompletionResponse>("/v1/chat/completions", {
+    method: "POST",
+    body: {
+      model,
+      messages,
+      stream: false,
+    },
   });
 }
 

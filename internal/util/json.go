@@ -25,6 +25,8 @@ const (
 	ImageModelGPT52     = "gpt-5-2"
 	ImageModelGPT53     = "gpt-5-3"
 	ImageModelGPT53Mini = "gpt-5-3-mini"
+	ImageModelGPT54     = "gpt-5.4"
+	ImageModelGPT55     = "gpt-5.5"
 	ImageModelGPTMini   = "gpt-5-mini"
 )
 
@@ -33,16 +35,24 @@ var ImageModels = map[string]struct{}{
 	ImageModelCodex: {},
 }
 
-var ImageGenerationModelIDs = []string{
+var ModelIDs = []string{
 	ImageModelGPT,
 	ImageModelCodex,
 	ImageModelAuto,
+	ImageModelGPTMini,
+	ImageModelGPT53Mini,
 	ImageModelGPT5,
 	ImageModelGPT51,
 	ImageModelGPT52,
 	ImageModelGPT53,
-	ImageModelGPT53Mini,
-	ImageModelGPTMini,
+	ImageModelGPT54,
+	ImageModelGPT55,
+}
+
+var ImageGenerationModelIDs = []string{
+	ImageModelGPT,
+	ImageModelCodex,
+	ImageModelAuto,
 }
 
 var ImageGenerationModels = map[string]struct{}{}
@@ -270,6 +280,10 @@ func IsImageModel(model string) bool {
 func IsImageGenerationModel(model string) bool {
 	_, ok := ImageGenerationModels[strings.TrimSpace(model)]
 	return ok
+}
+
+func ModelList() []string {
+	return append([]string(nil), ModelIDs...)
 }
 
 func ImageGenerationModelList() []string {

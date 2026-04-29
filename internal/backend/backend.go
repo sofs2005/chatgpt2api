@@ -712,19 +712,13 @@ func (c *Client) imageHeaders(path string, reqs ChatRequirements, conduitToken, 
 
 func (c *Client) imageModelSlug(model string) string {
 	model = strings.TrimSpace(model)
-	if model == "" || model == util.ImageModelAuto {
-		return util.ImageModelGPT
-	}
-	if model == util.ImageModelGPT {
-		return util.ImageModelGPT
-	}
 	if model == CodexImageModel {
 		return model
 	}
-	if util.IsImageGenerationModel(model) {
+	if model == util.ImageModelGPT {
 		return model
 	}
-	return "auto"
+	return util.ImageModelGPT
 }
 
 func (c *Client) prepareImageConversation(ctx context.Context, prompt string, reqs ChatRequirements, model string) (string, error) {

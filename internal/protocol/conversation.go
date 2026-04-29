@@ -149,7 +149,7 @@ func (e *Engine) ListModels(ctx context.Context) (map[string]any, error) {
 			seen[id] = struct{}{}
 		}
 	}
-	for _, model := range util.ImageGenerationModelList() {
+	for _, model := range util.ModelList() {
 		if _, ok := seen[model]; !ok {
 			data = append(data, map[string]any{"id": model, "object": "model", "created": 0, "owned_by": "chatgpt2api", "permission": []any{}, "root": model, "parent": nil})
 		}

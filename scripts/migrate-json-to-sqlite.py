@@ -20,6 +20,9 @@ class MigrationError(Exception):
 
 
 def parse_args() -> argparse.Namespace:
+    default_data_dir = os.environ.get("DATA_DIR")
+    if default_data_dir is None:
+        default_data_dir = str(Path(__file__).resolve().parent.parent / "data")
     parser = argparse.ArgumentParser(
         description=(
             "Migrate data JSON files and logs.jsonl into the SQLite schema "
@@ -28,8 +31,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-dir",
-        default=os.environ.get("DATA_DIR", "./data"),
-        help="directory containing chatgpt2api data files (default: ./data)",
+        default=default_data_dir,
+        help="directory containing chatgpt2api data files (default: repo-root/data)",
     )
     parser.add_argument(
         "--accounts-json",

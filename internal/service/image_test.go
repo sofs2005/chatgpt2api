@@ -134,6 +134,38 @@ func TestImageServiceEnsureThumbnailCreatesWebPThumbnails(t *testing.T) {
 	}
 }
 
+func TestImageServiceEnsureThumbnailsCreatesCachedThumbnailFromImageURL(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	imagePath := filepath.Join(config.ImagesDir(), "2026", "04", "29", "sample.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeTestPNG(imagePath); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(config)
+	service.EnsureThumbnails([]string{"http://127.0.0.1:8000/images/2026/04/29/sample.png"})
+
+	thumbPath := filepath.Join(config.ImageThumbnailsDir(), "2026", "04", "29", "sample.png.webp")
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("thumbnail was not created: %v", err)
+	}
+	if _, err := os.Stat(thumbPath + ".json"); err != nil {
+		t.Fatalf("thumbnail metadata was not created: %v", err)
+	}
+
+	result := service.ListImages("http://127.0.0.1:8000", "", "", allImages)
+	items := result["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("items = %#v", items)
+	}
+	if items[0]["width"] == nil || items[0]["height"] == nil {
+		t.Fatalf("ListImages() did not read warmed thumbnail metadata: %#v", items[0])
+	}
+}
+
 func TestImageServiceDeleteImagesRemovesOriginalAndThumbnail(t *testing.T) {
 	root := t.TempDir()
 	config := testImageConfig{root: root}

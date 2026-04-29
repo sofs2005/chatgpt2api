@@ -212,6 +212,31 @@ func (s *ImageService) RecordImageOwners(values []string, ownerID string) {
 	}
 }
 
+func (s *ImageService) EnsureThumbnails(values []string) {
+	if len(values) == 0 {
+		return
+	}
+	imageRoot, err := filepath.Abs(s.config.ImagesDir())
+	if err != nil {
+		return
+	}
+	for _, value := range values {
+		rel, err := imageRelativePathFromValue(value)
+		if err != nil {
+			continue
+		}
+		imagePath := filepath.Join(imageRoot, filepath.FromSlash(rel))
+		if !pathInsideRoot(imageRoot, imagePath) {
+			continue
+		}
+		info, err := os.Stat(imagePath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		s.ensureThumbnail(imagePath, rel)
+	}
+}
+
 func (s *ImageService) SourceImageRelativePathFromThumbnail(thumbnailRel string) (string, error) {
 	return sourceImageRelativePathFromThumbnail(thumbnailRel)
 }

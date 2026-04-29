@@ -911,6 +911,7 @@ func (a *App) recordImageOwners(identity service.Identity, urls []string) {
 	if len(urls) == 0 || a.images == nil {
 		return
 	}
+	a.images.EnsureThumbnails(urls)
 	ownerID := identityScope(identity)
 	if ownerID == "" || ownerID == "anonymous" {
 		return

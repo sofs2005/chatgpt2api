@@ -25,21 +25,38 @@ const (
 type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
 
 type ImageTaskService struct {
-	mu              sync.RWMutex
-	path            string
-	generation      ImageTaskHandler
-	edit            ImageTaskHandler
-	retentionGetter func() int
-	concurrentLimit func() int
-	runningImages   int
-	tasks           map[string]map[string]any
-	cancels         map[string]context.CancelFunc
+	mu                  sync.RWMutex
+	path                string
+	generation          ImageTaskHandler
+	edit                ImageTaskHandler
+	retentionGetter     func() int
+	concurrentLimit     func() int
+	userConcurrentLimit func() int
+	userRPMLimit        func() int
+	runningImages       int
+	tasks               map[string]map[string]any
+	cancels             map[string]context.CancelFunc
+	ownerSubmitTimes    map[string][]time.Time
 }
 
-func NewImageTaskService(path string, generation ImageTaskHandler, edit ImageTaskHandler, retentionGetter func() int, concurrentLimit ...func() int) *ImageTaskService {
-	s := &ImageTaskService{path: path, generation: generation, edit: edit, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}}
-	if len(concurrentLimit) > 0 {
-		s.concurrentLimit = concurrentLimit[0]
+type ImageTaskLimitError struct {
+	Message string
+}
+
+func (e ImageTaskLimitError) Error() string {
+	return e.Message
+}
+
+func NewImageTaskService(path string, generation ImageTaskHandler, edit ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
+	s := &ImageTaskService{path: path, generation: generation, edit: edit, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}, ownerSubmitTimes: map[string][]time.Time{}}
+	if len(limitGetters) > 0 {
+		s.concurrentLimit = limitGetters[0]
+	}
+	if len(limitGetters) > 1 {
+		s.userConcurrentLimit = limitGetters[1]
+	}
+	if len(limitGetters) > 2 {
+		s.userRPMLimit = limitGetters[2]
 	}
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 	s.mu.Lock()
@@ -162,8 +179,16 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 		s.mu.Unlock()
 		return result, nil
 	}
+	count := imageTaskCount(payload)
+	if err := s.checkUserImageLimitsLocked(identity, owner, count, time.Now()); err != nil {
+		if cleaned {
+			_ = s.saveLocked()
+		}
+		s.mu.Unlock()
+		return nil, err
+	}
 	taskCtx, cancel := context.WithCancel(context.Background())
-	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "created_at": now, "updated_at": now}
+	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "count": count, "created_at": now, "updated_at": now}
 	s.tasks[key] = task
 	s.cancels[key] = cancel
 	_ = s.saveLocked()
@@ -266,6 +291,67 @@ func (s *ImageTaskService) imageConcurrentLimit() int {
 	return limit
 }
 
+func (s *ImageTaskService) checkUserImageLimitsLocked(identity Identity, owner string, requested int, now time.Time) error {
+	if identity.Role != AuthRoleUser {
+		return nil
+	}
+	if requested < 1 {
+		requested = 1
+	}
+	if limit := s.userImageConcurrentLimit(); limit > 0 && s.activeOwnerImageCountLocked(owner)+requested > limit {
+		return ImageTaskLimitError{Message: fmt.Sprintf("用户并发限制已达到（最多 %d 张处理中）", limit)}
+	}
+	if limit := s.userImageRPMLimit(); limit > 0 {
+		cutoff := now.Add(-time.Minute)
+		times := s.ownerSubmitTimes[owner]
+		kept := times[:0]
+		for _, item := range times {
+			if item.After(cutoff) {
+				kept = append(kept, item)
+			}
+		}
+		if len(kept) >= limit {
+			s.ownerSubmitTimes[owner] = kept
+			return ImageTaskLimitError{Message: fmt.Sprintf("用户 RPM 速率限制已达到（每分钟最多 %d 次）", limit)}
+		}
+		s.ownerSubmitTimes[owner] = append(kept, now)
+	}
+	return nil
+}
+
+func (s *ImageTaskService) activeOwnerImageCountLocked(owner string) int {
+	count := 0
+	for _, task := range s.tasks {
+		if task["owner_id"] != owner || !isActiveTaskStatus(util.Clean(task["status"])) {
+			continue
+		}
+		count += normalizedImageTaskCount(util.ToInt(task["count"], 1))
+	}
+	return count
+}
+
+func (s *ImageTaskService) userImageConcurrentLimit() int {
+	if s.userConcurrentLimit == nil {
+		return 0
+	}
+	limit := s.userConcurrentLimit()
+	if limit < 1 {
+		return 0
+	}
+	return limit
+}
+
+func (s *ImageTaskService) userImageRPMLimit() int {
+	if s.userRPMLimit == nil {
+		return 0
+	}
+	limit := s.userRPMLimit()
+	if limit < 1 {
+		return 0
+	}
+	return limit
+}
+
 func (s *ImageTaskService) updateActiveTask(key string, updates map[string]any) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -321,7 +407,8 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 		if task["mode"] == "edit" {
 			mode = "edit"
 		}
-		normalized := map[string]any{"id": id, "owner_id": owner, "status": status, "mode": mode, "model": firstNonEmpty(util.Clean(task["model"]), util.ImageModelAuto), "size": util.Clean(task["size"]), "quality": util.Clean(task["quality"]), "created_at": firstNonEmpty(util.Clean(task["created_at"]), util.NowLocal()), "updated_at": firstNonEmpty(util.Clean(task["updated_at"]), util.Clean(task["created_at"]), util.NowLocal())}
+		count := normalizedImageTaskCount(util.ToInt(task["count"], 1))
+		normalized := map[string]any{"id": id, "owner_id": owner, "status": status, "mode": mode, "model": firstNonEmpty(util.Clean(task["model"]), util.ImageModelAuto), "size": util.Clean(task["size"]), "quality": util.Clean(task["quality"]), "count": count, "created_at": firstNonEmpty(util.Clean(task["created_at"]), util.NowLocal()), "updated_at": firstNonEmpty(util.Clean(task["updated_at"]), util.Clean(task["created_at"]), util.NowLocal())}
 		if data := util.AsMapSlice(task["data"]); data != nil {
 			normalized["data"] = data
 		}

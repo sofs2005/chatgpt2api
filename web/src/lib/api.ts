@@ -107,6 +107,8 @@ export type SettingsConfig = {
   base_url?: string;
   refresh_account_interval_minute?: number | string;
   image_concurrent_limit?: number | string;
+  user_default_concurrent_limit?: number | string;
+  user_default_rpm_limit?: number | string;
   image_retention_days?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;

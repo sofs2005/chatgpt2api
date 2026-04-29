@@ -1,12 +1,19 @@
 "use client";
 
-import { LoaderCircle, PlugZap, Save, Settings2 } from "lucide-react";
+import type { ReactNode } from "react";
+import {
+  CircleHelp,
+  LoaderCircle,
+  PlugZap,
+  Save,
+  Settings2,
+} from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -15,7 +22,60 @@ import { useSettingsStore } from "../store";
 import { SettingsCard, settingsInputClassName } from "./settings-ui";
 
 const LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"];
-const configSectionClassName = "flex flex-col gap-4";
+const configSectionClassName = "flex flex-col gap-3";
+const configFieldClassName = "min-w-0 gap-1.5";
+
+function ConfigTip({ content }: { content: string }) {
+  return (
+    <span
+      aria-label={content}
+      title={content}
+      className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+    >
+      <CircleHelp className="size-4" />
+    </span>
+  );
+}
+
+function SectionHeading({
+  action,
+  tip,
+  title,
+}: {
+  action?: ReactNode;
+  tip: string;
+  title: string;
+}) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <h3 className="truncate text-sm leading-6 font-semibold text-foreground">
+          {title}
+        </h3>
+        <ConfigTip content={tip} />
+      </div>
+      {action ? (
+        <div className="flex w-full shrink-0 sm:w-auto sm:justify-end">
+          {action}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ConfigFieldLabel({
+  children,
+  htmlFor,
+}: {
+  children: ReactNode;
+  htmlFor: string;
+}) {
+  return (
+    <FieldLabel htmlFor={htmlFor} className="leading-6">
+      {children}
+    </FieldLabel>
+  );
+}
 
 function ConfigOption({
   checked,
@@ -27,7 +87,7 @@ function ConfigOption({
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-11 min-w-0 items-center gap-3 rounded-[13px] border border-[#f2f3f5] bg-background/70 px-3 py-2.5 text-sm font-medium text-foreground">
+    <label className="flex min-h-10 min-w-0 items-center gap-2.5 rounded-[12px] border border-border/70 bg-background/75 px-3 py-2 text-sm font-medium text-foreground">
       <Checkbox
         checked={checked}
         onCheckedChange={(value) => onCheckedChange(Boolean(value))}
@@ -49,6 +109,12 @@ export function ConfigCard() {
   );
   const setImageConcurrentLimit = useSettingsStore(
     (state) => state.setImageConcurrentLimit,
+  );
+  const setUserDefaultConcurrentLimit = useSettingsStore(
+    (state) => state.setUserDefaultConcurrentLimit,
+  );
+  const setUserDefaultRpmLimit = useSettingsStore(
+    (state) => state.setUserDefaultRpmLimit,
   );
   const setImageRetentionDays = useSettingsStore(
     (state) => state.setImageRetentionDays,
@@ -123,21 +189,17 @@ export function ConfigCard() {
         </Button>
       }
     >
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-5">
         <section className={configSectionClassName}>
-          <div className="mb-4">
-            <h3 className="text-sm font-semibold text-foreground">
-              基础参数
-            </h3>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              控制账号刷新节奏、图片访问和本地图片任务。
-            </p>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field className="min-w-0">
-              <FieldLabel htmlFor="settings-refresh-interval">
+          <SectionHeading
+            title="基础参数"
+            tip="账号刷新间隔单位分钟；图片访问地址是图片结果访问前缀；同时生成张数控制后台生成槽位；图片自动清理会删除指定天数前的本地图片。"
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-refresh-interval">
                 账号刷新间隔
-              </FieldLabel>
+              </ConfigFieldLabel>
               <Input
                 id="settings-refresh-interval"
                 value={String(config?.refresh_account_interval_minute || "")}
@@ -147,12 +209,11 @@ export function ConfigCard() {
                 placeholder="分钟"
                 className={settingsInputClassName}
               />
-              <FieldDescription>单位分钟。</FieldDescription>
             </Field>
-            <Field className="min-w-0">
-              <FieldLabel htmlFor="settings-base-url">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-base-url">
                 图片访问地址
-              </FieldLabel>
+              </ConfigFieldLabel>
               <Input
                 id="settings-base-url"
                 value={String(config?.base_url || "")}
@@ -160,12 +221,11 @@ export function ConfigCard() {
                 placeholder="https://example.com"
                 className={settingsInputClassName}
               />
-              <FieldDescription>图片结果访问前缀。</FieldDescription>
             </Field>
-            <Field className="min-w-0">
-              <FieldLabel htmlFor="settings-image-concurrent-limit">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-concurrent-limit">
                 同时生成张数
-              </FieldLabel>
+              </ConfigFieldLabel>
               <Input
                 id="settings-image-concurrent-limit"
                 value={String(config?.image_concurrent_limit || "")}
@@ -175,12 +235,11 @@ export function ConfigCard() {
                 placeholder="4"
                 className={settingsInputClassName}
               />
-              <FieldDescription>后台生成槽位数量。</FieldDescription>
             </Field>
-            <Field className="min-w-0">
-              <FieldLabel htmlFor="settings-image-retention-days">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-retention-days">
                 图片自动清理
-              </FieldLabel>
+              </ConfigFieldLabel>
               <Input
                 id="settings-image-retention-days"
                 value={String(config?.image_retention_days || "")}
@@ -188,42 +247,76 @@ export function ConfigCard() {
                 placeholder="30"
                 className={settingsInputClassName}
               />
-              <FieldDescription>删除多少天前的本地图片。</FieldDescription>
             </Field>
           </div>
         </section>
 
         <section className={configSectionClassName}>
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-foreground">
-                出站代理
-              </h3>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                留空表示不使用代理。
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="w-full sm:w-auto"
-              onClick={() => void handleTestProxy()}
-              disabled={isTestingProxy}
-            >
-              {isTestingProxy ? (
-                <LoaderCircle
-                  data-icon="inline-start"
-                  className="animate-spin"
-                />
-              ) : (
-                <PlugZap data-icon="inline-start" />
-              )}
-              测试代理
-            </Button>
+          <SectionHeading
+            title="用户默认限制"
+            tip="限制普通用户创建图片任务的默认并发和速率，管理员不受影响；0 表示不限制。"
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-user-default-concurrent-limit">
+                用户默认并发
+              </ConfigFieldLabel>
+              <Input
+                id="settings-user-default-concurrent-limit"
+                value={String(config?.user_default_concurrent_limit ?? "")}
+                onChange={(event) =>
+                  setUserDefaultConcurrentLimit(event.target.value)
+                }
+                placeholder="0"
+                className={settingsInputClassName}
+              />
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-user-default-rpm-limit">
+                用户默认 RPM
+              </ConfigFieldLabel>
+              <Input
+                id="settings-user-default-rpm-limit"
+                value={String(config?.user_default_rpm_limit ?? "")}
+                onChange={(event) =>
+                  setUserDefaultRpmLimit(event.target.value)
+                }
+                placeholder="0"
+                className={settingsInputClassName}
+              />
+            </Field>
           </div>
-          <Field>
-            <FieldLabel htmlFor="settings-proxy">全局代理</FieldLabel>
+        </section>
+
+        <section className={configSectionClassName}>
+          <SectionHeading
+            title="出站代理"
+            tip="留空表示不使用代理。"
+            action={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full sm:w-auto"
+                onClick={() => void handleTestProxy()}
+                disabled={isTestingProxy}
+              >
+                {isTestingProxy ? (
+                  <LoaderCircle
+                    data-icon="inline-start"
+                    className="animate-spin"
+                  />
+                ) : (
+                  <PlugZap data-icon="inline-start" />
+                )}
+                测试代理
+              </Button>
+            }
+          />
+          <Field className="gap-1.5">
+            <ConfigFieldLabel htmlFor="settings-proxy">
+              全局代理
+            </ConfigFieldLabel>
             <Input
               id="settings-proxy"
               value={String(config?.proxy || "")}
@@ -252,14 +345,10 @@ export function ConfigCard() {
         </section>
 
         <section className={configSectionClassName}>
-          <div className="mb-4">
-            <h3 className="text-sm font-semibold text-foreground">
-              自动维护
-            </h3>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              账号异常或限流时自动从号池移除。
-            </p>
-          </div>
+          <SectionHeading
+            title="自动维护"
+            tip="账号异常或限流时自动从号池移除。"
+          />
           <div className="grid gap-2 sm:grid-cols-2">
             <ConfigOption
               checked={Boolean(config?.auto_remove_invalid_accounts)}
@@ -275,14 +364,10 @@ export function ConfigCard() {
         </section>
 
         <section className={configSectionClassName}>
-          <div className="mb-4">
-            <h3 className="text-sm font-semibold text-foreground">
-              控制台日志级别
-            </h3>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              不选择时使用默认 info / warning / error。
-            </p>
-          </div>
+          <SectionHeading
+            title="控制台日志级别"
+            tip="不选择时使用默认 info / warning / error。"
+          />
           <div className="grid grid-cols-2 gap-2">
             {LOG_LEVEL_OPTIONS.map((level) => (
               <ConfigOption

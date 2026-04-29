@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -601,7 +602,7 @@ func (a *App) handleImageTasks(w http.ResponseWriter, r *http.Request) {
 		body, _ := readJSONMap(r)
 		task, err := a.tasks.SubmitGeneration(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), util.ToInt(body["n"], 1), body["messages"])
 		if err != nil {
-			util.WriteError(w, http.StatusBadRequest, err.Error())
+			writeImageTaskSubmitError(w, err)
 			return
 		}
 		util.WriteJSON(w, http.StatusOK, task)
@@ -615,13 +616,22 @@ func (a *App) handleImageTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		task, err := a.tasks.SubmitEdit(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), images, util.ToInt(body["n"], 1), body["messages"])
 		if err != nil {
-			util.WriteError(w, http.StatusBadRequest, err.Error())
+			writeImageTaskSubmitError(w, err)
 			return
 		}
 		util.WriteJSON(w, http.StatusOK, task)
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func writeImageTaskSubmitError(w http.ResponseWriter, err error) {
+	var limitErr service.ImageTaskLimitError
+	if errors.As(err, &limitErr) {
+		util.WriteError(w, http.StatusTooManyRequests, limitErr.Error())
+		return
+	}
+	util.WriteError(w, http.StatusBadRequest, err.Error())
 }
 
 func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {

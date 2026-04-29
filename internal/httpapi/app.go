@@ -75,6 +75,8 @@ func NewApp() (*App, error) {
 		},
 		cfg.ImageRetentionDays,
 		cfg.ImageConcurrentLimit,
+		cfg.UserDefaultConcurrentLimit,
+		cfg.UserDefaultRPMLimit,
 	)
 	accounts.StartLimitedWatcher(ctx, time.Duration(cfg.RefreshAccountIntervalMinute())*time.Minute)
 	cfg.CleanupOldImages()

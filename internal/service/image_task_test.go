@@ -219,6 +219,72 @@ func TestImageTaskServiceLimitsConcurrentImageSlots(t *testing.T) {
 	waitForTaskStatus(t, svc, identity, "task-2", TaskStatusSuccess)
 }
 
+func TestImageTaskServiceLimitsUserDefaultConcurrentImages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		started <- payload["prompt"].(string)
+		<-release
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
+	}
+	svc := NewImageTaskService(path, handler, handler, func() int { return 30 }, func() int { return 8 }, func() int { return 2 }, nil)
+	alice := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+	bob := Identity{ID: "bob", Name: "Bob", Role: AuthRoleUser}
+
+	if _, err := svc.SubmitGeneration(context.Background(), alice, "task-1", "first", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
+		t.Fatalf("SubmitGeneration(first) error = %v", err)
+	}
+	if got := waitForStartedTask(t, started); got != "first" {
+		t.Fatalf("started task = %q, want first", got)
+	}
+	if _, err := svc.SubmitGeneration(context.Background(), alice, "task-2", "second", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err == nil {
+		t.Fatal("SubmitGeneration(second) error = nil, want user limit")
+	} else {
+		var limitErr ImageTaskLimitError
+		if !errors.As(err, &limitErr) {
+			t.Fatalf("SubmitGeneration(second) error = %T %v, want ImageTaskLimitError", err, err)
+		}
+	}
+	if _, err := svc.SubmitGeneration(context.Background(), bob, "task-1", "bob", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration(bob) should use an independent limit: %v", err)
+	}
+	close(release)
+	waitForTaskStatus(t, svc, alice, "task-1", TaskStatusSuccess)
+	waitForTaskStatus(t, svc, bob, "task-1", TaskStatusSuccess)
+}
+
+func TestImageTaskServiceLimitsUserDefaultRPM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
+	}
+	svc := NewImageTaskService(path, handler, handler, func() int { return 30 }, func() int { return 8 }, nil, func() int { return 1 })
+	user := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+	admin := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
+
+	if _, err := svc.SubmitGeneration(context.Background(), user, "task-1", "first", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration(first) error = %v", err)
+	}
+	waitForTaskStatus(t, svc, user, "task-1", TaskStatusSuccess)
+	if _, err := svc.SubmitGeneration(context.Background(), user, "task-2", "second", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err == nil {
+		t.Fatal("SubmitGeneration(second) error = nil, want RPM limit")
+	} else {
+		var limitErr ImageTaskLimitError
+		if !errors.As(err, &limitErr) {
+			t.Fatalf("SubmitGeneration(second) error = %T %v, want ImageTaskLimitError", err, err)
+		}
+	}
+	if _, err := svc.SubmitGeneration(context.Background(), admin, "task-1", "admin first", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("admin should bypass user RPM limit: %v", err)
+	}
+	if _, err := svc.SubmitGeneration(context.Background(), admin, "task-2", "admin second", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("admin should bypass user RPM limit on second request: %v", err)
+	}
+	waitForTaskStatus(t, svc, admin, "task-1", TaskStatusSuccess)
+	waitForTaskStatus(t, svc, admin, "task-2", TaskStatusSuccess)
+}
+
 func TestImageTaskServiceCancelsQueuedTask(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	started := make(chan string, 2)

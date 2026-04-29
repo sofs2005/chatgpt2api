@@ -15,6 +15,8 @@ func TestStoreUpdatePersistsSettingsWithoutAuthKey(t *testing.T) {
 	unsetEnv(t, "CHATGPT2API_PROXY")
 	unsetEnv(t, "CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE")
 	unsetEnv(t, "CHATGPT2API_IMAGE_CONCURRENT_LIMIT")
+	unsetEnv(t, "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT")
+	unsetEnv(t, "CHATGPT2API_USER_DEFAULT_RPM_LIMIT")
 	unsetEnv(t, "CHATGPT2API_IMAGE_RETENTION_DAYS")
 	unsetEnv(t, "CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS")
 	unsetEnv(t, "CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS")
@@ -32,6 +34,8 @@ func TestStoreUpdatePersistsSettingsWithoutAuthKey(t *testing.T) {
 		"proxy":                           "http://127.0.0.1:8080",
 		"refresh_account_interval_minute": 7,
 		"image_concurrent_limit":          3,
+		"user_default_concurrent_limit":   2,
+		"user_default_rpm_limit":          30,
 		"image_retention_days":            14,
 		"log_levels":                      []any{"debug", "error"},
 	})
@@ -58,6 +62,8 @@ func TestStoreUpdatePersistsSettingsWithoutAuthKey(t *testing.T) {
 		"CHATGPT2API_PROXY=http://127.0.0.1:8080",
 		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE=7",
 		"CHATGPT2API_IMAGE_CONCURRENT_LIMIT=3",
+		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT=2",
+		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT=30",
 		"CHATGPT2API_IMAGE_RETENTION_DAYS=14",
 		"CHATGPT2API_LOG_LEVELS=debug,error",
 	} {
@@ -168,6 +174,8 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_PROXY=http://127.0.0.1:8080",
 		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE=5",
 		"CHATGPT2API_IMAGE_CONCURRENT_LIMIT=4",
+		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT=2",
+		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT=30",
 		"CHATGPT2API_IMAGE_RETENTION_DAYS=30",
 		"CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS=true",
 		"CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS=false",
@@ -183,6 +191,8 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	t.Setenv("CHATGPT2API_PROXY", "http://127.0.0.1:8080")
 	t.Setenv("CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE", "5")
 	t.Setenv("CHATGPT2API_IMAGE_CONCURRENT_LIMIT", "4")
+	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
+	t.Setenv("CHATGPT2API_USER_DEFAULT_RPM_LIMIT", "30")
 	t.Setenv("CHATGPT2API_IMAGE_RETENTION_DAYS", "30")
 	t.Setenv("CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS", "true")
 	t.Setenv("CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS", "false")
@@ -197,6 +207,8 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"proxy":                             "http://127.0.0.1:9090",
 		"refresh_account_interval_minute":   9,
 		"image_concurrent_limit":            6,
+		"user_default_concurrent_limit":     3,
+		"user_default_rpm_limit":            45,
 		"image_retention_days":              12,
 		"auto_remove_invalid_accounts":      false,
 		"auto_remove_rate_limited_accounts": true,
@@ -210,6 +222,8 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	assertConfigValue(t, got, "proxy", "http://127.0.0.1:9090")
 	assertConfigValue(t, got, "refresh_account_interval_minute", 9)
 	assertConfigValue(t, got, "image_concurrent_limit", 6)
+	assertConfigValue(t, got, "user_default_concurrent_limit", 3)
+	assertConfigValue(t, got, "user_default_rpm_limit", 45)
 	assertConfigValue(t, got, "image_retention_days", 12)
 	assertConfigValue(t, got, "auto_remove_invalid_accounts", false)
 	assertConfigValue(t, got, "auto_remove_rate_limited_accounts", true)
@@ -222,6 +236,8 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_PROXY":                             "http://127.0.0.1:9090",
 		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE":   "9",
 		"CHATGPT2API_IMAGE_CONCURRENT_LIMIT":            "6",
+		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT":     "3",
+		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT":            "45",
 		"CHATGPT2API_IMAGE_RETENTION_DAYS":              "12",
 		"CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS":      "false",
 		"CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS": "true",

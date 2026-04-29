@@ -23,6 +23,8 @@ var settingEnvKeys = map[string]string{
 	"proxy":                             "CHATGPT2API_PROXY",
 	"refresh_account_interval_minute":   "CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE",
 	"image_concurrent_limit":            "CHATGPT2API_IMAGE_CONCURRENT_LIMIT",
+	"user_default_concurrent_limit":     "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT",
+	"user_default_rpm_limit":            "CHATGPT2API_USER_DEFAULT_RPM_LIMIT",
 	"image_retention_days":              "CHATGPT2API_IMAGE_RETENTION_DAYS",
 	"auto_remove_invalid_accounts":      "CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS",
 	"auto_remove_rate_limited_accounts": "CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS",
@@ -173,6 +175,22 @@ func (s *Store) ImageConcurrentLimit() int {
 	return value
 }
 
+func (s *Store) UserDefaultConcurrentLimit() int {
+	value := intSetting(s.settingValue("user_default_concurrent_limit", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) UserDefaultRPMLimit() int {
+	value := intSetting(s.settingValue("user_default_rpm_limit", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
 func (s *Store) AutoRemoveInvalidAccounts() bool {
 	return util.ToBool(s.settingValue("auto_remove_invalid_accounts", false))
 }
@@ -285,6 +303,8 @@ func (s *Store) Get() map[string]any {
 	s.mu.RUnlock()
 	data["refresh_account_interval_minute"] = s.RefreshAccountIntervalMinute()
 	data["image_concurrent_limit"] = s.ImageConcurrentLimit()
+	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
+	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
 	data["image_retention_days"] = s.ImageRetentionDays()
 	data["auto_remove_invalid_accounts"] = s.AutoRemoveInvalidAccounts()
 	data["auto_remove_rate_limited_accounts"] = s.AutoRemoveRateLimitedAccounts()

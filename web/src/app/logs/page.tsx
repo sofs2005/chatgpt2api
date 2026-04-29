@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -94,36 +95,36 @@ function LogsContent() {
   }, [loadLogs]);
 
   return (
-    <section className="space-y-5">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Logs</div>
-          <h1 className="text-2xl font-semibold tracking-tight">日志管理</h1>
-        </div>
-        <div className="flex flex-wrap gap-2">
+    <section className="flex flex-col gap-5">
+      <PageHeader
+        eyebrow="Logs"
+        title="日志管理"
+        actions={
+          <>
           <Select value={type} onValueChange={setType}>
-            <SelectTrigger className="h-10 w-[150px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-10 w-[150px]"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={LogType.Call}>调用日志</SelectItem>
               <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
             </SelectContent>
           </Select>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
-          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
+          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-lg">
             清除筛选条件
           </Button>
-          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
+          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-lg">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
-      <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card className="overflow-hidden">
         <CardContent className="p-0">
-          <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4 text-sm text-stone-600">
+          <div className="flex items-center justify-between border-b border-border px-5 py-4 text-sm text-muted-foreground">
             <span>共 {items.length} 条</span>
-            <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadLogs()} disabled={isLoading}>
+            <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => void loadLogs()} disabled={isLoading}>
               <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
               刷新
             </Button>
@@ -143,7 +144,7 @@ function LogsContent() {
               </TableHeader>
               <TableBody>
                 {currentRows.map((item, index) => (
-                  <TableRow key={`${item.time}-${index}`} className="text-stone-600">
+                  <TableRow key={`${item.time}-${index}`} className="text-muted-foreground">
                     <TableCell className="whitespace-nowrap">{item.time}</TableCell>
                     <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                     {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
@@ -155,9 +156,9 @@ function LogsContent() {
                         </Badge>
                       </TableCell>
                     ) : null}
-                    <TableCell className="max-w-[420px] truncate text-stone-500">{item.summary || "-"}</TableCell>
+                    <TableCell className="max-w-[420px] truncate text-muted-foreground">{item.summary || "-"}</TableCell>
                     <TableCell>
-                      <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
+                      <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => openDetail(item)}>
                         查看详情
                       </Button>
                     </TableCell>
@@ -166,12 +167,12 @@ function LogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
+          <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3 text-sm text-muted-foreground">
             <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
               <ChevronRight className="size-4" />
             </Button>
           </div>

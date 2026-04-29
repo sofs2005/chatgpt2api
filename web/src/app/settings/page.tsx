@@ -52,7 +52,7 @@ function SettingsPageContent() {
     <>
       <SettingsDataController />
       <SettingsHeader />
-      <section className="space-y-6">
+      <section className="flex flex-col gap-4">
         <ConfigCard />
         <AnnouncementsCard />
         <UserKeysCard />

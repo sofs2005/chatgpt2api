@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -40,6 +41,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   deleteAccounts,
   fetchAccounts,
@@ -364,18 +366,14 @@ function AccountsPageContent() {
 
   return (
     <>
-      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-            Account Pool
-          </div>
-          <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
+      <PageHeader
+        eyebrow="Account Pool"
+        title="号池管理"
+        actions={
+          <>
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            className="h-10 rounded-lg"
             onClick={() => void loadAccounts()}
             disabled={isLoading || isRefreshing || isDeleting}
           >
@@ -384,7 +382,7 @@ function AccountsPageContent() {
           </Button>
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            className="h-10 rounded-lg"
             onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
             disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
           >
@@ -401,15 +399,16 @@ function AccountsPageContent() {
           />
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            className="h-10 rounded-lg"
             onClick={() => downloadTokens(accounts)}
             disabled={accounts.length === 0}
           >
             <Download className="size-4" />
             导出全部 Token
           </Button>
-        </div>
-      </section>
+          </>
+        }
+      />
 
       <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
@@ -484,13 +483,13 @@ function AccountsPageContent() {
         </DialogContent>
       </Dialog>
 
-      <section className="space-y-3">
+      <section className="flex flex-col gap-3">
         <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
           {metricCards.map((item) => {
             const Icon = item.icon;
             const value = summary[item.key];
             return (
-              <Card key={item.key} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <Card key={item.key}>
                 <CardContent className="p-4">
                   <div className="mb-4 flex items-start justify-between">
                     <span className="text-xs font-medium text-stone-400">{item.label}</span>
@@ -508,7 +507,7 @@ function AccountsPageContent() {
         </div>
       </section>
 
-      <section className="space-y-4">
+      <section className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
@@ -527,7 +526,7 @@ function AccountsPageContent() {
                   setPage(1);
                 }}
                 placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                className="h-10 pl-10"
               />
             </div>
             <Select
@@ -537,7 +536,7 @@ function AccountsPageContent() {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full lg:w-[150px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -555,7 +554,7 @@ function AccountsPageContent() {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full lg:w-[150px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -570,7 +569,7 @@ function AccountsPageContent() {
         </div>
 
         {isLoading && accounts.length === 0 ? (
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <Card>
             <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
               <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
                 <LoaderCircle className="size-5 animate-spin" />
@@ -585,7 +584,7 @@ function AccountsPageContent() {
 
         <Card
           className={cn(
-            "overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
+            "overflow-hidden",
             isLoading && accounts.length === 0 ? "hidden" : "",
           )}
         >
@@ -628,37 +627,34 @@ function AccountsPageContent() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
-                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
-                  <tr>
-                    <th className="w-12 px-4 py-3">
+              <Table className="min-w-[920px]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12">
                       <Checkbox
                         checked={allCurrentSelected}
                         onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))}
                       />
-                    </th>
-                    <th className="w-56 px-4 py-3">token</th>
-                    <th className="w-28 px-4 py-3">类型</th>
-                    <th className="w-24 px-4 py-3">状态</th>
-                    <th className="w-56 px-4 py-3">账号信息</th>
-                    <th className="w-24 px-4 py-3">额度</th>
-                    <th className="w-40 px-4 py-3">恢复时间</th>
-                    <th className="w-18 px-4 py-3">成功</th>
-                    <th className="w-18 px-4 py-3">失败</th>
-                    <th className="w-24 px-4 py-3">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
+                    </TableHead>
+                    <TableHead className="w-56">token</TableHead>
+                    <TableHead className="w-28">类型</TableHead>
+                    <TableHead className="w-24">状态</TableHead>
+                    <TableHead className="w-56">账号信息</TableHead>
+                    <TableHead className="w-24">额度</TableHead>
+                    <TableHead className="w-40">恢复时间</TableHead>
+                    <TableHead className="w-18">成功</TableHead>
+                    <TableHead className="w-18">失败</TableHead>
+                    <TableHead className="w-24">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {currentRows.map((account) => {
                     const status = statusMeta[account.status];
                     const StatusIcon = status.icon;
 
                     return (
-                      <tr
-                        key={account.id}
-                        className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
-                      >
-                        <td className="px-4 py-3">
+                      <TableRow key={account.id} className="text-sm text-muted-foreground">
+                        <TableCell>
                           <Checkbox
                             checked={selectedIds.includes(account.id)}
                             onCheckedChange={(checked) => {
@@ -669,15 +665,15 @@ function AccountsPageContent() {
                               );
                             }}
                           />
-                        </td>
-                        <td className="px-4 py-3">
+                        </TableCell>
+                        <TableCell>
                           <div className="flex items-center gap-2">
-                            <span className="font-medium tracking-tight text-stone-700">
+                            <span className="font-medium tracking-tight text-foreground">
                               {maskToken(account.access_token)}
                             </span>
                             <button
                               type="button"
-                              className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                              className="rounded-md p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
                               onClick={() => {
                                 void navigator.clipboard.writeText(account.access_token);
                                 toast.success("token 已复制");
@@ -686,13 +682,13 @@ function AccountsPageContent() {
                               <Copy className="size-4" />
                             </button>
                           </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="rounded-md">
                             {account.type}
                           </Badge>
-                        </td>
-                        <td className="px-4 py-3">
+                        </TableCell>
+                        <TableCell>
                           <Badge
                             variant={status.badge}
                             className="inline-flex items-center gap-1 rounded-md px-2 py-1"
@@ -700,33 +696,33 @@ function AccountsPageContent() {
                             <StatusIcon className="size-3.5" />
                             {account.status}
                           </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
-                        </td>
-                        <td className="px-4 py-3">
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-xs leading-5 text-muted-foreground">{account.email ?? "—"}</div>
+                        </TableCell>
+                        <TableCell>
                           <Badge variant="info" className="rounded-md">
                             {formatQuota(account)}
                           </Badge>
-                        </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
+                        </TableCell>
+                        <TableCell className="text-xs leading-5 text-muted-foreground">
                           {(() => {
                             const restore = formatRestoreAt(account.restoreAt);
                             return (
                               <div className="space-y-0.5">
-                                {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}
+                                {restore.relative ? <div className="font-medium text-foreground">{restore.relative}</div> : null}
                                 <div>{restore.absolute}</div>
                               </div>
                             );
                           })()}
-                        </td>
-                        <td className="px-4 py-3 text-stone-500">{account.success}</td>
-                        <td className="px-4 py-3 text-stone-500">{account.fail}</td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1 text-stone-400">
+                        </TableCell>
+                        <TableCell>{account.success}</TableCell>
+                        <TableCell>{account.fail}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1 text-muted-foreground">
                             <button
                               type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                              className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
                               onClick={() => openEditDialog(account)}
                               disabled={isUpdating}
                             >
@@ -734,7 +730,7 @@ function AccountsPageContent() {
                             </button>
                             <button
                               type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                              className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
                               onClick={() => void handleRefreshAccounts([account.access_token])}
                               disabled={isRefreshing}
                             >
@@ -749,12 +745,12 @@ function AccountsPageContent() {
                               <Trash2 className="size-4" />
                             </button>
                           </div>
-                        </td>
-                      </tr>
+                        </TableCell>
+                      </TableRow>
                     );
                   })}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
 
               {!isLoading && currentRows.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">

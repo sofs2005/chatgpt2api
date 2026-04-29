@@ -15,8 +15,8 @@ export default function App() {
   return (
     <>
       <Toaster position="top-center" richColors offset={48} />
-      <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.92),_rgba(245,239,231,0.96)_42%,_rgba(240,235,227,0.99)_100%)] px-4 py-2 text-stone-900 sm:px-6 lg:px-8">
-        <div className="mx-auto flex max-w-[1440px] flex-col gap-5">
+      <main className="min-h-screen bg-background text-foreground">
+        <div className="mx-auto flex min-h-screen max-w-[1440px] flex-col gap-4 px-3 py-3 sm:px-5 lg:px-6">
           <TopNav />
           <Routes>
             <Route path="/" element={<HomePage />} />

@@ -133,7 +133,7 @@ func (a *App) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleRegister(w, r)
 	case path == "/api/settings":
 		a.handleSettings(w, r)
-	case path == "/api/images" && r.Method == http.MethodGet:
+	case path == "/api/images":
 		a.handleImages(w, r)
 	case path == "/api/logs" && r.Method == http.MethodGet:
 		a.handleLogs(w, r)
@@ -365,7 +365,24 @@ func (a *App) handleImages(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	util.WriteJSON(w, http.StatusOK, a.images.ListImages(a.resolveImageBaseURL(r), strings.TrimSpace(r.URL.Query().Get("start_date")), strings.TrimSpace(r.URL.Query().Get("end_date"))))
+	switch r.Method {
+	case http.MethodGet:
+		util.WriteJSON(w, http.StatusOK, a.images.ListImages(a.resolveImageBaseURL(r), strings.TrimSpace(r.URL.Query().Get("start_date")), strings.TrimSpace(r.URL.Query().Get("end_date"))))
+	case http.MethodDelete:
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		result, err := a.images.DeleteImages(util.AsStringSlice(body["paths"]))
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		util.WriteJSON(w, http.StatusOK, result)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {

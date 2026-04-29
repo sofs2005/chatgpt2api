@@ -7,7 +7,7 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
 }
 
 function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
-  return <thead className={cn("border-b border-stone-100 text-[11px] tracking-[0.18em] text-stone-400 uppercase", className)} {...props} />;
+  return <thead className={cn("border-b border-border bg-muted/45 text-[11px] tracking-[0.14em] text-muted-foreground uppercase", className)} {...props} />;
 }
 
 function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
@@ -15,11 +15,11 @@ function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
 }
 
 function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
-  return <tr className={cn("border-b border-stone-100 transition-colors hover:bg-stone-50/70", className)} {...props} />;
+  return <tr className={cn("border-b border-border transition-colors hover:bg-muted/45", className)} {...props} />;
 }
 
 function TableHead({ className, ...props }: React.ComponentProps<"th">) {
-  return <th className={cn("h-11 px-4 text-left align-middle font-medium", className)} {...props} />;
+  return <th className={cn("h-10 px-4 text-left align-middle font-semibold", className)} {...props} />;
 }
 
 function TableCell({ className, ...props }: React.ComponentProps<"td">) {

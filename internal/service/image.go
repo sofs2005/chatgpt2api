@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/draw"
@@ -9,6 +10,7 @@ import (
 	_ "image/png"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -67,6 +69,7 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string) map[string
 		thumb := s.ensureThumbnail(path, rel)
 		item := map[string]any{
 			"name":       filepath.Base(path),
+			"path":       rel,
 			"date":       day,
 			"size":       info.Size(),
 			"url":        publicAssetURL(baseURL, "images", rel),
@@ -99,6 +102,63 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string) map[string
 		groups = append(groups, map[string]any{"date": day, "items": groupMap[day]})
 	}
 	return map[string]any{"items": items, "groups": groups}
+}
+
+func (s *ImageService) DeleteImages(paths []string) (map[string]any, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("paths is required")
+	}
+	imageRoot, err := filepath.Abs(s.config.ImagesDir())
+	if err != nil {
+		return nil, err
+	}
+	thumbnailRoot, err := filepath.Abs(s.config.ImageThumbnailsDir())
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{}, len(paths))
+	deleted := 0
+	missing := 0
+	removedPaths := make([]string, 0, len(paths))
+	for _, value := range paths {
+		rel, err := cleanImageRelativePath(value)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[rel]; ok {
+			continue
+		}
+		seen[rel] = struct{}{}
+
+		imagePath := filepath.Join(imageRoot, filepath.FromSlash(rel))
+		if !pathInsideRoot(imageRoot, imagePath) {
+			return nil, errors.New("invalid image path")
+		}
+		if err := removeImageThumbnail(thumbnailRoot, rel); err != nil {
+			return nil, err
+		}
+		info, err := os.Stat(imagePath)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			missing++
+		} else if info.IsDir() {
+			return nil, errors.New("image path is not a file")
+		} else if err := os.Remove(imagePath); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			missing++
+		} else {
+			deleted++
+		}
+
+		removeEmptyParentDirs(imageRoot, filepath.Dir(imagePath))
+		removedPaths = append(removedPaths, rel)
+	}
+	return map[string]any{"deleted": deleted, "missing": missing, "paths": removedPaths}, nil
 }
 
 func (s *ImageService) ensureThumbnail(sourcePath, rel string) map[string]any {
@@ -158,6 +218,65 @@ func publicAssetURL(baseURL, prefix, rel string) string {
 		parts[i] = url.PathEscape(part)
 	}
 	return strings.TrimRight(baseURL, "/") + "/" + strings.Trim(prefix, "/") + "/" + strings.Join(parts, "/")
+}
+
+func cleanImageRelativePath(value string) (string, error) {
+	rel := filepath.ToSlash(strings.TrimSpace(value))
+	if rel == "" || strings.ContainsRune(rel, 0) || strings.HasPrefix(rel, "/") || filepath.IsAbs(filepath.FromSlash(rel)) {
+		return "", errors.New("invalid image path")
+	}
+	if path.Clean(rel) != rel {
+		return "", errors.New("invalid image path")
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == "" || part == "." || part == ".." || strings.Contains(part, ":") {
+			return "", errors.New("invalid image path")
+		}
+	}
+	return rel, nil
+}
+
+func removeImageThumbnail(root, rel string) error {
+	thumbPath := filepath.Join(root, filepath.FromSlash(rel)+".webp")
+	if !pathInsideRoot(root, thumbPath) {
+		return errors.New("invalid image path")
+	}
+	removeErr := os.Remove(thumbPath)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return removeErr
+	}
+	metaErr := os.Remove(thumbPath + ".json")
+	if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
+		return metaErr
+	}
+	removeEmptyParentDirs(root, filepath.Dir(thumbPath))
+	return nil
+}
+
+func pathInsideRoot(root, target string) bool {
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, targetAbs)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func removeEmptyParentDirs(root, start string) {
+	current, err := filepath.Abs(start)
+	if err != nil {
+		return
+	}
+	for pathInsideRoot(root, current) {
+		err := os.Remove(current)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		current = filepath.Dir(current)
+	}
 }
 
 func readImageMetadata(path string, sourceMtime time.Time) map[string]any {

@@ -173,7 +173,7 @@ export function UserKeysCard() {
 
   return (
     <>
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="space-y-6 p-6">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-3">

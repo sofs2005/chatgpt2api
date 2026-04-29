@@ -63,6 +63,9 @@ func TestImageServiceCreatesWebPThumbnails(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("items = %#v", items)
 	}
+	if got := toString(items[0]["path"]); got != "2026/04/29/sample.png" {
+		t.Fatalf("path = %q, want relative image path", got)
+	}
 	thumbnailURL := toString(items[0]["thumbnail_url"])
 	if !strings.HasSuffix(thumbnailURL, ".webp") {
 		t.Fatalf("thumbnail_url = %q, want .webp suffix", thumbnailURL)
@@ -95,6 +98,58 @@ func TestImageServiceCreatesWebPThumbnails(t *testing.T) {
 	}
 	if numericMetaValue(metadata["thumbnail_size"]) != ThumbnailSize {
 		t.Fatalf("thumbnail_size metadata = %v, want %d", metadata["thumbnail_size"], ThumbnailSize)
+	}
+}
+
+func TestImageServiceDeleteImagesRemovesOriginalAndThumbnail(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	imagePath := filepath.Join(config.ImagesDir(), "2026", "04", "29", "sample.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeTestPNG(imagePath); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(config)
+	service.ListImages("http://127.0.0.1:8000", "", "")
+	thumbPath := filepath.Join(config.ImageThumbnailsDir(), "2026", "04", "29", "sample.png.webp")
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("thumbnail was not created: %v", err)
+	}
+
+	result, err := service.DeleteImages([]string{"2026/04/29/sample.png"})
+	if err != nil {
+		t.Fatalf("DeleteImages() error = %v", err)
+	}
+	if result["deleted"] != 1 || result["missing"] != 0 {
+		t.Fatalf("DeleteImages() = %#v", result)
+	}
+	if _, err := os.Stat(imagePath); !os.IsNotExist(err) {
+		t.Fatalf("original still exists, stat error = %v", err)
+	}
+	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
+		t.Fatalf("thumbnail still exists, stat error = %v", err)
+	}
+	if _, err := os.Stat(thumbPath + ".json"); !os.IsNotExist(err) {
+		t.Fatalf("thumbnail metadata still exists, stat error = %v", err)
+	}
+}
+
+func TestImageServiceDeleteImagesRejectsTraversal(t *testing.T) {
+	root := t.TempDir()
+	outsidePath := filepath.Join(root, "outside.png")
+	if err := writeTestPNG(outsidePath); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(testImageConfig{root: root})
+	if _, err := service.DeleteImages([]string{"../outside.png"}); err == nil {
+		t.Fatal("DeleteImages() error = nil, want traversal rejection")
+	}
+	if _, err := os.Stat(outsidePath); err != nil {
+		t.Fatalf("outside file was changed: %v", err)
 	}
 }
 

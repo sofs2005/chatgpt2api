@@ -194,7 +194,7 @@ export function AnnouncementsCard() {
 
   return (
     <>
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="flex flex-col gap-6 p-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
             <div className="flex items-center gap-3">

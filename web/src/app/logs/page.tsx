@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -48,6 +48,88 @@ function getStatus(item: SystemLog) {
   return "-";
 }
 
+function statusBadgeVariant(item: SystemLog | null) {
+  if (item?.detail?.status === "failed") return "danger";
+  if (item?.detail?.status === "success") return "success";
+  return "secondary";
+}
+
+const detailLabels: Record<string, string> = {
+  endpoint: "接口",
+  model: "模型",
+  started_at: "开始时间",
+  ended_at: "结束时间",
+  duration_ms: "耗时",
+  status: "状态",
+  key_name: "令牌名称",
+  key_role: "角色",
+  key_id: "凭据 ID",
+  subject_id: "用户 ID",
+  provider: "来源",
+  error: "错误",
+  token: "令牌",
+  source: "来源事件",
+  added: "新增",
+  skipped: "跳过",
+  removed: "删除",
+};
+
+const primaryDetailKeys = [
+  "endpoint",
+  "model",
+  "status",
+  "duration_ms",
+  "key_name",
+  "key_role",
+  "key_id",
+  "subject_id",
+  "provider",
+  "started_at",
+  "ended_at",
+];
+
+function detailLabel(key: string) {
+  return detailLabels[key] || key;
+}
+
+function isPrimitiveDetail(value: unknown) {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
+function formatDetailValue(key: string, value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  if (key === "duration_ms" && typeof value === "number") {
+    return `${(value / 1000).toFixed(2)} s`;
+  }
+  if (key === "status") {
+    if (value === "success") return "成功";
+    if (value === "failed") return "失败";
+  }
+  if (typeof value === "boolean") {
+    return value ? "是" : "否";
+  }
+  return String(value);
+}
+
+function getPrimaryDetailEntries(item: SystemLog | null) {
+  const detail = item?.detail || {};
+  return primaryDetailKeys
+    .filter((key) => key in detail && isPrimitiveDetail(detail[key]))
+    .map((key) => [key, detail[key]] as const);
+}
+
+function getExtraDetailEntries(item: SystemLog | null) {
+  const detail = item?.detail || {};
+  const skipped = new Set([...primaryDetailKeys, "urls", "error"]);
+  return Object.entries(detail).filter(([key, value]) => !skipped.has(key) && isPrimitiveDetail(value));
+}
+
+function detailJSON(item: SystemLog | null) {
+  return JSON.stringify(item?.detail || {}, null, 2);
+}
+
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
   const [type, setType] = useState<string>(LogType.Call);
@@ -88,6 +170,15 @@ function LogsContent() {
   const openDetail = (item: SystemLog) => {
     setDetailLog(item);
     setDetailOpen(true);
+  };
+
+  const handleCopyDetailJSON = async () => {
+    try {
+      await navigator.clipboard.writeText(detailJSON(detailLog));
+      toast.success("日志详情已复制");
+    } catch {
+      toast.error("复制失败，请手动复制");
+    }
   };
 
   useEffect(() => {
@@ -180,40 +271,107 @@ function LogsContent() {
         </CardContent>
       </Card>
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="w-[min(92vw,920px)] rounded-2xl p-6">
-          <DialogHeader>
-            <DialogTitle>日志详情</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
-            {Object.entries(detailLog?.detail || {})
-              .filter(([key, value]) => key !== "urls" && typeof value !== "object")
-              .map(([key, value]) => (
-                <div key={key} className="flex items-start justify-between gap-4">
-                  <span className="text-stone-400">{key}</span>
-                  <span className="text-right font-medium text-stone-700">{String(value)}</span>
+        <DialogContent className="flex max-h-[90vh] w-[min(94vw,980px)] grid-rows-none flex-col gap-0 overflow-hidden rounded-2xl p-0">
+          <DialogHeader className="border-b border-border px-6 py-5 pr-12">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 space-y-2">
+                <DialogTitle>日志详情</DialogTitle>
+                <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                  <Badge variant="secondary" className="rounded-md">{detailLog ? typeLabels[detailLog.type] || detailLog.type : "-"}</Badge>
+                  <Badge variant={statusBadgeVariant(detailLog)} className="rounded-md">{detailLog ? getStatus(detailLog) : "-"}</Badge>
+                  <span>{detailLog?.time || "—"}</span>
                 </div>
-              ))}
-          </div>
-          {detailUrls.length ? (
-            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-              {detailUrls.map((url, index) => (
-                <button
-                  key={url}
-                  type="button"
-                  className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
-                  onClick={() => {
-                    setLightboxIndex(index);
-                    setLightboxOpen(true);
-                  }}
-                >
-                  <img src={url} alt="" className="h-full w-full object-cover" />
-                </button>
-              ))}
+              </div>
+              <Button type="button" variant="outline" className="h-9 rounded-lg px-3" onClick={() => void handleCopyDetailJSON()}>
+                <Copy className="size-4" />
+                复制 JSON
+              </Button>
             </div>
-          ) : null}
-          <pre className="max-h-[72vh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-4 text-xs leading-6 text-stone-700">
-            {JSON.stringify(detailLog?.detail || {}, null, 2)}
-          </pre>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto px-6 py-5">
+            <div className="space-y-5">
+              <section className="space-y-3">
+                <div className="text-sm font-semibold text-foreground">摘要</div>
+                <div className="rounded-xl border border-border bg-muted/35 p-4">
+                  <div className="text-sm font-medium text-foreground">{detailLog?.summary || "—"}</div>
+                  <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+                    <div>
+                      <div className="text-xs text-muted-foreground">令牌</div>
+                      <div className="mt-1 truncate font-medium text-foreground">{detailLog ? getDetailText(detailLog, "key_name") : "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted-foreground">接口</div>
+                      <div className="mt-1 truncate font-medium text-foreground">{detailLog ? getDetailText(detailLog, "endpoint") : "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted-foreground">耗时</div>
+                      <div className="mt-1 font-medium text-foreground">{detailLog ? formatDuration(detailLog) : "—"}</div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="space-y-3">
+                <div className="text-sm font-semibold text-foreground">关键字段</div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  {[...getPrimaryDetailEntries(detailLog), ...getExtraDetailEntries(detailLog)].map(([key, value]) => (
+                    <div key={key} className="flex min-w-0 items-start justify-between gap-4 rounded-lg border border-border bg-background px-3 py-2 text-sm">
+                      <span className="shrink-0 text-muted-foreground">{detailLabel(key)}</span>
+                      <span className="min-w-0 break-words text-right font-medium text-foreground">{formatDetailValue(key, value)}</span>
+                    </div>
+                  ))}
+                  {getPrimaryDetailEntries(detailLog).length === 0 && getExtraDetailEntries(detailLog).length === 0 ? (
+                    <div className="rounded-lg border border-border bg-background px-3 py-6 text-center text-sm text-muted-foreground md:col-span-2">
+                      没有可展示的字段
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+
+              {typeof detailLog?.detail?.error === "string" && detailLog.detail.error ? (
+                <section className="space-y-3">
+                  <div className="text-sm font-semibold text-foreground">错误信息</div>
+                  <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs leading-6 text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">
+                    {detailLog.detail.error}
+                  </pre>
+                </section>
+              ) : null}
+
+              {detailUrls.length ? (
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold text-foreground">图片结果</div>
+                    <Badge variant="secondary" className="rounded-md">{detailUrls.length} 张</Badge>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                    {detailUrls.map((url, index) => (
+                      <button
+                        key={url}
+                        type="button"
+                        className="group overflow-hidden rounded-xl border border-border bg-muted text-left"
+                        onClick={() => {
+                          setLightboxIndex(index);
+                          setLightboxOpen(true);
+                        }}
+                      >
+                        <div className="aspect-square overflow-hidden bg-muted">
+                          <img src={url} alt="" className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]" />
+                        </div>
+                        <div className="truncate border-t border-border px-3 py-2 text-xs text-muted-foreground">{url}</div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              <section className="space-y-3">
+                <div className="text-sm font-semibold text-foreground">完整 JSON</div>
+                <pre className="max-h-72 overflow-auto rounded-xl border border-border bg-muted/40 p-4 text-xs leading-6 text-foreground">
+                  {detailJSON(detailLog)}
+                </pre>
+              </section>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
       <ImageLightbox

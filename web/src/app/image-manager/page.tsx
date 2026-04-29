@@ -112,7 +112,7 @@ function useOrderedImageMasonryColumns(items: ManagedImage[]) {
   }, [columnCount, items]);
 }
 
-function ImageManagerContent() {
+function ImageManagerContent({ canDeleteImages }: { canDeleteImages: boolean }) {
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [selectedImageIds, setSelectedImageIds] = useState<Record<string, boolean>>({});
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
@@ -199,6 +199,9 @@ function ImageManagerContent() {
   };
 
   const openDeleteConfirm = (targetItems: ManagedImage[]) => {
+    if (!canDeleteImages) {
+      return;
+    }
     const paths = Array.from(new Set(targetItems.map((item) => item.path)));
     if (paths.length === 0) {
       toast.error("没有可删除的图片");
@@ -208,7 +211,7 @@ function ImageManagerContent() {
   };
 
   const handleConfirmDelete = async () => {
-    if (!deleteTarget || isDeleting) {
+    if (!canDeleteImages || !deleteTarget || isDeleting) {
       return;
     }
 
@@ -248,7 +251,7 @@ function ImageManagerContent() {
     <section className="flex flex-col gap-5">
       <PageHeader
         eyebrow="Images"
-        title="图片管理"
+        title="图片库"
         actions={
           <>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
@@ -292,16 +295,18 @@ function ImageManagerContent() {
               )}
               下载已选 ({selectedCount})
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              className="h-8 rounded-lg px-2.5 text-[11px] text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-              disabled={selectedCount === 0 || isMutatingImages}
-              onClick={() => openDeleteConfirm(selectedItems)}
-            >
-              <Trash2 className="size-3" />
-              删除已选 ({selectedCount})
-            </Button>
+            {canDeleteImages ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="h-8 rounded-lg px-2.5 text-[11px] text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                disabled={selectedCount === 0 || isMutatingImages}
+                onClick={() => openDeleteConfirm(selectedItems)}
+              >
+                <Trash2 className="size-3" />
+                删除已选 ({selectedCount})
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="outline"
@@ -398,20 +403,22 @@ function ImageManagerContent() {
                       >
                         <Copy className="size-3.5" />
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => openDeleteConfirm([item])}
-                        disabled={isDeleting}
-                        className="inline-flex size-7 items-center justify-center rounded-full bg-white/95 text-rose-600 shadow-sm transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
-                        aria-label="删除图片"
-                        title="删除图片"
-                      >
-                        {isDeleting && deleteTarget?.paths.includes(item.path) ? (
-                          <LoaderCircle className="size-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="size-3.5" />
-                        )}
-                      </button>
+                      {canDeleteImages ? (
+                        <button
+                          type="button"
+                          onClick={() => openDeleteConfirm([item])}
+                          disabled={isDeleting}
+                          className="inline-flex size-7 items-center justify-center rounded-full bg-white/95 text-rose-600 shadow-sm transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                          aria-label="删除图片"
+                          title="删除图片"
+                        >
+                          {isDeleting && deleteTarget?.paths.includes(item.path) ? (
+                            <LoaderCircle className="size-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="size-3.5" />
+                          )}
+                        </button>
+                      ) : null}
                     </div>
                     <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/55 via-black/20 to-transparent px-2.5 pt-8 pb-2 opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
                       <div className="text-left text-white drop-shadow-sm">
@@ -438,7 +445,7 @@ function ImageManagerContent() {
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
-      {deleteTarget ? (
+      {canDeleteImages && deleteTarget ? (
         <Dialog open onOpenChange={(open) => (!open && !isDeleting ? setDeleteTarget(null) : null)}>
           <DialogContent showCloseButton={false} className="rounded-2xl p-6">
             <DialogHeader className="gap-2">
@@ -475,9 +482,10 @@ function ImageManagerContent() {
 }
 
 export default function ImageManagerPage() {
-  const { isCheckingAuth, session } = useAuthGuard(["admin"]);
-  if (isCheckingAuth || !session || session.role !== "admin") {
+  const { isCheckingAuth, session } = useAuthGuard(["admin", "user"]);
+  if (isCheckingAuth || !session) {
     return <div className="flex min-h-[40vh] items-center justify-center"><LoaderCircle className="size-5 animate-spin text-stone-400" /></div>;
   }
-  return <ImageManagerContent />;
+  const canDeleteImages = session.role === "admin" || session.provider !== "linuxdo";
+  return <ImageManagerContent canDeleteImages={canDeleteImages} />;
 }

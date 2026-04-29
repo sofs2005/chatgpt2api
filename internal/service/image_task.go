@@ -407,10 +407,13 @@ func publicTask(task map[string]any) map[string]any {
 }
 
 func ownerID(identity Identity) string {
-	if identity.ID == "" {
-		return "anonymous"
+	if owner := util.Clean(identity.OwnerID); owner != "" {
+		return owner
 	}
-	return identity.ID
+	if id := util.Clean(identity.ID); id != "" {
+		return id
+	}
+	return "anonymous"
 }
 
 func taskKey(owner, id string) string {

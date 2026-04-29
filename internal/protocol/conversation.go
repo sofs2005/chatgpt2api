@@ -21,6 +21,7 @@ import (
 
 type ImageConfig interface {
 	ImagesDir() string
+	ImageMetadataDir() string
 	BaseURL() string
 	CleanupOldImages() int
 }
@@ -45,6 +46,7 @@ type ConversationRequest struct {
 	Quality        string
 	ResponseFormat string
 	BaseURL        string
+	OwnerID        string
 	MessageAsError bool
 }
 
@@ -428,7 +430,7 @@ func (e *Engine) StreamImageOutputs(ctx context.Context, client *backend.Client,
 			for _, data := range bytesItems {
 				imageItems = append(imageItems, map[string]any{"b64_json": base64.StdEncoding.EncodeToString(data)})
 			}
-			result := e.FormatImageResult(imageItems, request.Prompt, request.ResponseFormat, request.BaseURL, time.Now().Unix(), "")
+			result := e.FormatImageResult(imageItems, request.Prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, time.Now().Unix(), "")
 			data := util.AsMapSlice(result["data"])
 			if len(data) > 0 {
 				out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: data}
@@ -486,7 +488,7 @@ func (e *Engine) CollectImageOutputs(outputs <-chan ImageOutput, errCh <-chan er
 	return result, nil
 }
 
-func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseFormat, baseURL string, created int64, message string) map[string]any {
+func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseFormat, baseURL, ownerID string, created int64, message string) map[string]any {
 	var data []map[string]any
 	for _, item := range items {
 		b64 := util.Clean(item["b64_json"])
@@ -498,7 +500,7 @@ func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseForma
 		if err != nil {
 			continue
 		}
-		urlValue := e.SaveImageBytes(imageBytes, baseURL)
+		urlValue := e.SaveImageBytesForOwner(imageBytes, baseURL, ownerID)
 		if responseFormat == "b64_json" {
 			data = append(data, map[string]any{"b64_json": b64, "url": urlValue, "revised_prompt": revised})
 		} else {
@@ -516,17 +518,36 @@ func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseForma
 }
 
 func (e *Engine) SaveImageBytes(imageData []byte, baseURL string) string {
+	return e.SaveImageBytesForOwner(imageData, baseURL, "")
+}
+
+func (e *Engine) SaveImageBytesForOwner(imageData []byte, baseURL, ownerID string) string {
 	e.Config.CleanupOldImages()
 	sum := md5.Sum(imageData)
 	filename := fmt.Sprintf("%d_%s.png", time.Now().Unix(), hex.EncodeToString(sum[:]))
 	relativeDir := filepath.Join(time.Now().Format("2006"), time.Now().Format("01"), time.Now().Format("02"))
-	filePath := filepath.Join(e.Config.ImagesDir(), relativeDir, filename)
+	rel := filepath.Join(relativeDir, filename)
+	filePath := filepath.Join(e.Config.ImagesDir(), rel)
 	_ = os.MkdirAll(filepath.Dir(filePath), 0o755)
 	_ = os.WriteFile(filePath, imageData, 0o644)
+	e.writeImageOwnerMetadata(rel, ownerID)
 	if baseURL == "" {
 		baseURL = e.Config.BaseURL()
 	}
-	return strings.TrimRight(baseURL, "/") + "/images/" + filepath.ToSlash(filepath.Join(relativeDir, filename))
+	return strings.TrimRight(baseURL, "/") + "/images/" + filepath.ToSlash(rel)
+}
+
+func (e *Engine) writeImageOwnerMetadata(rel, ownerID string) {
+	ownerID = strings.TrimSpace(ownerID)
+	if e == nil || e.Config == nil || ownerID == "" {
+		return
+	}
+	metaPath := filepath.Join(e.Config.ImageMetadataDir(), filepath.FromSlash(filepath.ToSlash(rel))+".json")
+	_ = os.MkdirAll(filepath.Dir(metaPath), 0o755)
+	data, err := json.Marshal(map[string]any{"owner_id": ownerID, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	if err == nil {
+		_ = os.WriteFile(metaPath, data, 0o644)
+	}
 }
 
 func IsTokenInvalidError(message string) bool {

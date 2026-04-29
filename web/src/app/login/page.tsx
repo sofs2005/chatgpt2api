@@ -1,15 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { LoaderCircle, LockKeyhole } from "lucide-react";
+import { LoaderCircle, LockKeyhole, LogIn } from "lucide-react";
 import { toast } from "sonner";
 
 import { AnnouncementNotifications } from "@/components/announcement-banner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { login } from "@/lib/api";
+import webConfig from "@/constants/common-env";
+import { fetchAuthProviders, login } from "@/lib/api";
 import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
 import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
 
@@ -17,7 +18,28 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const [authKey, setAuthKey] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [linuxDoEnabled, setLinuxDoEnabled] = useState(false);
   const { isCheckingAuth } = useRedirectIfAuthenticated();
+
+  useEffect(() => {
+    let active = true;
+    const loadProviders = async () => {
+      try {
+        const providers = await fetchAuthProviders();
+        if (active) {
+          setLinuxDoEnabled(Boolean(providers.linuxdo?.enabled));
+        }
+      } catch {
+        if (active) {
+          setLinuxDoEnabled(false);
+        }
+      }
+    };
+    void loadProviders();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleLogin = async () => {
     const normalizedAuthKey = authKey.trim();
@@ -34,6 +56,7 @@ export default function LoginPage() {
         role: data.role,
         subjectId: data.subject_id,
         name: data.name,
+        provider: data.provider,
       });
       navigate(getDefaultRouteForRole(data.role), { replace: true });
     } catch (error) {
@@ -42,6 +65,13 @@ export default function LoginPage() {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleLinuxDoLogin = () => {
+    const params = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
+    const redirectTo = params.get("redirect") || "/image";
+    const base = webConfig.apiUrl.replace(/\/$/, "");
+    window.location.href = `${base}/auth/linuxdo/start?redirect=${encodeURIComponent(redirectTo)}`;
   };
 
   if (isCheckingAuth) {
@@ -117,6 +147,18 @@ export default function LoginPage() {
               {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
               登录
             </Button>
+            {linuxDoEnabled ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="h-12 w-full"
+                onClick={handleLinuxDoLogin}
+                disabled={isSubmitting}
+              >
+                <LogIn className="size-4" />
+                使用 Linuxdo 登录
+              </Button>
+            ) : null}
           </CardContent>
         </Card>
       </div>

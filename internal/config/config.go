@@ -40,6 +40,23 @@ type Store struct {
 	storageBackend  storage.Backend
 }
 
+type LinuxDoOAuthConfig struct {
+	Enabled              bool
+	ClientID             string
+	ClientSecret         string
+	AuthorizeURL         string
+	TokenURL             string
+	UserInfoURL          string
+	Scopes               string
+	RedirectURL          string
+	FrontendRedirectURL  string
+	TokenAuthMethod      string
+	UsePKCE              bool
+	UserInfoEmailPath    string
+	UserInfoIDPath       string
+	UserInfoUsernamePath string
+}
+
 func NewStore() (*Store, error) {
 	root, err := resolveRootDir()
 	if err != nil {
@@ -190,6 +207,46 @@ func (s *Store) LogLevels() []string {
 	return out
 }
 
+func (s *Store) LinuxDoOAuth() LinuxDoOAuthConfig {
+	redirectURL := envString("CHATGPT2API_LINUXDO_REDIRECT_URL", "")
+	if redirectURL == "" && s.BaseURL() != "" {
+		redirectURL = s.BaseURL() + "/auth/linuxdo/oauth/callback"
+	}
+	return LinuxDoOAuthConfig{
+		Enabled:              envBool("CHATGPT2API_LINUXDO_ENABLED", false),
+		ClientID:             envString("CHATGPT2API_LINUXDO_CLIENT_ID", ""),
+		ClientSecret:         envString("CHATGPT2API_LINUXDO_CLIENT_SECRET", ""),
+		AuthorizeURL:         envString("CHATGPT2API_LINUXDO_AUTHORIZE_URL", "https://connect.linux.do/oauth2/authorize"),
+		TokenURL:             envString("CHATGPT2API_LINUXDO_TOKEN_URL", "https://connect.linux.do/oauth2/token"),
+		UserInfoURL:          envString("CHATGPT2API_LINUXDO_USERINFO_URL", "https://connect.linux.do/api/user"),
+		Scopes:               envString("CHATGPT2API_LINUXDO_SCOPES", "user"),
+		RedirectURL:          redirectURL,
+		FrontendRedirectURL:  envString("CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL", "/auth/linuxdo/callback"),
+		TokenAuthMethod:      strings.ToLower(envString("CHATGPT2API_LINUXDO_TOKEN_AUTH_METHOD", "client_secret_post")),
+		UsePKCE:              envBool("CHATGPT2API_LINUXDO_USE_PKCE", false),
+		UserInfoEmailPath:    envString("CHATGPT2API_LINUXDO_USERINFO_EMAIL_PATH", ""),
+		UserInfoIDPath:       envString("CHATGPT2API_LINUXDO_USERINFO_ID_PATH", ""),
+		UserInfoUsernamePath: envString("CHATGPT2API_LINUXDO_USERINFO_USERNAME_PATH", ""),
+	}
+}
+
+func (c LinuxDoOAuthConfig) Ready() bool {
+	if !c.Enabled {
+		return false
+	}
+	if c.ClientID == "" || c.AuthorizeURL == "" || c.TokenURL == "" || c.UserInfoURL == "" || c.RedirectURL == "" {
+		return false
+	}
+	switch c.TokenAuthMethod {
+	case "", "client_secret_post", "client_secret_basic":
+		return c.ClientSecret != ""
+	case "none":
+		return c.UsePKCE
+	default:
+		return false
+	}
+}
+
 func (s *Store) ImagesDir() string {
 	path := filepath.Join(s.DataDir, "images")
 	_ = os.MkdirAll(path, 0o755)
@@ -198,6 +255,12 @@ func (s *Store) ImagesDir() string {
 
 func (s *Store) ImageThumbnailsDir() string {
 	path := filepath.Join(s.DataDir, "image_thumbnails")
+	_ = os.MkdirAll(path, 0o755)
+	return path
+}
+
+func (s *Store) ImageMetadataDir() string {
+	path := filepath.Join(s.DataDir, "image_metadata")
 	_ = os.MkdirAll(path, 0o755)
 	return path
 }
@@ -234,7 +297,7 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 func (s *Store) CleanupOldImages() int {
 	cutoff := time.Now().Add(-time.Duration(s.ImageRetentionDays()) * 24 * time.Hour)
 	removed := 0
-	for _, dir := range []string{s.ImagesDir(), s.ImageThumbnailsDir()} {
+	for _, dir := range []string{s.ImagesDir(), s.ImageThumbnailsDir(), s.ImageMetadataDir()} {
 		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return nil
@@ -331,6 +394,21 @@ func intSetting(value any, fallback int) int {
 		if err == nil {
 			return n
 		}
+	}
+	return fallback
+}
+
+func envString(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return strings.TrimSpace(value)
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	if value, ok := os.LookupEnv(key); ok {
+		value = strings.ToLower(strings.TrimSpace(value))
+		return value == "1" || value == "true" || value == "yes" || value == "on"
 	}
 	return fallback
 }

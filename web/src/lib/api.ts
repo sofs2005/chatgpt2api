@@ -117,6 +117,7 @@ export type SettingsConfig = {
 export type ManagedImage = {
   name: string;
   path: string;
+  owner_id?: string;
   date: string;
   size: number;
   url: string;
@@ -177,6 +178,15 @@ export type LoginResponse = {
   role: AuthRole;
   subject_id: string;
   name: string;
+  provider?: string;
+  credential_id?: string;
+  credential_name?: string;
+};
+
+export type AuthProviders = {
+  linuxdo: {
+    enabled: boolean;
+  };
 };
 
 export type Announcement = {
@@ -194,6 +204,10 @@ export type UserKey = {
   id: string;
   name: string;
   role: "user";
+  kind?: "api_key";
+  provider?: "local" | "linuxdo" | string;
+  owner_id?: string;
+  owner_name?: string;
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
@@ -245,6 +259,12 @@ export async function login(authKey: string) {
     headers: {
       Authorization: `Bearer ${normalizedAuthKey}`,
     },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function fetchAuthProviders() {
+  return httpRequest<AuthProviders>("/auth/providers", {
     redirectOnUnauthorized: false,
   });
 }

@@ -113,6 +113,12 @@ func (a *App) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleMessages(w, r)
 	case path == "/auth/login" && r.Method == http.MethodPost:
 		a.handleLogin(w, r)
+	case path == "/auth/providers":
+		a.handleAuthProviders(w, r)
+	case path == "/auth/linuxdo/start":
+		a.handleLinuxDoOAuthStart(w, r)
+	case path == "/auth/linuxdo/oauth/callback":
+		a.handleLinuxDoOAuthCallback(w, r)
 	case path == "/version" && r.Method == http.MethodGet:
 		util.WriteJSON(w, http.StatusOK, map[string]any{"version": version.Get()})
 	case path == "/api/announcements":
@@ -175,6 +181,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	body["owner_id"] = identityScope(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
 	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
@@ -199,6 +206,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "image file is required")
 		return
 	}
+	body["owner_id"] = identityScope(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
 	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
@@ -215,6 +223,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	body["owner_id"] = identityScope(identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成")
@@ -230,8 +239,9 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	body["owner_id"] = identityScope(identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
-	result, stream, err := a.engine.HandleResponses(r.Context(), body)
+	result, stream, err := a.engine.HandleResponsesScoped(r.Context(), body, identityScope(identity))
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses")
 }
 
@@ -262,7 +272,9 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		return
 	}
 	if stream == nil {
-		a.logCall(identity, summary, endpoint, model, start, "success", "", collectURLs(result))
+		urls := collectURLs(result)
+		a.recordImageOwners(identity, urls)
+		a.logCall(identity, summary, endpoint, model, start, "success", "", urls)
 		util.WriteJSON(w, http.StatusOK, result)
 		return
 	}
@@ -281,11 +293,13 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			}
 		}
 		if err := <-stream.Err; err != nil {
+			a.recordImageOwners(identity, urls)
 			a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), urls)
 			fmt.Fprintf(w, "event: error\n")
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
 			return
 		}
+		a.recordImageOwners(identity, urls)
 		a.logCall(identity, summary, endpoint, model, start, "success", "", urls)
 		return
 	}
@@ -302,9 +316,11 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		}
 	}
 	if err := <-stream.Err; err != nil {
+		a.recordImageOwners(identity, urls)
 		a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), urls)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
+		a.recordImageOwners(identity, urls)
 		a.logCall(identity, summary, endpoint, model, start, "success", "", urls)
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
@@ -334,7 +350,16 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	util.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version.Get(), "role": identity.Role, "subject_id": identity.ID, "name": identity.Name})
+	util.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"version":         version.Get(),
+		"role":            identity.Role,
+		"subject_id":      identity.ID,
+		"name":            identity.Name,
+		"provider":        identity.Provider,
+		"credential_id":   identity.CredentialID,
+		"credential_name": identity.CredentialName,
+	})
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -362,19 +387,25 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleImages(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireAdmin(w, r); !ok {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
 		return
 	}
+	scope := imageAccessScope(identity)
 	switch r.Method {
 	case http.MethodGet:
-		util.WriteJSON(w, http.StatusOK, a.images.ListImages(a.resolveImageBaseURL(r), strings.TrimSpace(r.URL.Query().Get("start_date")), strings.TrimSpace(r.URL.Query().Get("end_date"))))
+		util.WriteJSON(w, http.StatusOK, a.images.ListImages(a.resolveImageBaseURL(r), strings.TrimSpace(r.URL.Query().Get("start_date")), strings.TrimSpace(r.URL.Query().Get("end_date")), scope))
 	case http.MethodDelete:
+		if identity.Role == service.AuthRoleUser && identity.Provider == service.AuthProviderLinuxDo {
+			util.WriteError(w, http.StatusForbidden, "Linuxdo users cannot delete images")
+			return
+		}
 		body, err := readJSONMap(r)
 		if err != nil {
 			util.WriteError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
-		result, err := a.images.DeleteImages(util.AsStringSlice(body["paths"]))
+		result, err := a.images.DeleteImages(util.AsStringSlice(body["paths"]), scope)
 		if err != nil {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return
@@ -449,7 +480,7 @@ func (a *App) requireIdentity(w http.ResponseWriter, r *http.Request, overrideAu
 	}
 	token := extractBearerToken(auth)
 	if token != "" && token == a.config.AuthKey() {
-		return service.Identity{ID: "admin", Name: "管理员", Role: "admin"}, true
+		return service.Identity{ID: "admin", Name: "管理员", Role: service.AuthRoleAdmin, Provider: service.AuthProviderLocal, Kind: service.AuthKindSession}, true
 	}
 	if identity := a.auth.Authenticate(token); identity != nil {
 		return *identity, true
@@ -599,26 +630,62 @@ func (a *App) logCall(identity service.Identity, summary, endpoint, model string
 }
 
 func addIdentityLogDetail(detail map[string]any, identity service.Identity) {
-	if name := util.Clean(identity.Name); name != "" {
+	if name := util.Clean(firstNonEmpty(identity.CredentialName, identity.Name)); name != "" {
 		detail["key_name"] = name
 	}
 	if role := util.Clean(identity.Role); role != "" {
 		detail["key_role"] = role
 	}
-	if id := util.Clean(identity.ID); id != "" {
+	if id := util.Clean(firstNonEmpty(identity.CredentialID, identity.ID)); id != "" {
 		detail["key_id"] = id
 	}
+	if id := util.Clean(identity.ID); id != "" && id != util.Clean(identity.CredentialID) {
+		detail["subject_id"] = id
+	}
+	if provider := util.Clean(identity.Provider); provider != "" {
+		detail["provider"] = provider
+	}
+}
+
+func identityScope(identity service.Identity) string {
+	if owner := util.Clean(identity.OwnerID); owner != "" {
+		return owner
+	}
+	if id := util.Clean(identity.ID); id != "" {
+		return id
+	}
+	return "anonymous"
+}
+
+func imageAccessScope(identity service.Identity) service.ImageAccessScope {
+	if identity.Role == service.AuthRoleAdmin {
+		return service.ImageAccessScope{All: true}
+	}
+	return service.ImageAccessScope{OwnerID: identityScope(identity)}
+}
+
+func (a *App) recordImageOwners(identity service.Identity, urls []string) {
+	if len(urls) == 0 || a.images == nil {
+		return
+	}
+	ownerID := identityScope(identity)
+	if ownerID == "" || ownerID == "anonymous" {
+		return
+	}
+	a.images.RecordImageOwners(urls, ownerID)
 }
 
 func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity, payload map[string]any, endpoint, summary string, run func(context.Context, map[string]any) (map[string]any, error)) (map[string]any, error) {
 	start := time.Now()
+	payload["owner_id"] = identityScope(identity)
 	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
 	result, err := run(ctx, payload)
+	urls := collectURLs(result)
+	a.recordImageOwners(identity, urls)
 	if err != nil {
-		a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), nil)
+		a.logCall(identity, summary, endpoint, model, start, "failed", err.Error(), urls)
 		return result, err
 	}
-	urls := collectURLs(result)
 	if len(util.AsMapSlice(result["data"])) == 0 {
 		message := firstNonEmpty(util.Clean(result["message"]), "image task returned no image data")
 		a.logCall(identity, summary, endpoint, model, start, "failed", message, urls)

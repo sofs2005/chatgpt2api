@@ -29,13 +29,21 @@ func (c testImageConfig) ImageThumbnailsDir() string {
 	return path
 }
 
+func (c testImageConfig) ImageMetadataDir() string {
+	path := filepath.Join(c.root, "image_metadata")
+	_ = os.MkdirAll(path, 0o755)
+	return path
+}
+
 func (c testImageConfig) CleanupOldImages() int {
 	return 0
 }
 
+var allImages = ImageAccessScope{All: true}
+
 func TestImageServiceListImagesReturnsEmptyArrays(t *testing.T) {
 	service := NewImageService(testImageConfig{root: t.TempDir()})
-	result := service.ListImages("http://127.0.0.1:8000", "", "")
+	result := service.ListImages("http://127.0.0.1:8000", "", "", allImages)
 
 	data, err := json.Marshal(result)
 	if err != nil {
@@ -58,7 +66,7 @@ func TestImageServiceCreatesWebPThumbnails(t *testing.T) {
 	}
 
 	service := NewImageService(config)
-	result := service.ListImages("http://127.0.0.1:8000", "", "")
+	result := service.ListImages("http://127.0.0.1:8000", "", "", allImages)
 	items := result["items"].([]map[string]any)
 	if len(items) != 1 {
 		t.Fatalf("items = %#v", items)
@@ -113,13 +121,13 @@ func TestImageServiceDeleteImagesRemovesOriginalAndThumbnail(t *testing.T) {
 	}
 
 	service := NewImageService(config)
-	service.ListImages("http://127.0.0.1:8000", "", "")
+	service.ListImages("http://127.0.0.1:8000", "", "", allImages)
 	thumbPath := filepath.Join(config.ImageThumbnailsDir(), "2026", "04", "29", "sample.png.webp")
 	if _, err := os.Stat(thumbPath); err != nil {
 		t.Fatalf("thumbnail was not created: %v", err)
 	}
 
-	result, err := service.DeleteImages([]string{"2026/04/29/sample.png"})
+	result, err := service.DeleteImages([]string{"2026/04/29/sample.png"}, allImages)
 	if err != nil {
 		t.Fatalf("DeleteImages() error = %v", err)
 	}
@@ -137,6 +145,50 @@ func TestImageServiceDeleteImagesRemovesOriginalAndThumbnail(t *testing.T) {
 	}
 }
 
+func TestImageServiceScopesImagesByOwner(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	alicePath := filepath.Join(config.ImagesDir(), "2026", "04", "29", "alice.png")
+	bobPath := filepath.Join(config.ImagesDir(), "2026", "04", "29", "bob.png")
+	legacyPath := filepath.Join(config.ImagesDir(), "2026", "04", "29", "legacy.png")
+	for _, path := range []string{alicePath, bobPath, legacyPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+		if err := writeTestPNG(path); err != nil {
+			t.Fatalf("writeTestPNG(%s) error = %v", path, err)
+		}
+	}
+
+	service := NewImageService(config)
+	service.RecordImageOwners([]string{"2026/04/29/alice.png"}, "linuxdo:123")
+	service.RecordImageOwners([]string{"http://127.0.0.1:8000/images/2026/04/29/bob.png"}, "linuxdo:456")
+
+	alice := service.ListImages("http://127.0.0.1:8000", "", "", ImageAccessScope{OwnerID: "linuxdo:123"})
+	aliceItems := alice["items"].([]map[string]any)
+	if len(aliceItems) != 1 || aliceItems[0]["path"] != "2026/04/29/alice.png" {
+		t.Fatalf("alice ListImages() = %#v", alice)
+	}
+	admin := service.ListImages("http://127.0.0.1:8000", "", "", allImages)
+	if items := admin["items"].([]map[string]any); len(items) != 3 {
+		t.Fatalf("admin ListImages() = %#v", admin)
+	}
+
+	result, err := service.DeleteImages([]string{"2026/04/29/bob.png", "2026/04/29/alice.png"}, ImageAccessScope{OwnerID: "linuxdo:123"})
+	if err != nil {
+		t.Fatalf("DeleteImages(owner) error = %v", err)
+	}
+	if result["deleted"] != 1 || result["missing"] != 1 {
+		t.Fatalf("DeleteImages(owner) = %#v", result)
+	}
+	if _, err := os.Stat(alicePath); !os.IsNotExist(err) {
+		t.Fatalf("alice image still exists, stat error = %v", err)
+	}
+	if _, err := os.Stat(bobPath); err != nil {
+		t.Fatalf("bob image should not be deleted, stat error = %v", err)
+	}
+}
+
 func TestImageServiceDeleteImagesRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
 	outsidePath := filepath.Join(root, "outside.png")
@@ -145,7 +197,7 @@ func TestImageServiceDeleteImagesRejectsTraversal(t *testing.T) {
 	}
 
 	service := NewImageService(testImageConfig{root: root})
-	if _, err := service.DeleteImages([]string{"../outside.png"}); err == nil {
+	if _, err := service.DeleteImages([]string{"../outside.png"}, allImages); err == nil {
 		t.Fatal("DeleteImages() error = nil, want traversal rejection")
 	}
 	if _, err := os.Stat(outsidePath); err != nil {

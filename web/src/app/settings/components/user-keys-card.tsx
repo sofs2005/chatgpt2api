@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Ban, CheckCircle2, Copy, Eye, EyeOff, KeyRound, LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { Ban, CheckCircle2, Copy, Eye, EyeOff, KeyRound, LoaderCircle, Plus, RefreshCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { createUserKey, deleteUserKey, fetchUserKeys, revealUserKey, updateUserKey, type UserKey } from "@/lib/api";
+import { getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 function formatDateTime(value?: string | null) {
   if (!value) {
@@ -35,6 +36,10 @@ function formatDateTime(value?: string | null) {
   }).format(date);
 }
 
+function normalizeUserKeys(items: UserKey[] | null | undefined) {
+  return Array.isArray(items) ? items : [];
+}
+
 export function UserKeysCard() {
   const didLoadRef = useRef(false);
   const [items, setItems] = useState<UserKey[]>([]);
@@ -46,12 +51,19 @@ export function UserKeysCard() {
   const [revealingIds, setRevealingIds] = useState<Set<string>>(() => new Set());
   const [revealedKeysById, setRevealedKeysById] = useState<Record<string, string>>({});
   const [deletingItem, setDeletingItem] = useState<UserKey | null>(null);
+  const [session, setSession] = useState<StoredAuthSession | null>(null);
+  const isAdmin = session?.role === "admin";
+  const isLinuxDoUser = session?.role === "user" && session.provider === "linuxdo";
+  const safeItems = normalizeUserKeys(items);
+  const visibleItems = isAdmin ? safeItems : safeItems.slice(0, 1);
 
   const load = async () => {
     setIsLoading(true);
     try {
+      const storedSession = await getStoredAuthSession();
+      setSession(storedSession);
       const data = await fetchUserKeys();
-      setItems(data.items);
+      setItems(normalizeUserKeys(data.items));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载用户密钥失败");
     } finally {
@@ -68,16 +80,17 @@ export function UserKeysCard() {
   }, []);
 
   const handleCreate = async () => {
+    const isResetting = isLinuxDoUser && safeItems.length > 0;
     setIsCreating(true);
     try {
-      const data = await createUserKey(name.trim());
-      setItems(data.items);
+      const data = await createUserKey(isAdmin ? name.trim() : "");
+      setItems(normalizeUserKeys(data.items));
       setRevealedKeysById((current) => ({ ...current, [data.item.id]: data.key }));
       setName("");
       setIsDialogOpen(false);
-      toast.success("用户密钥已创建");
+      toast.success(isResetting ? "令牌已重置" : isAdmin ? "用户密钥已创建" : "令牌已生成");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "创建用户密钥失败");
+      toast.error(error instanceof Error ? error.message : isResetting ? "重置令牌失败" : "创建令牌失败");
     } finally {
       setIsCreating(false);
     }
@@ -111,7 +124,7 @@ export function UserKeysCard() {
     setItemPending(item.id, true);
     try {
       const data = await updateUserKey(item.id, { enabled: !item.enabled });
-      setItems(data.items);
+      setItems(normalizeUserKeys(data.items));
       toast.success(item.enabled ? "用户密钥已禁用" : "用户密钥已启用");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新用户密钥失败");
@@ -128,7 +141,7 @@ export function UserKeysCard() {
     setItemPending(item.id, true);
     try {
       const data = await deleteUserKey(item.id);
-      setItems(data.items);
+      setItems(normalizeUserKeys(data.items));
       setDeletingItem(null);
       setRevealedKeysById((current) => {
         const next = { ...current };
@@ -174,6 +187,14 @@ export function UserKeysCard() {
     }
   };
 
+  const handlePrimaryAction = () => {
+    if (isAdmin) {
+      setIsDialogOpen(true);
+      return;
+    }
+    void handleCreate();
+  };
+
   return (
     <>
       <Card>
@@ -184,13 +205,21 @@ export function UserKeysCard() {
                 <KeyRound className="size-5 text-stone-600" />
               </div>
               <div>
-                <h2 className="text-lg font-semibold tracking-tight">用户密钥管理</h2>
-                <p className="text-sm text-stone-500">为普通用户创建专用密钥；普通用户只能进入创作台，不能查看设置和号池。</p>
+                <h2 className="text-lg font-semibold tracking-tight">{isAdmin ? "用户密钥管理" : "我的 API 密钥"}</h2>
+                <p className="text-sm text-stone-500">
+                  {isAdmin ? "管理员可创建和维护普通用户 API 密钥。" : "每个 Linuxdo 账号仅保留一条 API 令牌，重置后旧令牌立即失效。"}
+                </p>
               </div>
             </div>
-            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => setIsDialogOpen(true)}>
-              <Plus className="size-4" />
-              创建用户密钥
+            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={handlePrimaryAction} disabled={isCreating}>
+              {isCreating ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : isAdmin || visibleItems.length === 0 ? (
+                <Plus className="size-4" />
+              ) : (
+                <RefreshCcw className="size-4" />
+              )}
+              {isAdmin ? "创建用户密钥" : visibleItems.length > 0 ? "重置令牌" : "生成令牌"}
             </Button>
           </div>
 
@@ -198,13 +227,13 @@ export function UserKeysCard() {
             <div className="flex items-center justify-center py-10">
               <LoaderCircle className="size-5 animate-spin text-stone-400" />
             </div>
-          ) : items.length === 0 ? (
+          ) : visibleItems.length === 0 ? (
             <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
-              暂无普通用户密钥。点击右上角按钮后即可创建并分发给其他人。
+              {isAdmin ? "暂无普通用户密钥。点击右上角按钮后即可创建并分发给其他人。" : "你还没有 API 令牌。点击右上角按钮即可生成。"}
             </div>
           ) : (
             <div className="space-y-3">
-              {items.map((item) => {
+              {visibleItems.map((item) => {
                 const isPending = pendingIds.has(item.id);
                 const isRevealing = revealingIds.has(item.id);
                 const revealedKey = revealedKeysById[item.id] ?? "";
@@ -219,6 +248,11 @@ export function UserKeysCard() {
                         <Badge variant={item.enabled ? "success" : "secondary"} className="rounded-md">
                           {item.enabled ? "已启用" : "已禁用"}
                         </Badge>
+                        {isAdmin && item.owner_name ? (
+                          <Badge variant="info" className="rounded-md">
+                            {item.owner_name}
+                          </Badge>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
                         <span>创建时间 {formatDateTime(item.created_at)}</span>
@@ -227,7 +261,7 @@ export function UserKeysCard() {
                     </div>
 
                     <div className="flex min-w-0 items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-500">
-                      <span className="shrink-0">密钥</span>
+                      <span className="shrink-0">{isAdmin ? "密钥" : "令牌"}</span>
                       <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-stone-700">
                         {revealedKey || "••••••••••••••••••••••••"}
                       </code>
@@ -262,32 +296,36 @@ export function UserKeysCard() {
                         )}
                         {revealedKey ? "隐藏" : "查看"}
                       </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
-                        onClick={() => void handleToggle(item)}
-                        disabled={isPending}
-                      >
-                        {isPending ? (
-                          <LoaderCircle className="size-4 animate-spin" />
-                        ) : item.enabled ? (
-                          <Ban className="size-4" />
-                        ) : (
-                          <CheckCircle2 className="size-4" />
-                        )}
-                        {item.enabled ? "禁用" : "启用"}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-9 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                        onClick={() => setDeletingItem(item)}
-                        disabled={isPending}
-                      >
-                        {isPending ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                        删除
-                      </Button>
+                      {isAdmin ? (
+                        <>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                            onClick={() => void handleToggle(item)}
+                            disabled={isPending}
+                          >
+                            {isPending ? (
+                              <LoaderCircle className="size-4 animate-spin" />
+                            ) : item.enabled ? (
+                              <Ban className="size-4" />
+                            ) : (
+                              <CheckCircle2 className="size-4" />
+                            )}
+                            {item.enabled ? "禁用" : "启用"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-9 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                            onClick={() => setDeletingItem(item)}
+                            disabled={isPending}
+                          >
+                            {isPending ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                            删除
+                          </Button>
+                        </>
+                      ) : null}
                     </div>
                   </div>
                 );

@@ -6,26 +6,44 @@ import (
 	"strings"
 	"time"
 
+	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 )
 
 func (a *App) handleUserKeys(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireAdmin(w, r); !ok {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	filter, owner, canManage := userKeyScope(identity)
+	if !canManage {
+		util.WriteError(w, http.StatusForbidden, "Linuxdo login or admin permission required")
 		return
 	}
 	base := "/api/auth/users"
 	if r.URL.Path == base {
 		switch r.Method {
 		case http.MethodGet:
-			util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.auth.ListKeys("user")})
+			items := a.auth.ListKeys(filter)
+			if identity.Role != service.AuthRoleAdmin {
+				items = a.auth.ListSingleAPIKeyForOwner(identity.OwnerID)
+			}
+			util.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 		case http.MethodPost:
 			body, _ := readJSONMap(r)
-			item, raw, err := a.auth.CreateKey("user", util.Clean(body["name"]))
+			var item map[string]any
+			var raw string
+			var err error
+			if identity.Role == service.AuthRoleAdmin {
+				item, raw, err = a.auth.CreateAPIKey(service.AuthRoleUser, util.Clean(body["name"]), owner)
+			} else {
+				item, raw, err = a.auth.UpsertAPIKeyForOwner(util.Clean(body["name"]), owner)
+			}
 			if err != nil {
 				util.WriteError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "key": raw, "items": a.auth.ListKeys("user")})
+			util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "key": raw, "items": a.auth.ListKeys(filter)})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -42,7 +60,7 @@ func (a *App) handleUserKeys(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		key, found := a.auth.RevealKey(keyID, "user")
+		key, found := a.auth.RevealKey(keyID, filter)
 		if !found {
 			util.WriteError(w, http.StatusNotFound, "user key not found")
 			return
@@ -68,21 +86,33 @@ func (a *App) handleUserKeys(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusBadRequest, "no updates provided")
 			return
 		}
-		item := a.auth.UpdateKey(keyID, updates, "user")
+		item := a.auth.UpdateKey(keyID, updates, filter)
 		if item == nil {
 			util.WriteError(w, http.StatusNotFound, "user key not found")
 			return
 		}
-		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": a.auth.ListKeys("user")})
+		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": a.auth.ListKeys(filter)})
 	case http.MethodDelete:
-		if !a.auth.DeleteKey(keyID, "user") {
+		if !a.auth.DeleteKey(keyID, filter) {
 			util.WriteError(w, http.StatusNotFound, "user key not found")
 			return
 		}
-		util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.auth.ListKeys("user")})
+		util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.auth.ListKeys(filter)})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func userKeyScope(identity service.Identity) (service.AuthKeyFilter, service.AuthOwner, bool) {
+	filter := service.AuthKeyFilter{Role: service.AuthRoleUser, Kind: service.AuthKindAPIKey}
+	if identity.Role == service.AuthRoleAdmin {
+		return filter, service.AuthOwner{}, true
+	}
+	if identity.Role != service.AuthRoleUser || identity.Provider != service.AuthProviderLinuxDo || identity.OwnerID == "" {
+		return service.AuthKeyFilter{}, service.AuthOwner{}, false
+	}
+	filter.OwnerID = identity.OwnerID
+	return filter, service.AuthOwner{ID: identity.OwnerID, Name: identity.Name, Provider: identity.Provider}, true
 }
 
 func (a *App) handlePublicAnnouncements(w http.ResponseWriter, r *http.Request) {

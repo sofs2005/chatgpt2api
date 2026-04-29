@@ -27,7 +27,13 @@ const (
 type ImageConfig interface {
 	ImagesDir() string
 	ImageThumbnailsDir() string
+	ImageMetadataDir() string
 	CleanupOldImages() int
+}
+
+type ImageAccessScope struct {
+	OwnerID string
+	All     bool
 }
 
 type ImageService struct {
@@ -38,7 +44,7 @@ func NewImageService(config ImageConfig) *ImageService {
 	return &ImageService{config: config}
 }
 
-func (s *ImageService) ListImages(baseURL, startDate, endDate string) map[string]any {
+func (s *ImageService) ListImages(baseURL, startDate, endDate string, scope ImageAccessScope) map[string]any {
 	s.config.CleanupOldImages()
 	root := s.config.ImagesDir()
 	items := make([]map[string]any, 0)
@@ -66,6 +72,10 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string) map[string
 		if endDate != "" && day > endDate {
 			return nil
 		}
+		ownerID := s.imageOwner(rel)
+		if !scope.All && (scope.OwnerID == "" || ownerID != scope.OwnerID) {
+			return nil
+		}
 		thumb := s.ensureThumbnail(path, rel)
 		item := map[string]any{
 			"name":       filepath.Base(path),
@@ -74,6 +84,9 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string) map[string
 			"size":       info.Size(),
 			"url":        publicAssetURL(baseURL, "images", rel),
 			"created_at": info.ModTime().Format("2006-01-02 15:04:05"),
+		}
+		if ownerID != "" {
+			item["owner_id"] = ownerID
 		}
 		if thumbRel, ok := thumb["thumbnail_rel"].(string); ok && thumbRel != "" {
 			item["thumbnail_url"] = publicAssetURL(baseURL, "image-thumbnails", thumbRel)
@@ -104,7 +117,7 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string) map[string
 	return map[string]any{"items": items, "groups": groups}
 }
 
-func (s *ImageService) DeleteImages(paths []string) (map[string]any, error) {
+func (s *ImageService) DeleteImages(paths []string, scope ImageAccessScope) (map[string]any, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("paths is required")
 	}
@@ -135,7 +148,14 @@ func (s *ImageService) DeleteImages(paths []string) (map[string]any, error) {
 		if !pathInsideRoot(imageRoot, imagePath) {
 			return nil, errors.New("invalid image path")
 		}
+		if !scope.All && (scope.OwnerID == "" || s.imageOwner(rel) != scope.OwnerID) {
+			missing++
+			continue
+		}
 		if err := removeImageThumbnail(thumbnailRoot, rel); err != nil {
+			return nil, err
+		}
+		if err := s.removeImageOwner(rel); err != nil {
 			return nil, err
 		}
 		info, err := os.Stat(imagePath)
@@ -159,6 +179,32 @@ func (s *ImageService) DeleteImages(paths []string) (map[string]any, error) {
 		removedPaths = append(removedPaths, rel)
 	}
 	return map[string]any{"deleted": deleted, "missing": missing, "paths": removedPaths}, nil
+}
+
+func (s *ImageService) RecordImageOwners(values []string, ownerID string) {
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return
+	}
+	imageRoot, err := filepath.Abs(s.config.ImagesDir())
+	if err != nil {
+		return
+	}
+	for _, value := range values {
+		rel, err := imageRelativePathFromValue(value)
+		if err != nil {
+			continue
+		}
+		imagePath := filepath.Join(imageRoot, filepath.FromSlash(rel))
+		if !pathInsideRoot(imageRoot, imagePath) {
+			continue
+		}
+		info, err := os.Stat(imagePath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		_ = s.writeImageOwner(rel, ownerID)
+	}
 }
 
 func (s *ImageService) ensureThumbnail(sourcePath, rel string) map[string]any {
@@ -212,6 +258,65 @@ func (s *ImageService) ensureThumbnail(sourcePath, rel string) map[string]any {
 	return map[string]any{"thumbnail_rel": filepath.ToSlash(strings.TrimPrefix(strings.TrimPrefix(thumbPath, s.config.ImageThumbnailsDir()), string(filepath.Separator))), "width": width, "height": height}
 }
 
+func (s *ImageService) imageOwner(rel string) string {
+	metaPath, err := s.imageOwnerMetadataPath(rel)
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var meta map[string]any
+	if json.Unmarshal(data, &meta) != nil {
+		return ""
+	}
+	return strings.TrimSpace(toString(meta["owner_id"]))
+}
+
+func (s *ImageService) writeImageOwner(rel, ownerID string) error {
+	metaPath, err := s.imageOwnerMetadataPath(rel)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		return err
+	}
+	return writeJSONFile(metaPath, map[string]any{
+		"owner_id":   ownerID,
+		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (s *ImageService) removeImageOwner(rel string) error {
+	metaPath, err := s.imageOwnerMetadataPath(rel)
+	if err != nil {
+		return err
+	}
+	removeErr := os.Remove(metaPath)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return removeErr
+	}
+	removeEmptyParentDirs(s.config.ImageMetadataDir(), filepath.Dir(metaPath))
+	return nil
+}
+
+func (s *ImageService) imageOwnerMetadataPath(rel string) (string, error) {
+	rel, err := cleanImageRelativePath(rel)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(s.config.ImageMetadataDir())
+	if err != nil {
+		return "", err
+	}
+	metaPath := filepath.Join(root, filepath.FromSlash(rel)+".json")
+	if !pathInsideRoot(root, metaPath) {
+		return "", errors.New("invalid image path")
+	}
+	return metaPath, nil
+}
+
 func publicAssetURL(baseURL, prefix, rel string) string {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	for i, part := range parts {
@@ -234,6 +339,32 @@ func cleanImageRelativePath(value string) (string, error) {
 		}
 	}
 	return rel, nil
+}
+
+func imageRelativePathFromValue(value string) (string, error) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return "", errors.New("invalid image path")
+	}
+	if parsed, err := url.Parse(text); err == nil {
+		pathValue := parsed.EscapedPath()
+		if pathValue == "" {
+			pathValue = parsed.Path
+		}
+		if parsed.Scheme != "" || strings.HasPrefix(pathValue, "/") {
+			const imagePrefix = "/images/"
+			index := strings.Index(pathValue, imagePrefix)
+			if index < 0 {
+				return "", errors.New("invalid image path")
+			}
+			rel, err := url.PathUnescape(pathValue[index+len(imagePrefix):])
+			if err != nil {
+				return "", errors.New("invalid image path")
+			}
+			return cleanImageRelativePath(rel)
+		}
+	}
+	return cleanImageRelativePath(text)
 }
 
 func removeImageThumbnail(root, rel string) error {

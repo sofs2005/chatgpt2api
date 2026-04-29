@@ -12,6 +12,7 @@ import {
   type ImageModel,
   type ImageQuality,
 } from "@/lib/api";
+import { getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 export type ImageConversationMode = "chat" | "generate" | "image" | "edit";
 export type StoredReferenceImageSource = "upload" | "conversation";
@@ -69,8 +70,24 @@ const imageConversationStorage = localforage.createInstance({
   storeName: "image_conversations",
 });
 
-const IMAGE_CONVERSATIONS_KEY = "items";
+const IMAGE_CONVERSATIONS_KEY_PREFIX = "items";
 let imageConversationWriteQueue: Promise<void> = Promise.resolve();
+
+function conversationScopeFromSession(session: StoredAuthSession | null) {
+  if (!session) {
+    return "anonymous";
+  }
+  const subjectId = session.subjectId.trim();
+  if (!subjectId) {
+    return `${session.provider || "local"}:${session.role}:unknown`;
+  }
+  return `${session.provider || "local"}:${session.role}:${subjectId}`;
+}
+
+async function imageConversationsStorageKey() {
+  const session = await getStoredAuthSession();
+  return `${IMAGE_CONVERSATIONS_KEY_PREFIX}:${conversationScopeFromSession(session)}`;
+}
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
   const normalized = {
@@ -261,10 +278,11 @@ function queueImageConversationWrite<T>(operation: () => Promise<T>): Promise<T>
   return result;
 }
 
-async function readStoredImageConversations(): Promise<ImageConversation[]> {
+async function readStoredImageConversations(storageKey?: string): Promise<ImageConversation[]> {
+  storageKey = storageKey || await imageConversationsStorageKey();
   const items =
     (await imageConversationStorage.getItem<Array<ImageConversation & Record<string, unknown>>>(
-      IMAGE_CONVERSATIONS_KEY,
+      storageKey,
     )) || [];
   return items.map(normalizeConversation);
 }
@@ -275,14 +293,15 @@ export async function listImageConversations(): Promise<ImageConversation[]> {
 
 export async function saveImageConversations(conversations: ImageConversation[]): Promise<void> {
   await queueImageConversationWrite(async () => {
-    const items = await readStoredImageConversations();
+    const storageKey = await imageConversationsStorageKey();
+    const items = await readStoredImageConversations(storageKey);
     const conversationMap = new Map(items.map((item) => [item.id, item]));
     for (const conversation of conversations.map(normalizeConversation)) {
       const current = conversationMap.get(conversation.id);
       conversationMap.set(conversation.id, current ? pickLatestConversation(current, conversation) : conversation);
     }
     await imageConversationStorage.setItem(
-      IMAGE_CONVERSATIONS_KEY,
+      storageKey,
       sortImageConversations([...conversationMap.values()]),
     );
   });
@@ -290,7 +309,8 @@ export async function saveImageConversations(conversations: ImageConversation[])
 
 export async function saveImageConversation(conversation: ImageConversation): Promise<void> {
   await queueImageConversationWrite(async () => {
-    const items = await readStoredImageConversations();
+    const storageKey = await imageConversationsStorageKey();
+    const items = await readStoredImageConversations(storageKey);
     const nextConversation = normalizeConversation(conversation);
     const current = items.find((item) => item.id === nextConversation.id);
     const persistedConversation = current ? pickLatestConversation(current, nextConversation) : nextConversation;
@@ -298,15 +318,16 @@ export async function saveImageConversation(conversation: ImageConversation): Pr
       persistedConversation,
       ...items.filter((item) => item.id !== persistedConversation.id),
     ]);
-    await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, nextItems);
+    await imageConversationStorage.setItem(storageKey, nextItems);
   });
 }
 
 export async function deleteImageConversation(id: string): Promise<void> {
   await queueImageConversationWrite(async () => {
-    const items = await readStoredImageConversations();
+    const storageKey = await imageConversationsStorageKey();
+    const items = await readStoredImageConversations(storageKey);
     await imageConversationStorage.setItem(
-      IMAGE_CONVERSATIONS_KEY,
+      storageKey,
       items.filter((item) => item.id !== id),
     );
   });
@@ -314,7 +335,7 @@ export async function deleteImageConversation(id: string): Promise<void> {
 
 export async function clearImageConversations(): Promise<void> {
   await queueImageConversationWrite(async () => {
-    await imageConversationStorage.removeItem(IMAGE_CONVERSATIONS_KEY);
+    await imageConversationStorage.removeItem(await imageConversationsStorageKey());
   });
 }
 

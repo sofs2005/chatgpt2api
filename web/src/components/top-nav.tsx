@@ -20,12 +20,20 @@ const adminNavItems = [
   { href: "/image", label: "创作台" },
   { href: "/accounts", label: "号池管理" },
   { href: "/register", label: "注册机" },
-  { href: "/image-manager", label: "图片管理" },
+  { href: "/image-manager", label: "图片库" },
   { href: "/logs", label: "日志管理" },
   { href: "/settings", label: "设置" },
 ];
 
-const userNavItems = [{ href: "/image", label: "创作台" }];
+const linuxDoUserNavItems = [
+  { href: "/image", label: "创作台" },
+  { href: "/image-manager", label: "图片库" },
+  { href: "/settings", label: "设置" },
+];
+const userNavItems = [
+  { href: "/image", label: "创作台" },
+  { href: "/image-manager", label: "图片库" },
+];
 const QUOTA_REFRESH_EVENT = "chatgpt2api:quota-refresh";
 
 function formatAvailableQuota(accounts: Account[]) {
@@ -144,12 +152,12 @@ export function TopNav() {
     });
   };
 
-  if (pathname === "/login" || session === undefined || !session) {
+  if (pathname === "/login" || pathname === "/auth/linuxdo/callback" || session === undefined || !session) {
     return null;
   }
 
-  const navItems = session.role === "admin" ? adminNavItems : userNavItems;
-  const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
+  const navItems = session.role === "admin" ? adminNavItems : session.provider === "linuxdo" ? linuxDoUserNavItems : userNavItems;
+  const roleLabel = session.role === "admin" ? "管理员" : session.provider === "linuxdo" ? "Linuxdo 用户" : "普通用户";
 
   return (
     <header className="sticky top-3 z-40 rounded-[24px] border border-[#f2f3f5] bg-white/92 shadow-[0_0_22.576px_rgba(0,0,0,0.08)] backdrop-blur dark:border-border dark:bg-card/92">

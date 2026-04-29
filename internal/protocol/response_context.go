@@ -35,12 +35,16 @@ func NewResponseContextStore(max int) *ResponseContextStore {
 }
 
 func (s *ResponseContextStore) Get(id string) (ResponseContext, bool) {
+	return s.GetScoped("", id)
+}
+
+func (s *ResponseContextStore) GetScoped(scope, id string) (ResponseContext, bool) {
 	if s == nil || strings.TrimSpace(id) == "" {
 		return ResponseContext{}, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	ctx, ok := s.items[id]
+	ctx, ok := s.items[responseContextStoreKey(scope, id)]
 	if !ok {
 		return ResponseContext{}, false
 	}
@@ -48,9 +52,14 @@ func (s *ResponseContextStore) Get(id string) (ResponseContext, bool) {
 }
 
 func (s *ResponseContextStore) Set(id string, ctx ResponseContext) {
+	s.SetScoped("", id, ctx)
+}
+
+func (s *ResponseContextStore) SetScoped(scope, id string, ctx ResponseContext) {
 	if s == nil || strings.TrimSpace(id) == "" {
 		return
 	}
+	key := responseContextStoreKey(scope, id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.items == nil {
@@ -59,10 +68,10 @@ func (s *ResponseContextStore) Set(id string, ctx ResponseContext) {
 	if s.max < 1 {
 		s.max = maxStoredResponseContexts
 	}
-	if _, exists := s.items[id]; !exists {
-		s.order = append(s.order, id)
+	if _, exists := s.items[key]; !exists {
+		s.order = append(s.order, key)
 	}
-	s.items[id] = trimResponseContext(ctx)
+	s.items[key] = trimResponseContext(ctx)
 	for len(s.order) > s.max {
 		oldest := s.order[0]
 		s.order = s.order[1:]
@@ -83,11 +92,15 @@ func (e *Engine) responseContextStore() *ResponseContextStore {
 }
 
 func (e *Engine) responseContextFromPrevious(raw any) (ResponseContext, error) {
+	return e.responseContextFromPreviousScoped("", raw)
+}
+
+func (e *Engine) responseContextFromPreviousScoped(scope string, raw any) (ResponseContext, error) {
 	id := strings.TrimSpace(util.Clean(raw))
 	if id == "" {
 		return ResponseContext{}, nil
 	}
-	ctx, ok := e.responseContextStore().Get(id)
+	ctx, ok := e.responseContextStore().GetScoped(scope, id)
 	if !ok {
 		return ResponseContext{}, HTTPError{Status: 400, Message: "previous_response_id not found or expired"}
 	}
@@ -95,6 +108,10 @@ func (e *Engine) responseContextFromPrevious(raw any) (ResponseContext, error) {
 }
 
 func (e *Engine) rememberResponseContextEvents(events <-chan map[string]any, base ResponseContext) <-chan map[string]any {
+	return e.rememberResponseContextEventsScoped("", events, base)
+}
+
+func (e *Engine) rememberResponseContextEventsScoped(scope string, events <-chan map[string]any, base ResponseContext) <-chan map[string]any {
 	out := make(chan map[string]any)
 	go func() {
 		defer close(out)
@@ -103,7 +120,7 @@ func (e *Engine) rememberResponseContextEvents(events <-chan map[string]any, bas
 				if response := util.StringMap(event["response"]); len(response) > 0 {
 					id := util.Clean(response["id"])
 					if id != "" {
-						e.responseContextStore().Set(id, ResponseContextWithOutput(base, util.AsMapSlice(response["output"])))
+						e.responseContextStore().SetScoped(scope, id, ResponseContextWithOutput(base, util.AsMapSlice(response["output"])))
 					}
 				}
 			}
@@ -111,6 +128,15 @@ func (e *Engine) rememberResponseContextEvents(events <-chan map[string]any, bas
 		}
 	}()
 	return out
+}
+
+func responseContextStoreKey(scope, id string) string {
+	id = strings.TrimSpace(id)
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return id
+	}
+	return scope + "\x00" + id
 }
 
 func ResponseContextWithOutput(base ResponseContext, output []map[string]any) ResponseContext {

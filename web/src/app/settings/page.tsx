@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { LoaderCircle } from "lucide-react";
+import { Navigate } from "react-router-dom";
 
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -47,7 +48,7 @@ function SettingsDataController() {
   return null;
 }
 
-function SettingsPageContent() {
+function AdminSettingsPageContent() {
   return (
     <>
       <SettingsDataController />
@@ -65,10 +66,21 @@ function SettingsPageContent() {
   );
 }
 
-export default function SettingsPage() {
-  const { isCheckingAuth, session } = useAuthGuard(["admin"]);
+function LinuxDoSettingsPageContent() {
+  return (
+    <>
+      <SettingsHeader />
+      <section className="flex flex-col gap-4">
+        <UserKeysCard />
+      </section>
+    </>
+  );
+}
 
-  if (isCheckingAuth || !session || session.role !== "admin") {
+export default function SettingsPage() {
+  const { isCheckingAuth, session } = useAuthGuard(["admin", "user"]);
+
+  if (isCheckingAuth || !session) {
     return (
       <div className="flex min-h-[40vh] items-center justify-center">
         <LoaderCircle className="size-5 animate-spin text-stone-400" />
@@ -76,5 +88,11 @@ export default function SettingsPage() {
     );
   }
 
-  return <SettingsPageContent />;
+  if (session.role === "admin") {
+    return <AdminSettingsPageContent />;
+  }
+  if (session.provider === "linuxdo") {
+    return <LinuxDoSettingsPageContent />;
+  }
+  return <Navigate to="/image" replace />;
 }

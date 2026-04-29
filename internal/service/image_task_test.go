@@ -51,6 +51,37 @@ func TestImageTaskServiceIdempotencyOwnerIsolationAndCompletion(t *testing.T) {
 	}
 }
 
+func TestImageTaskServiceUsesOwnerIDAroundCredentialRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handlerCalls := make(chan map[string]any, 4)
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		handlerCalls <- payload
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
+	}
+	svc := NewImageTaskService(path, handler, handler, func() int { return 30 })
+	ownerID := "linuxdo:123"
+	oldKey := Identity{ID: ownerID, OwnerID: ownerID, CredentialID: "key-old", Name: "Alice", Role: "user"}
+	newKey := Identity{ID: ownerID, OwnerID: ownerID, CredentialID: "key-new", Name: "Alice", Role: "user"}
+	otherOwner := Identity{ID: "linuxdo:456", OwnerID: "linuxdo:456", CredentialID: "key-other", Name: "Bob", Role: "user"}
+
+	if _, err := svc.SubmitGeneration(context.Background(), oldKey, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, newKey, "task-1", TaskStatusSuccess)
+	if got := svc.ListTasks(newKey, []string{"task-1"}); len(got["items"].([]map[string]any)) != 1 {
+		t.Fatalf("rotated credential cannot see owner task: %#v", got)
+	}
+	if got := svc.ListTasks(otherOwner, []string{"task-1"}); len(got["items"].([]map[string]any)) != 0 || len(got["missing_ids"].([]string)) != 1 {
+		t.Fatalf("other owner should not see task: %#v", got)
+	}
+	if _, err := svc.SubmitGeneration(context.Background(), newKey, "task-1", "different", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("second SubmitGeneration() error = %v", err)
+	}
+	if len(handlerCalls) != 1 {
+		t.Fatalf("credential rotation should not create a duplicate task, handler calls = %d", len(handlerCalls))
+	}
+}
+
 func TestImageTaskServiceListTasksReturnsEmptyArrays(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	svc := NewImageTaskService(path, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })

@@ -2,6 +2,7 @@ import { Toaster } from "sonner";
 import { Route, Routes } from "react-router-dom";
 
 import AccountsPage from "@/app/accounts/page";
+import LinuxDoCallbackPage from "@/app/auth/linuxdo/callback/page";
 import HomePage from "@/app/page";
 import ImagePage from "@/app/image/page";
 import ImageManagerPage from "@/app/image-manager/page";
@@ -21,6 +22,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<HomePage />} />
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/auth/linuxdo/callback" element={<LinuxDoCallbackPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/image-manager" element={<ImageManagerPage />} />

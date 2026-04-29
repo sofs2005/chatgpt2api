@@ -1666,7 +1666,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   return (
     <>
       <section className="mx-auto grid h-[calc(100dvh-6.25rem)] min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-5rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
-        <div className="hidden h-full min-h-0 border-r border-stone-200/70 pr-3 lg:block">
+        <div className="hidden h-full min-h-0 border-r border-[#f2f3f5] pr-3 lg:block">
           <ImageSidebar
             conversations={conversations}
             isLoadingHistory={isLoadingHistory}
@@ -1882,33 +1882,34 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           </Dialog>
         ) : null}
 
-        <div className="flex min-h-0 flex-col gap-2 sm:gap-4">
-          <AnnouncementNotifications target="image" className="px-1 sm:px-4" />
-
-          <div className="flex items-center justify-between gap-2 px-1 lg:hidden">
-            <Button
-              variant="outline"
-              className="h-10 flex-1 rounded-2xl border-stone-200 bg-white/90 text-stone-700 shadow-sm"
-              onClick={() => setIsHistoryOpen(true)}
-            >
-              <History className="mr-2 size-4" />
-              历史记录 ({conversations.length})
-            </Button>
-            <Button
-              className="h-10 rounded-2xl bg-stone-950 text-white shadow-sm"
-              onClick={handleCreateDraft}
-            >
-              <Plus className="size-4" />
-              新建
-            </Button>
-            <Button
-              variant="outline"
-              className="h-10 rounded-2xl border-stone-200 bg-white/85 px-3 text-stone-600 shadow-sm"
-              onClick={openClearHistoryConfirm}
-              disabled={conversations.length === 0}
-            >
-              <Trash2 className="size-4" />
-            </Button>
+        <div className="relative flex min-h-0 flex-col gap-2 sm:gap-4">
+          <div className="flex items-center justify-between gap-2 px-1 sm:px-4">
+            <div className="flex min-w-0 flex-1 items-center gap-2 lg:hidden">
+              <Button
+                variant="outline"
+                className="h-10 min-w-0 flex-1 shrink rounded-full border-[#e5e7eb] bg-white text-[#45515e] shadow-sm"
+                onClick={() => setIsHistoryOpen(true)}
+              >
+                <History className="size-4" />
+                <span className="truncate">历史记录 ({conversations.length})</span>
+              </Button>
+              <Button
+                className="h-10 rounded-full shadow-sm"
+                onClick={handleCreateDraft}
+              >
+                <Plus className="size-4" />
+                新建
+              </Button>
+              <Button
+                variant="outline"
+                className="h-10 rounded-full border-[#e5e7eb] bg-white px-3 text-[#45515e] shadow-sm"
+                onClick={openClearHistoryConfirm}
+                disabled={conversations.length === 0}
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+            <AnnouncementNotifications target="image" className="shrink-0 lg:absolute lg:top-0 lg:right-4 lg:z-20" />
           </div>
 
           <div

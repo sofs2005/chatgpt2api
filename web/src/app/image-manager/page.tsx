@@ -292,7 +292,7 @@ function ImageManagerContent() {
             return (
               <figure
                 key={item.url}
-                className={`group relative mb-3 inline-block w-full break-inside-avoid overflow-hidden rounded-lg bg-muted shadow-sm sm:mb-4 ${selected ? "ring-2 ring-primary/80 ring-offset-2" : ""}`}
+                className={`group relative mb-3 inline-block w-full break-inside-avoid overflow-hidden rounded-[22px] bg-muted shadow-[0_0_15px_rgba(44,30,116,0.16)] sm:mb-4 ${selected ? "ring-2 ring-[#1456f0]/80 ring-offset-2" : ""}`}
                 style={{
                   contentVisibility: "auto",
                   containIntrinsicSize: item.width && item.height ? `${Math.min(360, item.width)}px ${Math.min(480, item.height)}px` : "320px 320px",
@@ -315,7 +315,7 @@ function ImageManagerContent() {
                   onClick={() => toggleImageSelection(item)}
                   className={`absolute top-2 left-2 z-10 inline-flex size-6 items-center justify-center rounded-full border transition duration-150 ${
                     selected
-                      ? "border-primary bg-primary text-primary-foreground opacity-100 shadow-sm"
+                      ? "border-[#1456f0] bg-[#1456f0] text-white opacity-100 shadow-sm"
                       : "pointer-events-none border-white/90 bg-black/20 text-transparent opacity-0 shadow-sm group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 hover:bg-black/30"
                   }`}
                   aria-label={selected ? "取消选择图片" : "选择图片"}

@@ -34,13 +34,13 @@ export function ImageSidebar({
       <div className="flex h-full min-h-0 flex-col gap-2 py-1 sm:gap-3 sm:py-2">
         {!hideActionButtons && (
           <div className="flex items-center gap-2">
-            <Button className="h-10 flex-1 rounded-xl bg-stone-950 text-white hover:bg-stone-800" onClick={onCreateDraft}>
+            <Button className="h-10 flex-1 rounded-full" onClick={onCreateDraft}>
               <MessageSquarePlus className="size-4" />
               新建对话
             </Button>
             <Button
               variant="outline"
-              className="h-10 rounded-xl border-stone-200 bg-white/85 px-3 text-stone-600 hover:bg-white"
+              className="h-10 rounded-full border-[#e5e7eb] bg-white px-3 text-[#45515e] hover:bg-black/[0.05]"
               onClick={() => void onClearHistory()}
               disabled={conversations.length === 0}
             >
@@ -51,8 +51,8 @@ export function ImageSidebar({
 
         <div
           className={cn(
-            "min-h-0 flex-1 overflow-y-auto [scrollbar-color:rgba(120,113,108,.45)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-stone-400/45 [&::-webkit-scrollbar-track]:bg-transparent",
-            hideActionButtons ? "space-y-1 pr-0" : "space-y-2 pr-1",
+            "min-h-0 flex-1 overflow-y-auto [scrollbar-color:rgba(142,142,147,.45)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#8e8e93]/45 [&::-webkit-scrollbar-track]:bg-transparent",
+            hideActionButtons ? "flex flex-col gap-1 pr-0" : "flex flex-col gap-2 pr-1",
           )}
         >
           {isLoadingHistory ? (
@@ -70,11 +70,11 @@ export function ImageSidebar({
                 <div
                   key={conversation.id}
                   className={cn(
-                    "group relative w-full border-l-2 text-left transition",
+                    "group relative w-full rounded-[16px] border text-left transition",
                     hideActionButtons ? "px-4 py-3.5" : "px-3 py-2 sm:py-3",
                     active
-                      ? "border-stone-900 bg-black/[0.035] text-stone-950"
-                      : "border-transparent text-stone-700 hover:border-stone-300 hover:bg-white/40",
+                      ? "border-[#f2f3f5] bg-white text-[#18181b] shadow-[0_4px_6px_rgba(0,0,0,0.08)]"
+                      : "border-transparent text-[#45515e] hover:border-[#f2f3f5] hover:bg-white",
                   )}
                 >
                   <button
@@ -85,7 +85,7 @@ export function ImageSidebar({
                     <div className={cn("truncate font-semibold", hideActionButtons ? "text-base" : "text-sm")}>
                       <span className="truncate">{conversation.title}</span>
                     </div>
-                    <div className={cn("mt-1 text-xs", active ? "text-stone-500" : "text-stone-400")}>
+                    <div className={cn("mt-1 text-xs", active ? "text-[#45515e]" : "text-[#8e8e93]")}>
                       {conversation.turns.length} 轮 · {formatConversationTime(conversation.updatedAt)}
                     </div>
                     {stats.running > 0 || stats.queued > 0 ? (

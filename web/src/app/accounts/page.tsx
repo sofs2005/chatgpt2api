@@ -87,12 +87,42 @@ const statusMeta: Record<
 };
 
 const metricCards = [
-  { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
-  { key: "active", label: "正常账户", color: "text-emerald-600", icon: CheckCircle2 },
-  { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
-  { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
-  { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
-  { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
+  {
+    key: "total",
+    label: "账户总数",
+    icon: UserRound,
+    className: "border-transparent bg-[linear-gradient(135deg,#181e25,#45515e)] text-white",
+  },
+  {
+    key: "active",
+    label: "正常账户",
+    icon: CheckCircle2,
+    className: "border-transparent bg-[linear-gradient(135deg,#1456f0,#3daeff)] text-white",
+  },
+  {
+    key: "limited",
+    label: "限流账户",
+    icon: CircleAlert,
+    className: "border-transparent bg-[linear-gradient(135deg,#f59e0b,#fb7185)] text-white",
+  },
+  {
+    key: "abnormal",
+    label: "异常账户",
+    icon: CircleOff,
+    className: "border-transparent bg-[linear-gradient(135deg,#ea5ec1,#7c3aed)] text-white",
+  },
+  {
+    key: "disabled",
+    label: "禁用账户",
+    icon: Ban,
+    className: "border-transparent bg-[linear-gradient(135deg,#8e8e93,#45515e)] text-white",
+  },
+  {
+    key: "quota",
+    label: "剩余额度",
+    icon: RefreshCw,
+    className: "border-transparent bg-[linear-gradient(135deg,#17437d,#60a5fa)] text-white",
+  },
 ] as const;
 
 function isUnlimitedImageQuotaAccount(account: Account) {
@@ -489,13 +519,13 @@ function AccountsPageContent() {
             const Icon = item.icon;
             const value = summary[item.key];
             return (
-              <Card key={item.key}>
+              <Card key={item.key} className={cn("overflow-hidden rounded-[20px] shadow-[0_0_15px_rgba(44,30,116,0.16)]", item.className)}>
                 <CardContent className="p-4">
                   <div className="mb-4 flex items-start justify-between">
-                    <span className="text-xs font-medium text-stone-400">{item.label}</span>
-                    <Icon className="size-4 text-stone-400" />
+                    <span className="text-xs font-medium text-white/78">{item.label}</span>
+                    <Icon className="size-4 text-white/72" />
                   </div>
-                  <div className={cn("text-[1.75rem] font-semibold tracking-tight", item.color)}>
+                  <div className="font-display text-[1.75rem] font-semibold tracking-normal text-white">
                     <span className={typeof value === "number" ? "" : "text-[1.1rem]"}>
                       {typeof value === "number" ? formatCompact(value) : value}
                     </span>

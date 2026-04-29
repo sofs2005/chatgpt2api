@@ -149,7 +149,7 @@ export function ImageComposer({
         </div>
       ) : null}
 
-      <div className="overflow-visible rounded-[22px] border border-stone-200/80 bg-white shadow-[0_16px_50px_-38px_rgba(15,23,42,0.5)]">
+      <div className="overflow-visible rounded-[24px] border border-[#f2f3f5] bg-white shadow-[0_0_15px_rgba(44,30,116,0.16)]">
         <div
           className="cursor-text"
           onClick={() => {
@@ -179,11 +179,11 @@ export function ImageComposer({
                 void onSubmit();
               }
             }}
-            className="min-h-[74px] max-h-[170px] resize-y rounded-t-[22px] rounded-b-none border-0 bg-transparent px-4 py-3 text-[15px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[104px] sm:px-5 sm:py-4"
+            className="min-h-[74px] max-h-[170px] resize-y rounded-t-[24px] rounded-b-none border-0 bg-transparent px-4 py-3 text-[15px] leading-6 text-[#222222] shadow-none placeholder:text-[#8e8e93] focus-visible:ring-0 sm:min-h-[104px] sm:px-5 sm:py-4"
           />
 
           <div
-            className="rounded-b-[22px] border-t border-stone-100 bg-white px-3 py-2.5 sm:px-4"
+            className="rounded-b-[24px] border-t border-[#f2f3f5] bg-white px-3 py-2.5 sm:px-4"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 sm:items-center sm:gap-3">
@@ -191,13 +191,13 @@ export function ImageComposer({
                   <Button
                     type="button"
                     variant="outline"
-                    className="h-8 shrink-0 rounded-full border-stone-200 bg-white px-3 text-xs font-medium text-stone-700 shadow-none hover:bg-stone-50"
+                    className="h-8 shrink-0 rounded-full border-[#e5e7eb] bg-white px-3 text-xs font-medium text-[#45515e] shadow-none hover:bg-black/[0.05]"
                     onClick={onPickReferenceImage}
                   >
                     <ImagePlus className="size-3.5" />
                     <span>上传</span>
                   </Button>
-                  <div className="inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-full bg-stone-100 px-3 text-[10px] font-medium text-stone-600 sm:text-xs">
+                  <div className="inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-full bg-[#f0f0f0] px-3 text-[10px] font-medium text-[#45515e] sm:text-xs">
                     <span>剩余额度</span> {availableQuota}
                   </div>
                   {activeTaskCount > 0 && (
@@ -208,12 +208,12 @@ export function ImageComposer({
                   )}
                   <div
                     ref={modelMenuRef}
-                    className="relative flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2.5 text-[11px] sm:text-xs"
+                    className="relative flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] sm:text-xs"
                   >
-                    <span className="font-medium text-stone-700">模型</span>
+                    <span className="font-medium text-[#45515e]">模型</span>
                     <button
                       type="button"
-                      className="flex h-7 w-[86px] items-center justify-between bg-transparent text-left text-xs font-semibold text-stone-800 min-[390px]:w-[112px] sm:w-[148px]"
+                      className="flex h-7 w-[86px] items-center justify-between bg-transparent text-left text-xs font-semibold text-[#18181b] min-[390px]:w-[112px] sm:w-[148px]"
                       onClick={() => {
                         setIsModelMenuOpen((open) => !open);
                         setIsSizeMenuOpen(false);
@@ -223,7 +223,7 @@ export function ImageComposer({
                       <ChevronDown className={cn("size-4 shrink-0 opacity-60 transition", isModelMenuOpen && "rotate-180")} />
                     </button>
                     {isModelMenuOpen ? (
-                      <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] z-[80] max-h-[45dvh] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-1.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+8px)] sm:left-0 sm:w-[218px]">
+                      <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] z-[80] max-h-[45dvh] overflow-y-auto rounded-[20px] border border-[#e5e7eb] bg-white p-1.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+8px)] sm:left-0 sm:w-[218px]">
                         {imageModelOptions.map((option) => {
                           const active = option.value === imageModel;
                           return (
@@ -231,8 +231,8 @@ export function ImageComposer({
                               key={option.value}
                               type="button"
                               className={cn(
-                                "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-stone-700 transition hover:bg-stone-100",
-                                active && "bg-stone-100 font-medium text-stone-950",
+                                "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-[#45515e] transition hover:bg-black/[0.05]",
+                                active && "bg-black/[0.05] font-medium text-[#18181b]",
                               )}
                               onClick={() => {
                                 onImageModelChange(option.value);
@@ -247,8 +247,8 @@ export function ImageComposer({
                       </div>
                     ) : null}
                   </div>
-                  <div className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2.5">
-                    <span className="text-[11px] font-medium text-stone-700 sm:text-xs">张数</span>
+                  <div className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5">
+                    <span className="text-[11px] font-medium text-[#45515e] sm:text-xs">张数</span>
                     <Input
                       type="number"
                       inputMode="numeric"
@@ -257,17 +257,17 @@ export function ImageComposer({
                       step="1"
                       value={imageCount}
                       onChange={(event) => onImageCountChange(event.target.value)}
-                      className="h-7 w-[36px] border-0 bg-transparent px-0 text-center text-xs font-semibold text-stone-800 shadow-none focus-visible:ring-0 sm:w-[46px]"
+                      className="h-7 w-[36px] border-0 bg-transparent px-0 text-center text-xs font-semibold text-[#18181b] shadow-none focus-visible:ring-0 sm:w-[46px]"
                     />
                   </div>
                   <div
                     ref={sizeMenuRef}
-                    className="relative flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2.5 text-[11px] sm:text-xs"
+                    className="relative flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] sm:text-xs"
                   >
-                    <span className="font-medium text-stone-700">比例</span>
+                    <span className="font-medium text-[#45515e]">比例</span>
                     <button
                       type="button"
-                      className="flex h-7 w-[78px] items-center justify-between bg-transparent text-left text-xs font-semibold text-stone-800 min-[390px]:w-[96px] sm:w-[126px]"
+                      className="flex h-7 w-[78px] items-center justify-between bg-transparent text-left text-xs font-semibold text-[#18181b] min-[390px]:w-[96px] sm:w-[126px]"
                       onClick={() => {
                         setIsSizeMenuOpen((open) => !open);
                         setIsModelMenuOpen(false);
@@ -277,7 +277,7 @@ export function ImageComposer({
                       <ChevronDown className={cn("size-4 shrink-0 opacity-60 transition", isSizeMenuOpen && "rotate-180")} />
                     </button>
                     {isSizeMenuOpen ? (
-                      <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] z-[80] max-h-[45dvh] overflow-y-auto rounded-2xl border border-stone-200 bg-white p-1.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+8px)] sm:left-0 sm:w-[186px]">
+                      <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] z-[80] max-h-[45dvh] overflow-y-auto rounded-[20px] border border-[#e5e7eb] bg-white p-1.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+8px)] sm:left-0 sm:w-[186px]">
                         {IMAGE_SIZE_OPTIONS.map((option) => {
                           const active = option.value === imageSize;
                           return (
@@ -285,8 +285,8 @@ export function ImageComposer({
                               key={option.label}
                               type="button"
                               className={cn(
-                                "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-stone-700 transition hover:bg-stone-100",
-                                active && "bg-stone-100 font-medium text-stone-950",
+                                "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-[#45515e] transition hover:bg-black/[0.05]",
+                                active && "bg-black/[0.05] font-medium text-[#18181b]",
                               )}
                               onClick={() => {
                                 onImageSizeChange(option.value);
@@ -307,7 +307,7 @@ export function ImageComposer({
                 type="button"
                 onClick={() => void onSubmit()}
                 disabled={!prompt.trim()}
-                className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-stone-950 text-white shadow-sm transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300 sm:size-10"
+                className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-[#181e25] text-white shadow-[0_4px_10px_rgba(24,30,37,0.12)] transition hover:bg-[#2a323d] disabled:cursor-not-allowed disabled:bg-[#d1d5db] sm:size-10"
                 aria-label={referenceImages.length > 0 ? "编辑图片" : "生成图片"}
               >
                 <ArrowUp className="size-3.5 sm:size-4" />

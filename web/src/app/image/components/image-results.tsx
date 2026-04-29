@@ -217,20 +217,15 @@ export function ImageResults({
     return (
       <div className="flex h-full min-h-[260px] items-center justify-center text-center sm:min-h-[420px]">
         <div className="w-full max-w-4xl">
-          <h1
-            className="text-2xl font-semibold tracking-tight text-stone-950 sm:text-3xl md:text-5xl"
-            style={{
-              fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
-            }}
-          >
+          <div className="mx-auto mb-6 grid max-w-[520px] grid-cols-3 gap-3">
+            <div className="h-24 rounded-[24px] bg-[linear-gradient(135deg,#1456f0,#3daeff)] shadow-[0_0_15px_rgba(44,30,116,0.16)] sm:h-32" />
+            <div className="h-24 rounded-[24px] bg-[linear-gradient(135deg,#ea5ec1,#7c3aed)] shadow-[0_0_15px_rgba(44,30,116,0.16)] sm:h-32" />
+            <div className="h-24 rounded-[24px] bg-[linear-gradient(135deg,#f59e0b,#fb7185)] shadow-[0_0_15px_rgba(44,30,116,0.16)] sm:h-32" />
+          </div>
+          <h1 className="font-display text-2xl leading-[1.1] font-medium text-[#222222] sm:text-4xl md:text-5xl">
             Turn ideas into images
           </h1>
-          <p
-            className="mx-auto mt-3 max-w-[280px] text-sm italic tracking-[0.01em] text-stone-500 sm:mt-4 sm:max-w-none sm:text-[15px]"
-            style={{
-              fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
-            }}
-          >
+          <p className="mx-auto mt-3 max-w-[420px] text-sm leading-6 text-[#45515e] sm:mt-4 sm:text-[15px]">
             在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。
           </p>
         </div>
@@ -298,16 +293,16 @@ export function ImageResults({
         return (
           <div key={turn.id} className="flex flex-col gap-3 sm:gap-4">
             <div className="flex justify-end">
-              <article className="w-full max-w-[min(94%,760px)] rounded-[22px] border border-stone-200/80 bg-white px-4 py-3 text-left text-[14px] leading-6 text-stone-900 shadow-sm sm:px-5 sm:py-4 sm:text-[15px] sm:leading-7">
-                <div className="mb-3 flex items-start justify-between gap-3 border-b border-stone-100 pb-2">
-                  <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] leading-5 text-stone-500">
-                    <span className="rounded-full bg-stone-100 px-2.5 py-0.5 text-stone-600">第 {turnIndex + 1} 轮</span>
-                    <span className="rounded-full bg-stone-100 px-2.5 py-0.5 text-stone-600">{getTurnModeLabel(turn)}</span>
-                    <span className="rounded-full bg-stone-100 px-2.5 py-0.5 text-stone-600">{turn.model}</span>
-                    <span className="rounded-full bg-stone-100 px-2.5 py-0.5 text-stone-600">
+              <article className="w-full max-w-[min(94%,760px)] rounded-[24px] border border-[#f2f3f5] bg-white px-4 py-3 text-left text-[14px] leading-6 text-[#222222] shadow-[0_4px_6px_rgba(0,0,0,0.08)] sm:px-5 sm:py-4 sm:text-[15px] sm:leading-7">
+                <div className="mb-3 flex items-start justify-between gap-3 border-b border-[#f2f3f5] pb-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] leading-5 text-[#45515e]">
+                    <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">第 {turnIndex + 1} 轮</span>
+                    <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">{getTurnModeLabel(turn)}</span>
+                    <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">{turn.model}</span>
+                    <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">
                       {getTurnStatusLabel(turn.status)}
                     </span>
-                    <span className="px-1 text-stone-400">{formatConversationTime(turn.createdAt)}</span>
+                    <span className="px-1 text-[#8e8e93]">{formatConversationTime(turn.createdAt)}</span>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     {turnBusy ? (
@@ -328,7 +323,7 @@ export function ImageResults({
                           type="button"
                           variant="outline"
                           size="icon"
-                          className="size-8 rounded-full border-stone-200 bg-white text-stone-600 shadow-none hover:bg-stone-50"
+                          className="size-8 rounded-full border-[#e5e7eb] bg-white text-[#45515e] shadow-none hover:bg-black/[0.05]"
                           onClick={() => onEditTurn(selectedConversation.id, turn.id)}
                           aria-label="编辑生成设置"
                           title="编辑"
@@ -339,7 +334,7 @@ export function ImageResults({
                           type="button"
                           variant="outline"
                           size="icon"
-                          className="size-8 rounded-full border-stone-200 bg-white text-stone-600 shadow-none hover:bg-stone-50"
+                          className="size-8 rounded-full border-[#e5e7eb] bg-white text-[#45515e] shadow-none hover:bg-black/[0.05]"
                           disabled={turnBusy || !turn.prompt.trim()}
                           onClick={() => void onRegenerateTurn(selectedConversation.id, turn.id)}
                           aria-label="重新生成"
@@ -380,14 +375,14 @@ export function ImageResults({
               <section className="w-full px-1">
                 {showResultSummary ? (
                   <div className="mb-3 flex flex-col gap-2 sm:mb-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500 sm:gap-2 sm:text-xs">
-                      <span className="font-medium text-stone-700">生成结果</span>
-                      <span className="rounded-full bg-stone-100 px-3 py-1">{resultCount} 张</span>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[#45515e] sm:gap-2 sm:text-xs">
+                      <span className="font-medium text-[#222222]">生成结果</span>
+                      <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{resultCount} 张</span>
                       {turn.count !== resultCount ? (
-                        <span className="rounded-full bg-stone-100 px-3 py-1">目标 {turn.count} 张</span>
+                        <span className="rounded-full bg-[#f0f0f0] px-3 py-1">目标 {turn.count} 张</span>
                       ) : null}
-                      {turn.size ? <span className="rounded-full bg-stone-100 px-3 py-1">{turn.size}</span> : null}
-                      {outcomeLabel ? <span className="rounded-full bg-stone-100 px-3 py-1">{outcomeLabel}</span> : null}
+                      {turn.size ? <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{turn.size}</span> : null}
+                      {outcomeLabel ? <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{outcomeLabel}</span> : null}
                       <span className={cn("rounded-full px-3 py-1", getStatusChipClass(turn.status))}>
                         {getTurnStatusLabel(turn.status)}
                       </span>
@@ -405,7 +400,7 @@ export function ImageResults({
                     <Button
                       type="button"
                       size="sm"
-                      className="h-8 rounded-full bg-indigo-600 px-2.5 text-[11px] text-white shadow-sm hover:bg-indigo-500"
+                      className="h-8 rounded-full bg-[#1456f0] px-2.5 text-[11px] text-white shadow-sm hover:bg-[#2563eb]"
                       disabled={selectedDownloadableImages.length === 0 || downloadingKey !== null}
                       onClick={() =>
                         void downloadItems(
@@ -425,7 +420,7 @@ export function ImageResults({
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-8 rounded-full border-stone-200 bg-white px-2.5 text-[11px] text-stone-700 shadow-sm hover:bg-stone-50"
+                      className="h-8 rounded-full border-[#e5e7eb] bg-white px-2.5 text-[11px] text-[#45515e] shadow-sm hover:bg-black/[0.05]"
                       disabled={downloadingKey !== null}
                       onClick={() =>
                         void downloadItems(
@@ -449,7 +444,7 @@ export function ImageResults({
                     {textReplyImages.map(({ image, index }) => (
                       <div
                         key={image.id}
-                        className="w-full max-w-[min(94%,760px)] rounded-[18px] border border-stone-200/80 bg-white px-4 py-3 text-left text-sm leading-6 text-stone-700 shadow-sm"
+                        className="w-full max-w-[min(94%,760px)] rounded-[20px] border border-[#f2f3f5] bg-white px-4 py-3 text-left text-sm leading-6 text-[#45515e] shadow-[0_4px_6px_rgba(0,0,0,0.08)]"
                       >
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">
@@ -459,7 +454,7 @@ export function ImageResults({
                             type="button"
                             variant="outline"
                             size="sm"
-                            className="h-8 rounded-full border-stone-200 bg-white px-3 text-xs text-stone-600 shadow-none hover:bg-stone-50 hover:text-stone-800"
+                            className="h-8 rounded-full border-[#e5e7eb] bg-white px-3 text-xs text-[#45515e] shadow-none hover:bg-black/[0.05] hover:text-[#18181b]"
                             disabled={turnBusy || !turn.prompt.trim()}
                             onClick={() => void onRetryImage(selectedConversation.id, turn.id, index)}
                           >
@@ -490,8 +485,8 @@ export function ImageResults({
                         <figure
                           key={image.id}
                           className={cn(
-                            "group relative mb-3 inline-block w-full break-inside-avoid overflow-hidden rounded-[18px] bg-stone-100 shadow-sm sm:mb-4",
-                            selected && "ring-2 ring-indigo-500/90 ring-offset-2",
+                            "group relative mb-3 inline-block w-full break-inside-avoid overflow-hidden rounded-[22px] bg-[#f0f0f0] shadow-[0_0_15px_rgba(44,30,116,0.16)] sm:mb-4",
+                            selected && "ring-2 ring-[#1456f0]/90 ring-offset-2",
                           )}
                         >
                           <div className="block w-full overflow-hidden">
@@ -517,7 +512,7 @@ export function ImageResults({
                             className={cn(
                               "absolute top-2 left-2 z-10 inline-flex size-6 items-center justify-center rounded-full border transition duration-150",
                               selected
-                                ? "border-indigo-500 bg-indigo-500 text-white opacity-100 shadow-sm"
+                                ? "border-[#1456f0] bg-[#1456f0] text-white opacity-100 shadow-sm"
                                 : "pointer-events-none border-white/90 bg-black/20 text-transparent opacity-0 shadow-sm group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 hover:bg-black/30",
                             )}
                             aria-label={selected ? "取消选择图片" : "选择图片"}
@@ -666,7 +661,7 @@ function getStatusChipClass(status: ImageTurnStatus) {
     return "bg-amber-50 text-amber-700";
   }
   if (status === "generating") {
-    return "bg-blue-50 text-blue-700";
+    return "bg-blue-50 text-[#1456f0]";
   }
   if (status === "success") {
     return "bg-emerald-50 text-emerald-700";

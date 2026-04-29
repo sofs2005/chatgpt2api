@@ -16,7 +16,7 @@ export default function App() {
     <>
       <Toaster position="top-center" richColors offset={48} />
       <main className="min-h-screen bg-background text-foreground">
-        <div className="mx-auto flex min-h-screen max-w-[1440px] flex-col gap-4 px-3 py-3 sm:px-5 lg:px-6">
+        <div className="mx-auto flex min-h-screen max-w-[1440px] flex-col gap-5 px-3 py-3 sm:px-5 lg:px-6">
           <TopNav />
           <Routes>
             <Route path="/" element={<HomePage />} />

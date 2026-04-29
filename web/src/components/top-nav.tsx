@@ -63,20 +63,21 @@ export function TopNav() {
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
 
   return (
-    <header className="sticky top-3 z-40 rounded-lg border border-border bg-background/95 shadow-sm backdrop-blur">
-      <div className="flex min-h-12 flex-col gap-2 px-3 py-2 sm:h-12 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4 sm:py-0">
+    <header className="sticky top-3 z-40 rounded-[24px] border border-[#f2f3f5] bg-white/92 shadow-[0_0_22.576px_rgba(0,0,0,0.08)] backdrop-blur">
+      <div className="flex min-h-14 flex-col gap-2 px-3 py-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4">
         <div className="flex items-center justify-between gap-3 sm:justify-start">
           <Link
             to="/image"
-            className="shrink-0 py-1 text-[15px] font-semibold tracking-tight text-foreground transition hover:text-muted-foreground"
+            className="font-display inline-flex shrink-0 items-center gap-2 py-1 text-[15px] font-semibold text-[#18181b] transition hover:text-[#1456f0]"
           >
+            <span className="size-3 rounded-full bg-[#ea5ec1] shadow-[8px_0_0_#1456f0,16px_0_0_#3daeff]" />
             chatgpt2api
           </Link>
           <a
             href="https://github.com/basketikun/chatgpt2api"
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1.5 py-1 text-sm text-muted-foreground transition hover:text-foreground"
+            className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-sm text-[#45515e] transition hover:bg-black/[0.05] hover:text-[#18181b]"
             aria-label="GitHub repository"
           >
             <Github className="size-4" />
@@ -84,7 +85,7 @@ export function TopNav() {
           </a>
           <button
             type="button"
-            className="ml-auto shrink-0 rounded-md px-2 py-1 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground sm:hidden"
+            className="ml-auto shrink-0 rounded-full px-3 py-1 text-xs font-medium text-[#45515e] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:hidden"
             onClick={() => void handleLogout()}
           >
             退出
@@ -99,10 +100,10 @@ export function TopNav() {
                 to={item.href}
                 className={() =>
                   cn(
-                    "relative shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-[13px] font-medium transition sm:text-sm",
+                    "relative shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[13px] font-medium transition sm:text-sm",
                     active
-                      ? "bg-primary text-primary-foreground shadow-xs"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      ? "bg-black/[0.06] text-[#18181b]"
+                      : "text-[#45515e] hover:bg-black/[0.05] hover:text-[#18181b]",
                   )
                 }
               >
@@ -112,15 +113,15 @@ export function TopNav() {
           })}
         </nav>
         <div className="hidden items-center justify-end gap-2 sm:flex sm:gap-3">
-          <span className="hidden rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground sm:inline-block">
+          <span className="hidden rounded-full bg-[#f0f0f0] px-2.5 py-1 text-[11px] font-medium text-[#45515e] sm:inline-block">
             {roleLabel}
           </span>
-          <span className="hidden rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground sm:inline-block">
+          <span className="hidden rounded-full bg-[#f0f0f0] px-2.5 py-1 text-[11px] font-medium text-[#45515e] sm:inline-block">
             v{webConfig.appVersion}
           </span>
           <button
             type="button"
-            className="rounded-md px-2 py-1 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground"
+            className="rounded-full px-3 py-1 text-sm text-[#45515e] transition hover:bg-black/[0.05] hover:text-[#18181b]"
             onClick={() => void handleLogout()}
           >
             退出

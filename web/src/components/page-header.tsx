@@ -13,15 +13,17 @@ export function PageHeader({ eyebrow, title, actions, className }: PageHeaderPro
   return (
     <section
       className={cn(
-        "flex flex-col gap-4 border-b border-border/80 pb-4 lg:flex-row lg:items-end lg:justify-between",
+        "flex flex-col gap-5 border-b border-[#f2f3f5] pb-5 lg:flex-row lg:items-end lg:justify-between",
         className,
       )}
     >
-      <div className="flex flex-col gap-1">
-        <div className="text-[11px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
+      <div className="flex flex-col gap-1.5">
+        <div className="font-mid text-[11px] font-medium tracking-[0.12em] text-[#8e8e93] uppercase">
           {eyebrow}
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">{title}</h1>
+        <h1 className="font-display text-[2rem] leading-[1.15] font-semibold text-foreground sm:text-[2.35rem]">
+          {title}
+        </h1>
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
     </section>

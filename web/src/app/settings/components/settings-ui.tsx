@@ -6,7 +6,6 @@ import type { LucideIcon } from "lucide-react";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -51,7 +50,6 @@ export function SettingsCard({
   children,
   className,
   contentClassName,
-  description,
   icon: Icon,
   meta,
   title,
@@ -64,8 +62,8 @@ export function SettingsCard({
         className,
       )}
     >
-      <CardHeader className="gap-4 border-b border-[#f2f3f5] p-5 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex min-w-0 items-start gap-3">
+      <CardHeader className="gap-4 p-5 pb-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
           <div
             className={cn(
               "flex size-10 shrink-0 items-center justify-center rounded-[13px]",
@@ -78,7 +76,6 @@ export function SettingsCard({
             <CardTitle className="text-lg leading-7 font-semibold">
               {title}
             </CardTitle>
-            <CardDescription className="mt-1">{description}</CardDescription>
           </div>
         </div>
         {meta || action ? (

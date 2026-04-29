@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { LoaderCircle } from "lucide-react";
 import { Navigate } from "react-router-dom";
 
@@ -48,17 +48,31 @@ function SettingsDataController() {
   return null;
 }
 
+function SettingsMasonryItem({ children }: { children: ReactNode }) {
+  return <div className="mb-5 break-inside-avoid">{children}</div>;
+}
+
 function AdminSettingsPageContent() {
   return (
     <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-5 pb-8">
       <SettingsDataController />
       <SettingsHeader />
-      <section className="flex flex-col gap-5">
-        <ConfigCard />
-        <LinuxDoLoginCard />
-        <AnnouncementsCard />
-        <CPAPoolsCard />
-        <Sub2APIConnections />
+      <section className="columns-1 gap-5 md:columns-2">
+        <SettingsMasonryItem>
+          <ConfigCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
+          <LinuxDoLoginCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
+          <AnnouncementsCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
+          <CPAPoolsCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
+          <Sub2APIConnections />
+        </SettingsMasonryItem>
       </section>
       <CPAPoolDialog />
       <ImportBrowserDialog />

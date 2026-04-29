@@ -76,6 +76,38 @@ func TestStoreUpdatePersistsSettingsWithoutAuthKey(t *testing.T) {
 	}
 }
 
+func TestStoreNormalizesUnsupportedLoginPageImageMode(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	t.Setenv("CHATGPT2API_AUTH_KEY", "admin-secret")
+	unsetEnv(t, "CHATGPT2API_LOGIN_PAGE_IMAGE_MODE")
+	unsetLinuxDoEnv(t)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	got, err := store.Update(map[string]any{"login_page_image_mode": "repeat"})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertConfigValue(t, got, "login_page_image_mode", "contain")
+	if store.LoginPageImageMode() != "contain" {
+		t.Fatalf("LoginPageImageMode() = %q, want contain", store.LoginPageImageMode())
+	}
+	envData, err := os.ReadFile(filepath.Join(root, ".env"))
+	if err != nil {
+		t.Fatalf("read .env: %v", err)
+	}
+	envText := string(envData)
+	if strings.Contains(envText, "CHATGPT2API_LOGIN_PAGE_IMAGE_MODE=repeat") {
+		t.Fatalf(".env persisted unsupported login page image mode:\n%s", envText)
+	}
+	if !strings.Contains(envText, "CHATGPT2API_LOGIN_PAGE_IMAGE_MODE=contain") {
+		t.Fatalf(".env missing normalized login page image mode:\n%s", envText)
+	}
+}
+
 func TestStoreUpdatePersistsLinuxDoSettingsWithoutLeakingSecret(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)

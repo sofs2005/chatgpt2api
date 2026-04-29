@@ -12,6 +12,7 @@ import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
 import { LinuxDoLoginCard } from "./components/linuxdo-login-card";
+import { LoginPageImageCard } from "./components/login-page-image-card";
 import { SettingsHeader } from "./components/settings-header";
 import { Sub2APIConnections } from "./components/sub2api-connections";
 import { useSettingsStore } from "./store";
@@ -63,6 +64,9 @@ function AdminSettingsPageContent() {
         </SettingsMasonryItem>
         <SettingsMasonryItem>
           <LinuxDoLoginCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
+          <LoginPageImageCard />
         </SettingsMasonryItem>
         <SettingsMasonryItem>
           <AnnouncementsCard />

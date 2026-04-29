@@ -1,7 +1,7 @@
 <h1 align="center">ChatGPT2API</h1>
 
 
-<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线创作台、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
+<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线创作台、号池管理、图片库、日志与设置后台、多种账号导入方式与 Docker 自托管部署能力。管理端前端基于 React + Vite + Tailwind CSS / shadcn-style 组件构建，后台框架与登录页、设置页等视觉交互参考 <a href="https://github.com/ZyphrZero/react-go-admin">ZyphrZero/react-go-admin</a>。</p>
 
 > [!WARNING]
 > 免责声明：
@@ -19,6 +19,12 @@
 
 > [!CAUTION]
 > 旧版本存在已知漏洞，请尽快升级到最新版本。公网部署时请尽量不要放置敏感信息，并自行做好访问控制与隔离。
+
+## 项目介绍
+
+ChatGPT2API 是一个 Go 后端与 Vite / React 管理端组成的自托管服务。后端负责对外提供 OpenAI 兼容图片 API、账号池调度、图片任务与日志存储；前端提供登录、创作台、号池管理、图片库、用户管理、日志和设置等后台页面。
+
+管理端的后台框架、登录页布局、暗色模式切换动画、设置页交互和整体组件风格参考 [ZyphrZero/react-go-admin](https://github.com/ZyphrZero/react-go-admin)，并结合本项目的图片生成、账号池和自托管运维场景做了定制。
 
 ## 快速开始
 

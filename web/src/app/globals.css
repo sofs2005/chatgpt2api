@@ -1,3 +1,4 @@
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
 
@@ -7,6 +8,7 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: "DM Sans", "Helvetica Neue", Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
+  --font-login: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
   --font-display: Outfit, "Helvetica Neue", Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
   --font-mid: Poppins, "Helvetica Neue", Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
   --font-data: Roboto, "Helvetica Neue", Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
@@ -47,6 +49,9 @@
 }
 
 :root {
+  --theme-transition-x: 50vw;
+  --theme-transition-y: 50vh;
+  --theme-transition-radius: 0px;
   --radius: 0.8125rem;
   --background: #f6f8fc;
   --foreground: #222222;
@@ -140,6 +145,23 @@
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
+  }
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-new(root) {
+  clip-path: circle(0 at var(--theme-transition-x) var(--theme-transition-y));
+  animation: theme-reveal 420ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes theme-reveal {
+  to {
+    clip-path: circle(var(--theme-transition-radius) at var(--theme-transition-x) var(--theme-transition-y));
   }
 }
 

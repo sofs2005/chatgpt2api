@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
   Ban,
@@ -198,8 +198,9 @@ function downloadTokens(accounts: Account[]) {
   URL.revokeObjectURL(url);
 }
 
-function normalizeAccounts(items: Account[]): Account[] {
-  return items.map((item) => ({
+function normalizeAccounts(items: Account[] | null | undefined): Account[] {
+  const accountItems = Array.isArray(items) ? items : [];
+  return accountItems.map((item) => ({
     ...item,
     type:
       item.type === "Plus" ||
@@ -230,14 +231,20 @@ function AccountsPageContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
 
-  const loadAccounts = async (silent = false) => {
+  const applyAccountItems = useCallback((items: Account[] | null | undefined) => {
+    const nextAccounts = normalizeAccounts(items);
+    setAccounts(nextAccounts);
+    setSelectedIds((prev) => prev.filter((id) => nextAccounts.some((item) => item.id === id)));
+    return nextAccounts;
+  }, []);
+
+  const loadAccounts = useCallback(async (silent = false) => {
     if (!silent) {
       setIsLoading(true);
     }
     try {
       const data = await fetchAccounts();
-      setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      applyAccountItems(data.items);
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
       toast.error(message);
@@ -246,7 +253,7 @@ function AccountsPageContent() {
         setIsLoading(false);
       }
     }
-  };
+  }, [applyAccountItems]);
 
   useEffect(() => {
     if (didLoadRef.current) {
@@ -254,7 +261,7 @@ function AccountsPageContent() {
     }
     didLoadRef.current = true;
     void loadAccounts();
-  }, []);
+  }, [loadAccounts]);
 
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -273,6 +280,8 @@ function AccountsPageContent() {
   const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
   const allCurrentSelected =
     currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.id));
+  const showInitialEmptyState = !isLoading && accounts.length === 0;
+  const showFilteredEmptyState = !isLoading && accounts.length > 0 && currentRows.length === 0;
 
   const summary = useMemo(() => {
     const total = accounts.length;
@@ -317,8 +326,7 @@ function AccountsPageContent() {
     setIsDeleting(true);
     try {
       const data = await deleteAccounts(tokens);
-      setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      applyAccountItems(data.items);
       toast.success(`删除 ${data.removed ?? 0} 个账户`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除账户失败";
@@ -337,8 +345,7 @@ function AccountsPageContent() {
     setIsRefreshing(true);
     try {
       const data = await refreshAccounts(accessTokens);
-      setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      applyAccountItems(data.items);
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
         toast.error(
@@ -374,8 +381,7 @@ function AccountsPageContent() {
         status: editStatus,
         quota: Number(editQuota || 0),
       });
-      setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      applyAccountItems(data.items);
       setEditingAccount(null);
       toast.success("账号信息已更新");
     } catch (error) {
@@ -422,7 +428,7 @@ function AccountsPageContent() {
           <AccountImportDialog
             disabled={isLoading || isRefreshing || isDeleting}
             onImported={(items) => {
-              setAccounts(normalizeAccounts(items));
+              applyAccountItems(items);
               setSelectedIds([]);
               setPage(1);
             }}
@@ -656,6 +662,20 @@ function AccountsPageContent() {
               </div>
             </div>
 
+            {showInitialEmptyState ? (
+              <div className="flex min-h-[260px] flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                <div className="rounded-[16px] bg-[#edf4ff] p-4 text-[#1456f0] ring-1 ring-blue-100">
+                  <UserRound className="size-7" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-medium text-foreground">暂无账号</p>
+                  <p className="max-w-[28rem] text-sm leading-6 text-muted-foreground">
+                    导入 Token 后，账号状态、类型、额度和调用统计会在这里显示。
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <>
             <div className="overflow-x-auto">
               <Table className="min-w-[920px]">
                 <TableHeader>
@@ -782,7 +802,7 @@ function AccountsPageContent() {
                 </TableBody>
               </Table>
 
-              {!isLoading && currentRows.length === 0 ? (
+              {showFilteredEmptyState ? (
                 <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
                   <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
                     <Search className="size-5" />
@@ -864,6 +884,8 @@ function AccountsPageContent() {
                 </Button>
               </div>
             </div>
+              </>
+            )}
           </CardContent>
         </Card>
       </section>

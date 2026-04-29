@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -242,6 +244,118 @@ func TestImageTaskFailureWritesCallLog(t *testing.T) {
 	}
 	if detail["key_name"] != "frontend" || detail["key_role"] != "user" {
 		t.Fatalf("call log did not include user key identity: %#v", detail)
+	}
+}
+
+func TestEmptyCollectionEndpointsReturnArrays(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	for _, tc := range []struct {
+		name string
+		path string
+		keys []string
+	}{
+		{name: "accounts", path: "/api/accounts", keys: []string{"items"}},
+		{name: "images", path: "/api/images", keys: []string{"items", "groups"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer admin-secret")
+			res := httptest.NewRecorder()
+			app.Handler().ServeHTTP(res, req)
+			if res.Code != http.StatusOK {
+				t.Fatalf("%s status = %d body = %s", tc.path, res.Code, res.Body.String())
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("%s json: %v", tc.path, err)
+			}
+			for _, key := range tc.keys {
+				items, ok := payload[key].([]any)
+				if !ok || items == nil || len(items) != 0 {
+					t.Fatalf("%s %q = %#v, want empty array", tc.path, key, payload[key])
+				}
+			}
+		})
+	}
+}
+
+func TestLoginPageImageUploadSettings(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/app-meta", nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("app meta status = %d body = %s", res.Code, res.Body.String())
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("app meta json: %v", err)
+	}
+	if meta["login_page_image_url"] != "" || meta["login_page_image_mode"] != "contain" {
+		t.Fatalf("initial app meta = %#v", meta)
+	}
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("login_page_image_action", "replace")
+	_ = writer.WriteField("login_page_image_mode", "cover")
+	_ = writer.WriteField("login_page_image_zoom", "1.25")
+	_ = writer.WriteField("login_page_image_position_x", "40")
+	_ = writer.WriteField("login_page_image_position_y", "60")
+	part, err := writer.CreateFormFile("login_page_image_file", "panel.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	if err := encodeHTTPTestPNG(part); err != nil {
+		t.Fatalf("encode upload png: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("multipart close: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/settings/login-page-image", body)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("upload json: %v", err)
+	}
+	config, _ := payload["config"].(map[string]any)
+	imageURL, _ := config["login_page_image_url"].(string)
+	if !strings.HasPrefix(imageURL, "/login-page-images/") {
+		t.Fatalf("uploaded image url = %#v in %#v", imageURL, payload)
+	}
+	if config["login_page_image_mode"] != "cover" || config["login_page_image_zoom"] != float64(1.25) {
+		t.Fatalf("login page image config = %#v", config)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, imageURL, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("uploaded image static status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/app-meta", nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("app meta after upload status = %d body = %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("app meta after upload json: %v", err)
+	}
+	if meta["login_page_image_url"] != imageURL || meta["login_page_image_mode"] != "cover" {
+		t.Fatalf("app meta after upload = %#v", meta)
 	}
 }
 
@@ -842,16 +956,22 @@ func newTestApp(t *testing.T) *App {
 }
 
 func writeHTTPTestPNG(path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return encodeHTTPTestPNG(file)
+}
+
+func encodeHTTPTestPNG(file interface {
+	Write([]byte) (int, error)
+}) error {
 	img := image.NewRGBA(image.Rect(0, 0, 12, 12))
 	for y := 0; y < 12; y++ {
 		for x := 0; x < 12; x++ {
 			img.Set(x, y, color.RGBA{R: uint8(x * 16), G: uint8(y * 16), B: 180, A: 255})
 		}
 	}
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
 	return png.Encode(file, img)
 }

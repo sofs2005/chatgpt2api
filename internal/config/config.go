@@ -34,6 +34,11 @@ var settingEnvKeys = map[string]string{
 	"linuxdo_client_secret":             "CHATGPT2API_LINUXDO_CLIENT_SECRET",
 	"linuxdo_redirect_url":              "CHATGPT2API_LINUXDO_REDIRECT_URL",
 	"linuxdo_frontend_redirect_url":     "CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL",
+	"login_page_image_url":              "CHATGPT2API_LOGIN_PAGE_IMAGE_URL",
+	"login_page_image_mode":             "CHATGPT2API_LOGIN_PAGE_IMAGE_MODE",
+	"login_page_image_zoom":             "CHATGPT2API_LOGIN_PAGE_IMAGE_ZOOM",
+	"login_page_image_position_x":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_X",
+	"login_page_image_position_y":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y",
 }
 
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -297,6 +302,32 @@ func (s *Store) ImageMetadataDir() string {
 	return path
 }
 
+func (s *Store) LoginPageImagesDir() string {
+	path := filepath.Join(s.DataDir, "login_page_images")
+	_ = os.MkdirAll(path, 0o755)
+	return path
+}
+
+func (s *Store) LoginPageImageURL() string {
+	return strings.TrimSpace(fmt.Sprint(s.settingValue("login_page_image_url", "")))
+}
+
+func (s *Store) LoginPageImageMode() string {
+	return normalizeLoginPageImageMode(s.settingValue("login_page_image_mode", "contain"))
+}
+
+func (s *Store) LoginPageImageZoom() float64 {
+	return clampFloat(floatSetting(s.settingValue("login_page_image_zoom", 1), 1), 1, 3)
+}
+
+func (s *Store) LoginPageImagePositionX() float64 {
+	return clampFloat(floatSetting(s.settingValue("login_page_image_position_x", 50), 50), 0, 100)
+}
+
+func (s *Store) LoginPageImagePositionY() float64 {
+	return clampFloat(floatSetting(s.settingValue("login_page_image_position_y", 50), 50), 0, 100)
+}
+
 func (s *Store) Get() map[string]any {
 	s.mu.RLock()
 	data := util.CopyMap(s.data)
@@ -317,6 +348,11 @@ func (s *Store) Get() map[string]any {
 	data["linuxdo_client_secret_configured"] = linuxdo.ClientSecret != ""
 	data["linuxdo_redirect_url"] = linuxdo.RedirectURL
 	data["linuxdo_frontend_redirect_url"] = linuxdo.FrontendRedirectURL
+	data["login_page_image_url"] = s.LoginPageImageURL()
+	data["login_page_image_mode"] = s.LoginPageImageMode()
+	data["login_page_image_zoom"] = s.LoginPageImageZoom()
+	data["login_page_image_position_x"] = s.LoginPageImagePositionX()
+	data["login_page_image_position_y"] = s.LoginPageImagePositionY()
 	delete(data, "auth-key")
 	delete(data, "linuxdo_client_secret")
 	return data
@@ -333,6 +369,9 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 			continue
 		}
 		next[key] = value
+	}
+	if value, ok := next["login_page_image_mode"]; ok {
+		next["login_page_image_mode"] = normalizeLoginPageImageMode(value)
 	}
 	if err := s.validateSettingsUpdateLocked(next); err != nil {
 		s.mu.Unlock()
@@ -544,6 +583,45 @@ func intSetting(value any, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func floatSetting(value any, fallback float64) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case string:
+		n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func normalizeLoginPageImageMode(value any) string {
+	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	switch mode {
+	case "cover", "contain", "fill":
+		return mode
+	default:
+		return "contain"
+	}
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func envString(key, fallback string) string {

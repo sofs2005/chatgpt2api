@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy, Download, Eye, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -8,6 +8,7 @@ import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -69,6 +70,10 @@ function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function isRequestCanceled(error: unknown) {
+  return error instanceof Error && error.message === "canceled";
+}
+
 type DeleteImageTarget = {
   paths: string[];
 };
@@ -113,6 +118,8 @@ function useOrderedImageMasonryColumns(items: ManagedImage[]) {
 }
 
 function ImageManagerContent({ canDeleteImages }: { canDeleteImages: boolean }) {
+  const didLoadRef = useRef(false);
+  const activeLoadRef = useRef<AbortController | null>(null);
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [selectedImageIds, setSelectedImageIds] = useState<Record<string, boolean>>({});
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
@@ -123,6 +130,7 @@ function ImageManagerContent({ canDeleteImages }: { canDeleteImages: boolean }) 
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const lightboxImages = useMemo(
     () =>
       items.map((item) => ({
@@ -141,17 +149,35 @@ function ImageManagerContent({ canDeleteImages }: { canDeleteImages: boolean }) 
   const allSelected = items.length > 0 && selectedCount === items.length;
   const isMutatingImages = downloadingKey !== null || isDeleting;
   const imageColumns = useOrderedImageMasonryColumns(items);
+  const showImageLoadingState = isLoading && items.length === 0;
+  const showImageErrorState = !isLoading && loadError !== "" && items.length === 0;
+  const showImageEmptyState = !isLoading && loadError === "" && items.length === 0;
 
   const loadImages = useCallback(async () => {
+    activeLoadRef.current?.abort();
+    const controller = new AbortController();
+    activeLoadRef.current = controller;
     setIsLoading(true);
+    setLoadError("");
     try {
-      const data = await fetchManagedImages({ start_date: startDate, end_date: endDate });
+      const data = await fetchManagedImages(
+        { start_date: startDate, end_date: endDate },
+        { signal: controller.signal },
+      );
       setItems(data.items);
       setSelectedImageIds({});
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载图片失败");
+      if (controller.signal.aborted || isRequestCanceled(error)) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "加载图片失败";
+      setLoadError(message);
+      toast.error(message);
     } finally {
-      setIsLoading(false);
+      if (activeLoadRef.current === controller) {
+        activeLoadRef.current = null;
+        setIsLoading(false);
+      }
     }
   }, [endDate, startDate]);
 
@@ -244,8 +270,14 @@ function ImageManagerContent({ canDeleteImages }: { canDeleteImages: boolean }) 
   };
 
   useEffect(() => {
+    if (didLoadRef.current) {
+      return;
+    }
+    didLoadRef.current = true;
     void loadImages();
   }, [loadImages]);
+
+  useEffect(() => () => activeLoadRef.current?.abort(), []);
 
   return (
     <section className="flex flex-col gap-5">
@@ -328,10 +360,43 @@ function ImageManagerContent({ canDeleteImages }: { canDeleteImages: boolean }) 
           </div>
         </div>
 
-        <div
-          className="grid gap-3 sm:gap-4"
-          style={{ gridTemplateColumns: `repeat(${imageColumns.length}, minmax(0, 1fr))` }}
-        >
+        {showImageLoadingState ? (
+          <Card className="overflow-hidden rounded-[20px]">
+            <CardContent className="flex min-h-[280px] flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+              <div className="rounded-[16px] bg-[#edf4ff] p-4 text-[#1456f0] ring-1 ring-blue-100">
+                <LoaderCircle className="size-7 animate-spin" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">正在加载图片</p>
+                <p className="text-sm text-muted-foreground">正在同步图片库。</p>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {showImageErrorState ? (
+          <Card className="overflow-hidden rounded-[20px]">
+            <CardContent className="flex min-h-[280px] flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+              <div className="rounded-[16px] bg-rose-50 p-4 text-rose-600 ring-1 ring-rose-100">
+                <ImageIcon className="size-7" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">图片库加载失败</p>
+                <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">{loadError}</p>
+              </div>
+              <Button variant="outline" className="h-9 rounded-lg px-3" onClick={() => void loadImages()}>
+                <RefreshCw className="size-4" />
+                重试
+              </Button>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {items.length > 0 ? (
+          <div
+            className="grid gap-3 sm:gap-4"
+            style={{ gridTemplateColumns: `repeat(${imageColumns.length}, minmax(0, 1fr))` }}
+          >
           {imageColumns.map((column, columnIndex) => (
             <div key={columnIndex} className="flex min-w-0 flex-col gap-3 sm:gap-4">
               {column.map(({ item, index }) => {
@@ -434,9 +499,26 @@ function ImageManagerContent({ canDeleteImages }: { canDeleteImages: boolean }) 
               })}
             </div>
           ))}
-        </div>
+          </div>
+        ) : null}
 
-        {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到图片</div> : null}
+        {showImageEmptyState ? (
+          <Card className="overflow-hidden rounded-[20px]">
+            <CardContent className="flex min-h-[320px] flex-col items-center justify-center gap-4 px-6 py-14 text-center">
+              <div className="grid aspect-[4/3] w-[min(320px,72vw)] place-items-center rounded-[24px] border border-dashed border-border bg-muted/60 shadow-[0_0_15px_rgba(44,30,116,0.10)]">
+                <div className="flex size-20 items-center justify-center rounded-[20px] bg-white text-[#1456f0] shadow-[0_8px_24px_rgba(24,40,72,0.07)]">
+                  <ImageIcon className="size-9" />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">暂无图片</p>
+                <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
+                  图片生成成功后会自动进入图片库。
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
       <ImageLightbox
         images={lightboxImages}

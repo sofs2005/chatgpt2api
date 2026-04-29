@@ -169,7 +169,12 @@ export function TopNav() {
             to="/image"
             className="font-display inline-flex shrink-0 items-center gap-2 py-1 text-[15px] font-semibold text-[#18181b] transition hover:text-[#1456f0] dark:text-foreground dark:hover:text-sky-300"
           >
-            <span className="size-3 rounded-full bg-[#ea5ec1] shadow-[8px_0_0_#1456f0,16px_0_0_#3daeff]" />
+            <img
+              src="/logo-mark.svg"
+              alt=""
+              aria-hidden="true"
+              className="size-7 rounded-[10px] shadow-[0_4px_10px_rgba(184,90,127,0.16)]"
+            />
             chatgpt2api
           </Link>
           <a

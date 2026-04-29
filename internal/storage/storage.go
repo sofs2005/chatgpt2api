@@ -554,7 +554,7 @@ func (b *DatabaseBackend) QueryLogs(logType, startDate, endDate string, limit in
 		return nil, err
 	}
 	defer rows.Close()
-	var out []map[string]any
+	out := make([]map[string]any, 0)
 	for rows.Next() {
 		var text string
 		if err := rows.Scan(&text); err != nil {

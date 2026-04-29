@@ -1,4 +1,5 @@
 import { httpRequest } from "@/lib/request";
+import type { LoginPageImageMode } from "@/lib/login-page-image-layout";
 
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
@@ -119,7 +120,20 @@ export type SettingsConfig = {
   linuxdo_client_secret_configured?: boolean;
   linuxdo_redirect_url?: string;
   linuxdo_frontend_redirect_url?: string;
+  login_page_image_url?: string;
+  login_page_image_mode?: LoginPageImageMode | string;
+  login_page_image_zoom?: number | string;
+  login_page_image_position_x?: number | string;
+  login_page_image_position_y?: number | string;
   [key: string]: unknown;
+};
+
+export type LoginPageImageSettings = {
+  login_page_image_url: string;
+  login_page_image_mode: LoginPageImageMode;
+  login_page_image_zoom: number;
+  login_page_image_position_x: number;
+  login_page_image_position_y: number;
 };
 
 export type ManagedImage = {
@@ -543,12 +557,36 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
   });
 }
 
-export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
+export async function updateLoginPageImageSettings(
+  settings: LoginPageImageSettings,
+  options: { action: "keep" | "replace" | "remove"; file?: File | null },
+) {
+  const formData = new FormData();
+  formData.append("login_page_image_url", settings.login_page_image_url);
+  formData.append("login_page_image_mode", settings.login_page_image_mode);
+  formData.append("login_page_image_zoom", String(settings.login_page_image_zoom));
+  formData.append("login_page_image_position_x", String(settings.login_page_image_position_x));
+  formData.append("login_page_image_position_y", String(settings.login_page_image_position_y));
+  formData.append("login_page_image_action", options.action);
+  if (options.file) {
+    formData.append("login_page_image_file", options.file);
+  }
+  return httpRequest<{ config: SettingsConfig }>("/api/settings/login-page-image", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function fetchManagedImages(
+  filters: { start_date?: string; end_date?: string },
+  options: { signal?: AbortSignal } = {},
+) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   const data = await httpRequest<{ items?: ManagedImage[] | null; groups?: Array<{ date: string; items: ManagedImage[] }> | null }>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
+    { signal: options.signal },
   );
   return {
     items: Array.isArray(data.items) ? data.items : [],

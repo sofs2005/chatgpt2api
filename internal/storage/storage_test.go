@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -66,6 +67,30 @@ func TestDatabaseBackendStoresDocumentsAndLogs(t *testing.T) {
 	health := backend.HealthCheck()
 	if health["document_count"] != 1 || health["log_count"] != 2 {
 		t.Fatalf("HealthCheck() = %#v", health)
+	}
+}
+
+func TestDatabaseBackendQueryLogsEmptyReturnsJSONArray(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
+	backend, err := NewDatabaseBackend("sqlite:///" + filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatalf("NewDatabaseBackend() error = %v", err)
+	}
+	defer backend.db.Close()
+
+	logs, err := backend.QueryLogs("call", "2026-04-30", "2026-04-30", 10)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if logs == nil {
+		t.Fatal("QueryLogs() returned nil slice, want empty slice")
+	}
+	data, err := json.Marshal(map[string]any{"items": logs})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if string(data) != `{"items":[]}` {
+		t.Fatalf("marshaled logs = %s, want {\"items\":[]}", data)
 	}
 }
 

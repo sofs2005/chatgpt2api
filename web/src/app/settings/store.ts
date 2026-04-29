@@ -15,19 +15,33 @@ import {
   startCPAImport,
   stopRegister,
   updateCPAPool,
+  updateLoginPageImageSettings,
   updateRegisterConfig,
   updateSettingsConfig,
   type CPAPool,
   type CPARemoteFile,
+  type LoginPageImageSettings,
   type RegisterConfig,
   type SettingsConfig,
 } from "@/lib/api";
+import { dispatchAppMetaUpdated } from "@/lib/app-meta";
+import {
+  LOGIN_PAGE_IMAGE_DEFAULT_TRANSFORM,
+  normalizeLoginPageImageMode,
+  normalizeLoginPageImageTransform,
+  type LoginPageImageMode,
+} from "@/lib/login-page-image-layout";
 
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
+  const loginImageTransform = normalizeLoginPageImageTransform({
+    zoom: Number(config.login_page_image_zoom),
+    positionX: Number(config.login_page_image_position_x),
+    positionY: Number(config.login_page_image_position_y),
+  });
   return {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
@@ -47,6 +61,11 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     linuxdo_redirect_url: typeof config.linuxdo_redirect_url === "string" ? config.linuxdo_redirect_url : "",
     linuxdo_frontend_redirect_url:
       typeof config.linuxdo_frontend_redirect_url === "string" ? config.linuxdo_frontend_redirect_url : "/auth/linuxdo/callback",
+    login_page_image_url: typeof config.login_page_image_url === "string" ? config.login_page_image_url : "",
+    login_page_image_mode: normalizeLoginPageImageMode(config.login_page_image_mode),
+    login_page_image_zoom: loginImageTransform.zoom,
+    login_page_image_position_x: loginImageTransform.positionX,
+    login_page_image_position_y: loginImageTransform.positionY,
   };
 }
 
@@ -116,6 +135,11 @@ type SettingsStore = {
   setLinuxDoClientSecret: (value: string) => void;
   setLinuxDoRedirectUrl: (value: string) => void;
   setLinuxDoFrontendRedirectUrl: (value: string) => void;
+  setLoginPageImageUrl: (value: string) => void;
+  setLoginPageImageMode: (value: LoginPageImageMode) => void;
+  setLoginPageImageTransform: (transform: { zoom: number; positionX: number; positionY: number }) => void;
+  restoreDefaultLoginPageImage: () => void;
+  saveLoginPageImage: (options: { file?: File | null; action: "keep" | "replace" | "remove" }) => Promise<boolean>;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -341,6 +365,80 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setLinuxDoFrontendRedirectUrl: (value) => {
     set((state) => state.config ? { config: { ...state.config, linuxdo_frontend_redirect_url: value } } : {});
+  },
+
+  setLoginPageImageUrl: (value) => {
+    set((state) => state.config ? { config: { ...state.config, login_page_image_url: value } } : {});
+  },
+
+  setLoginPageImageMode: (value) => {
+    set((state) => state.config ? { config: { ...state.config, login_page_image_mode: value } } : {});
+  },
+
+  setLoginPageImageTransform: (transform) => {
+    const normalized = normalizeLoginPageImageTransform(transform);
+    set((state) => state.config ? {
+      config: {
+        ...state.config,
+        login_page_image_zoom: normalized.zoom,
+        login_page_image_position_x: normalized.positionX,
+        login_page_image_position_y: normalized.positionY,
+      },
+    } : {});
+  },
+
+  restoreDefaultLoginPageImage: () => {
+    set((state) => state.config ? {
+      config: {
+        ...state.config,
+        login_page_image_url: "",
+        login_page_image_zoom: LOGIN_PAGE_IMAGE_DEFAULT_TRANSFORM.zoom,
+        login_page_image_position_x: LOGIN_PAGE_IMAGE_DEFAULT_TRANSFORM.positionX,
+        login_page_image_position_y: LOGIN_PAGE_IMAGE_DEFAULT_TRANSFORM.positionY,
+      },
+    } : {});
+  },
+
+  saveLoginPageImage: async ({ file, action }) => {
+    const { config } = get();
+    if (!config) {
+      return false;
+    }
+    const transform = normalizeLoginPageImageTransform({
+      zoom: Number(config.login_page_image_zoom),
+      positionX: Number(config.login_page_image_position_x),
+      positionY: Number(config.login_page_image_position_y),
+    });
+    const settings: LoginPageImageSettings = {
+      login_page_image_url: String(config.login_page_image_url || "").trim(),
+      login_page_image_mode: normalizeLoginPageImageMode(config.login_page_image_mode),
+      login_page_image_zoom: transform.zoom,
+      login_page_image_position_x: transform.positionX,
+      login_page_image_position_y: transform.positionY,
+    };
+
+    set({ isSavingConfig: true });
+    try {
+      const data = await updateLoginPageImageSettings(settings, { action, file });
+      const nextConfig = normalizeConfig(data.config);
+      set({ config: nextConfig });
+      dispatchAppMetaUpdated({
+        app_title: "chatgpt2api",
+        project_name: "chatgpt2api",
+        login_page_image_url: String(nextConfig.login_page_image_url || ""),
+        login_page_image_mode: normalizeLoginPageImageMode(nextConfig.login_page_image_mode),
+        login_page_image_zoom: Number(nextConfig.login_page_image_zoom),
+        login_page_image_position_x: Number(nextConfig.login_page_image_position_x),
+        login_page_image_position_y: Number(nextConfig.login_page_image_position_y),
+      });
+      toast.success("登录页图片已保存");
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存登录页图片失败");
+      return false;
+    } finally {
+      set({ isSavingConfig: false });
+    }
   },
 
   loadRegister: async (silent = false) => {

@@ -77,16 +77,18 @@ type RequestOptions = {
     body?: unknown;
     headers?: Record<string, string>;
     redirectOnUnauthorized?: boolean;
+    signal?: AbortSignal;
 };
 
 export async function httpRequest<T>(path: string, options: RequestOptions = {}) {
-    const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
+    const {method = "GET", body, headers, redirectOnUnauthorized = true, signal} = options;
     const config: RequestConfig = {
         url: path,
         method,
         data: body,
         headers,
         redirectOnUnauthorized,
+        signal,
     };
     const response = await request.request<T>(config);
     return response.data;

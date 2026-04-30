@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, Copy, LoaderCircle, RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ChevronLeft, ChevronRight, Copy, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -9,63 +9,58 @@ import { ImageLightbox } from "@/components/image-lightbox";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { fetchSystemLogs, type SystemLog, type SystemLogFilters } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
-const LogType = {
-  Call: "call",
-  Account: "account",
-} as const;
+const methodOptions = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+const statusOptions = ["200", "201", "400", "401", "403", "404", "422", "500"];
+const logLevelOptions = ["info", "warning", "error"];
 
-const typeLabels: Record<string, string> = {
-  [LogType.Call]: "调用日志",
-  [LogType.Account]: "账号管理日志",
+const emptyFilters: SystemLogFilters = {
+  username: "",
+  module: "",
+  summary: "",
+  method: "all",
+  status: "all",
+  ip_address: "",
+  operation_type: "",
+  log_level: "all",
+  start_date: "",
+  end_date: "",
 };
 
-function getDetailText(item: SystemLog, key: string) {
-  const value = item.detail?.[key];
-  return typeof value === "string" || typeof value === "number" ? String(value) : "-";
-}
-
-function formatDuration(item: SystemLog) {
-  const value = item.detail?.duration_ms;
-  return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
-}
-
-function getUrls(item: SystemLog | null) {
-  const urls = item?.detail?.urls;
-  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
-}
-
-function getStatus(item: SystemLog) {
-  const status = item.detail?.status;
-  if (status === "success") return "成功";
-  if (status === "failed") return "失败";
-  return "-";
-}
-
-function statusBadgeVariant(item: SystemLog | null) {
-  if (item?.detail?.status === "failed") return "danger";
-  if (item?.detail?.status === "success") return "success";
-  return "secondary";
-}
+const typeLabels: Record<string, string> = {
+  call: "调用",
+  account: "账号",
+  audit: "审计",
+};
 
 const detailLabels: Record<string, string> = {
   endpoint: "接口",
   model: "模型",
+  method: "方法",
+  path: "路径",
+  module: "模块",
+  status: "状态",
+  log_level: "日志级别",
+  operation_type: "操作类型",
+  duration_ms: "耗时",
+  response_time: "响应时间",
   started_at: "开始时间",
   ended_at: "结束时间",
-  duration_ms: "耗时",
-  status: "状态",
+  username: "操作人",
   key_name: "令牌名称",
   key_role: "角色",
   key_id: "凭据 ID",
   subject_id: "用户 ID",
   provider: "来源",
+  ip_address: "IP 地址",
+  user_agent: "User-Agent",
   error: "错误",
   token: "令牌",
   source: "来源事件",
@@ -75,18 +70,96 @@ const detailLabels: Record<string, string> = {
 };
 
 const primaryDetailKeys = [
+  "method",
+  "path",
   "endpoint",
-  "model",
+  "module",
+  "operation_type",
   "status",
+  "log_level",
   "duration_ms",
+  "username",
   "key_name",
-  "key_role",
-  "key_id",
   "subject_id",
-  "provider",
+  "key_id",
+  "ip_address",
   "started_at",
   "ended_at",
 ];
+
+function primitiveText(value: unknown) {
+  return typeof value === "string" || typeof value === "number" ? String(value) : "";
+}
+
+function detailValue(item: SystemLog | null, key: string) {
+  return item?.detail?.[key];
+}
+
+function detailText(item: SystemLog | null, key: string) {
+  return primitiveText(detailValue(item, key));
+}
+
+function actorText(item: SystemLog | null) {
+  return detailText(item, "username") || detailText(item, "key_name") || detailText(item, "subject_id") || detailText(item, "key_id") || "-";
+}
+
+function moduleText(item: SystemLog | null) {
+  return detailText(item, "module") || typeLabels[item?.type || ""] || item?.type || "-";
+}
+
+function pathText(item: SystemLog | null) {
+  return detailText(item, "path") || detailText(item, "endpoint") || "-";
+}
+
+function logLevel(item: SystemLog | null) {
+  const explicit = detailText(item, "log_level");
+  if (explicit) return explicit;
+  return detailValue(item, "status") === "failed" ? "warning" : "info";
+}
+
+function statusText(item: SystemLog | null) {
+  const status = detailValue(item, "status");
+  if (status === "success") return "成功";
+  if (status === "failed") return "失败";
+  if (typeof status === "string" || typeof status === "number") return String(status);
+  return "-";
+}
+
+function formatDuration(item: SystemLog | null) {
+  const value = detailValue(item, "duration_ms") ?? detailValue(item, "response_time");
+  return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
+}
+
+function statusBadgeVariant(item: SystemLog | null) {
+  const status = detailValue(item, "status");
+  if (status === "success") return "success";
+  if (status === "failed") return "danger";
+  const numeric = typeof status === "number" ? status : Number(status);
+  if (Number.isFinite(numeric)) {
+    if (numeric >= 500) return "danger";
+    if (numeric >= 400) return "warning";
+    return "success";
+  }
+  return "secondary";
+}
+
+function levelBadgeVariant(level: string) {
+  if (level === "error") return "danger";
+  if (level === "warning") return "warning";
+  return "secondary";
+}
+
+function methodBadgeVariant(method: string) {
+  if (method === "POST") return "default";
+  if (method === "DELETE") return "danger";
+  if (method === "PATCH" || method === "PUT") return "warning";
+  return "secondary";
+}
+
+function getUrls(item: SystemLog | null) {
+  const urls = item?.detail?.urls;
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
+}
 
 function detailLabel(key: string) {
   return detailLabels[key] || key;
@@ -97,19 +170,13 @@ function isPrimitiveDetail(value: unknown) {
 }
 
 function formatDetailValue(key: string, value: unknown) {
-  if (value === null || value === undefined || value === "") {
-    return "—";
-  }
-  if (key === "duration_ms" && typeof value === "number") {
-    return `${(value / 1000).toFixed(2)} s`;
-  }
+  if (value === null || value === undefined || value === "") return "—";
+  if ((key === "duration_ms" || key === "response_time") && typeof value === "number") return `${(value / 1000).toFixed(2)} s`;
   if (key === "status") {
     if (value === "success") return "成功";
     if (value === "failed") return "失败";
   }
-  if (typeof value === "boolean") {
-    return value ? "是" : "否";
-  }
+  if (typeof value === "boolean") return value ? "是" : "否";
   return String(value);
 }
 
@@ -130,11 +197,25 @@ function detailJSON(item: SystemLog | null) {
   return JSON.stringify(item?.detail || {}, null, 2);
 }
 
+function normalizeFilters(filters: SystemLogFilters): SystemLogFilters {
+  return {
+    username: filters.username?.trim() || "",
+    module: filters.module?.trim() || "",
+    summary: filters.summary?.trim() || "",
+    method: filters.method || "all",
+    status: filters.status || "all",
+    ip_address: filters.ip_address?.trim() || "",
+    operation_type: filters.operation_type?.trim() || "",
+    log_level: filters.log_level || "all",
+    start_date: filters.start_date || "",
+    end_date: filters.end_date || "",
+  };
+}
+
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
-  const [type, setType] = useState<string>(LogType.Call);
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+  const [filters, setFilters] = useState<SystemLogFilters>(emptyFilters);
+  const [query, setQuery] = useState<SystemLogFilters>(emptyFilters);
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -143,16 +224,15 @@ function LogsContent() {
   const [isLoading, setIsLoading] = useState(true);
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
-  const isCallLog = type === LogType.Call;
-  const pageSize = 10;
+  const pageSize = 15;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
   const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
 
-  const loadLogs = useCallback(async () => {
+  const loadLogs = useCallback(async (nextQuery: SystemLogFilters) => {
     setIsLoading(true);
     try {
-      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
+      const data = await fetchSystemLogs(nextQuery);
       setItems(data.items);
       setPage(1);
     } catch (error) {
@@ -160,11 +240,20 @@ function LogsContent() {
     } finally {
       setIsLoading(false);
     }
-  }, [endDate, startDate, type]);
+  }, []);
+
+  const updateFilter = (key: keyof SystemLogFilters, value: string) => {
+    setFilters((current) => ({ ...current, [key]: value }));
+  };
+
+  const handleSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setQuery(normalizeFilters(filters));
+  };
 
   const clearFilters = () => {
-    setStartDate("");
-    setEndDate("");
+    setFilters(emptyFilters);
+    setQuery(emptyFilters);
   };
 
   const openDetail = (item: SystemLog) => {
@@ -182,79 +271,123 @@ function LogsContent() {
   };
 
   useEffect(() => {
-    void loadLogs();
-  }, [loadLogs]);
+    void loadLogs(query);
+  }, [loadLogs, query]);
 
   return (
     <section className="flex flex-col gap-5">
-      <PageHeader
-        eyebrow="Logs"
-        title="日志管理"
-        actions={
-          <>
-          <Select value={type} onValueChange={setType}>
-            <SelectTrigger className="h-10 w-[150px]"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value={LogType.Call}>调用日志</SelectItem>
-              <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
-            </SelectContent>
-          </Select>
-          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
-          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-lg">
-            清除筛选条件
-          </Button>
-          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-lg">
-            {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
-            查询
-          </Button>
-          </>
-        }
-      />
+      <PageHeader eyebrow="Logs" title="日志管理" />
+
+      <Card>
+        <CardHeader className="pb-4">
+          <CardTitle>筛选条件</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" onSubmit={handleSearch}>
+            <Input placeholder="操作人" value={filters.username || ""} onChange={(event) => updateFilter("username", event.target.value)} />
+            <Input placeholder="模块" value={filters.module || ""} onChange={(event) => updateFilter("module", event.target.value)} />
+            <Input placeholder="摘要或接口" value={filters.summary || ""} onChange={(event) => updateFilter("summary", event.target.value)} />
+            <Input placeholder="IP 地址" value={filters.ip_address || ""} onChange={(event) => updateFilter("ip_address", event.target.value)} />
+            <Input placeholder="操作类型" value={filters.operation_type || ""} onChange={(event) => updateFilter("operation_type", event.target.value)} />
+            <Select value={filters.method || "all"} onValueChange={(value) => updateFilter("method", value)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部方法</SelectItem>
+                {methodOptions.map((method) => <SelectItem key={method} value={method}>{method}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={filters.status || "all"} onValueChange={(value) => updateFilter("status", value)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部状态码</SelectItem>
+                {statusOptions.map((status) => <SelectItem key={status} value={status}>{status}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={filters.log_level || "all"} onValueChange={(value) => updateFilter("log_level", value)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部级别</SelectItem>
+                {logLevelOptions.map((level) => <SelectItem key={level} value={level}>{level}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <div className="md:col-span-2 xl:col-span-2">
+              <DateRangeFilter
+                startDate={filters.start_date || ""}
+                endDate={filters.end_date || ""}
+                onChange={(startDate, endDate) => {
+                  updateFilter("start_date", startDate);
+                  updateFilter("end_date", endDate);
+                }}
+              />
+            </div>
+            <div className="flex gap-2 md:col-span-2 xl:col-span-2">
+              <Button type="submit" disabled={isLoading} className="h-10 rounded-lg">
+                {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
+                查询
+              </Button>
+              <Button type="button" variant="outline" onClick={clearFilters} className="h-10 rounded-lg">
+                <X className="size-4" />
+                清空
+              </Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
 
       <Card className="overflow-hidden">
         <CardContent className="p-0">
           <div className="flex items-center justify-between border-b border-border px-5 py-4 text-sm text-muted-foreground">
             <span>共 {items.length} 条</span>
-            <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => void loadLogs()} disabled={isLoading}>
+            <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => void loadLogs(query)} disabled={isLoading}>
               <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
               刷新
             </Button>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[820px]">
+            <Table className="min-w-[1040px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
-                  <TableHead>类型</TableHead>
-                  {isCallLog ? <TableHead>令牌名称</TableHead> : null}
-                  {isCallLog ? <TableHead>调用耗时</TableHead> : null}
-                  {isCallLog ? <TableHead>状态</TableHead> : null}
-                  <TableHead>简述</TableHead>
+                  <TableHead>操作人</TableHead>
+                  <TableHead>模块</TableHead>
+                  <TableHead>接口</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>耗时</TableHead>
+                  <TableHead>摘要</TableHead>
                   <TableHead className="w-28">详情</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {currentRows.map((item, index) => (
-                  <TableRow key={`${item.time}-${index}`} className="text-muted-foreground">
-                    <TableCell className="whitespace-nowrap">{item.time}</TableCell>
-                    <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
-                    {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
-                    {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
-                    {isCallLog ? (
-                      <TableCell>
-                        <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
-                          {getStatus(item)}
-                        </Badge>
+                {currentRows.map((item, index) => {
+                  const method = detailText(item, "method");
+                  const level = logLevel(item);
+                  return (
+                    <TableRow key={`${item.time}-${index}`} className="text-muted-foreground">
+                      <TableCell className="whitespace-nowrap">{item.time}</TableCell>
+                      <TableCell className="max-w-[150px] truncate text-foreground">{actorText(item)}</TableCell>
+                      <TableCell><Badge variant="secondary" className="rounded-md">{moduleText(item)}</Badge></TableCell>
+                      <TableCell className="max-w-[260px]">
+                        <div className="flex min-w-0 items-center gap-2">
+                          {method ? <Badge variant={methodBadgeVariant(method)} className="rounded-md">{method}</Badge> : null}
+                          <span className="truncate">{pathText(item)}</span>
+                        </div>
                       </TableCell>
-                    ) : null}
-                    <TableCell className="max-w-[420px] truncate text-muted-foreground">{item.summary || "-"}</TableCell>
-                    <TableCell>
-                      <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => openDetail(item)}>
-                        查看详情
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={statusBadgeVariant(item)} className="rounded-md">{statusText(item)}</Badge>
+                          <Badge variant={levelBadgeVariant(level)} className="rounded-md">{level}</Badge>
+                        </div>
+                      </TableCell>
+                      <TableCell>{formatDuration(item)}</TableCell>
+                      <TableCell className="max-w-[300px] truncate text-muted-foreground">{item.summary || "-"}</TableCell>
+                      <TableCell>
+                        <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => openDetail(item)}>
+                          查看详情
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
@@ -270,6 +403,7 @@ function LogsContent() {
           {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
         </CardContent>
       </Card>
+
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
         <DialogContent className="flex max-h-[90vh] w-[min(94vw,980px)] grid-rows-none flex-col gap-0 overflow-hidden rounded-2xl p-0">
           <DialogHeader className="border-b border-border px-6 py-5 pr-12">
@@ -277,8 +411,9 @@ function LogsContent() {
               <div className="min-w-0 space-y-2">
                 <DialogTitle>日志详情</DialogTitle>
                 <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                  <Badge variant="secondary" className="rounded-md">{detailLog ? typeLabels[detailLog.type] || detailLog.type : "-"}</Badge>
-                  <Badge variant={statusBadgeVariant(detailLog)} className="rounded-md">{detailLog ? getStatus(detailLog) : "-"}</Badge>
+                  <Badge variant="secondary" className="rounded-md">{moduleText(detailLog)}</Badge>
+                  <Badge variant={statusBadgeVariant(detailLog)} className="rounded-md">{statusText(detailLog)}</Badge>
+                  <Badge variant={levelBadgeVariant(logLevel(detailLog))} className="rounded-md">{logLevel(detailLog)}</Badge>
                   <span>{detailLog?.time || "—"}</span>
                 </div>
               </div>
@@ -294,18 +429,22 @@ function LogsContent() {
                 <div className="text-sm font-semibold text-foreground">摘要</div>
                 <div className="rounded-xl border border-border bg-muted/35 p-4">
                   <div className="text-sm font-medium text-foreground">{detailLog?.summary || "—"}</div>
-                  <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+                  <div className="mt-3 grid gap-3 text-sm sm:grid-cols-4">
                     <div>
-                      <div className="text-xs text-muted-foreground">令牌</div>
-                      <div className="mt-1 truncate font-medium text-foreground">{detailLog ? getDetailText(detailLog, "key_name") : "—"}</div>
+                      <div className="text-xs text-muted-foreground">操作人</div>
+                      <div className="mt-1 truncate font-medium text-foreground">{actorText(detailLog)}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted-foreground">模块</div>
+                      <div className="mt-1 truncate font-medium text-foreground">{moduleText(detailLog)}</div>
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">接口</div>
-                      <div className="mt-1 truncate font-medium text-foreground">{detailLog ? getDetailText(detailLog, "endpoint") : "—"}</div>
+                      <div className="mt-1 truncate font-medium text-foreground">{pathText(detailLog)}</div>
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">耗时</div>
-                      <div className="mt-1 font-medium text-foreground">{detailLog ? formatDuration(detailLog) : "—"}</div>
+                      <div className="mt-1 font-medium text-foreground">{formatDuration(detailLog)}</div>
                     </div>
                   </div>
                 </div>

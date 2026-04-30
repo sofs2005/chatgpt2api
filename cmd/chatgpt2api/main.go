@@ -23,6 +23,7 @@ func main() {
 	if port == "" {
 		port = "8000"
 	}
+	logger := app.Logger()
 
 	server := &http.Server{
 		Addr:              ":" + port,
@@ -31,9 +32,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("chatgpt2api go backend listening on :%s", port)
+		logger.Info("starting server", "addr", ":"+port)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("listen: %v", err)
+			logger.Error("listen failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -43,6 +45,8 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		logger.Error("server shutdown failed", "error", err)
+	}
 	app.Close()
-	_ = server.Shutdown(ctx)
 }

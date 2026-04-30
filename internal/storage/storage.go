@@ -39,6 +39,8 @@ type LogBackend interface {
 	QueryLogs(logType, startDate, endDate string, limit int) ([]map[string]any, error)
 }
 
+const LogEventsDocumentName = "logs/events.jsonl"
+
 func NewBackendFromEnv(dataDir string) (Backend, error) {
 	backendType := strings.ToLower(strings.TrimSpace(os.Getenv("STORAGE_BACKEND")))
 	if backendType == "" {
@@ -152,7 +154,7 @@ func (b *JSONBackend) DeleteJSONDocument(name string) error {
 }
 
 func (b *JSONBackend) AppendLog(item map[string]any) error {
-	full, err := b.documentPath("logs.jsonl")
+	full, err := b.documentPath(LogEventsDocumentName)
 	if err != nil {
 		return err
 	}
@@ -173,7 +175,7 @@ func (b *JSONBackend) AppendLog(item map[string]any) error {
 }
 
 func (b *JSONBackend) QueryLogs(logType, startDate, endDate string, limit int) ([]map[string]any, error) {
-	full, err := b.documentPath("logs.jsonl")
+	full, err := b.documentPath(LogEventsDocumentName)
 	if err != nil {
 		return nil, err
 	}

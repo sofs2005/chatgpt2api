@@ -62,7 +62,11 @@ func NewApp() (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	logs := service.NewLogService(cfg.DataDir, storageBackend)
-	logger := service.NewLogger(cfg.LogLevels)
+	logger, err := service.NewLogger(cfg.DataDir, cfg.LogLevels)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	proxy := service.NewProxyService(cfg)
 	accounts := service.NewAccountService(storageBackend, cfg, proxy, logs)
 	auth := service.NewAuthService(storageBackend)
@@ -73,6 +77,7 @@ func NewApp() (*App, error) {
 	}
 	if bootstrap.Created && bootstrap.Generated {
 		fmt.Fprintf(os.Stderr, "bootstrap admin password generated: username=%s password=%s\n", bootstrap.Username, bootstrap.Password)
+		logger.Warning("bootstrap admin password generated", "username", bootstrap.Username)
 	}
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger}
@@ -108,6 +113,13 @@ func (a *App) Close() {
 	if a.cancel != nil {
 		a.cancel()
 	}
+	if a.logger != nil {
+		_ = a.logger.Close()
+	}
+}
+
+func (a *App) Logger() *service.Logger {
+	return a.logger
 }
 
 func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -691,7 +703,13 @@ func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireIdentity(w, r, ""); !ok {
 		return
 	}
-	util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.logs.List(strings.TrimSpace(r.URL.Query().Get("type")), strings.TrimSpace(r.URL.Query().Get("start_date")), strings.TrimSpace(r.URL.Query().Get("end_date")), 200)})
+	query, err := parseLogQuery(r)
+	if err != nil {
+		util.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	items := a.logs.Search(query)
+	util.WriteJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items), "page_size": normalizedHTTPLogPageSize(query.Limit)})
 }
 
 func (a *App) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
@@ -755,6 +773,7 @@ func (a *App) requireIdentity(w http.ResponseWriter, r *http.Request, overrideAu
 			util.WriteError(w, http.StatusForbidden, "permission denied")
 			return service.Identity{}, false
 		}
+		*r = *r.WithContext(withRequestIdentity(r.Context(), *identity))
 		return *identity, true
 	}
 	util.WriteError(w, http.StatusUnauthorized, "authorization is invalid")

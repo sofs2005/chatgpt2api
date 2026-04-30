@@ -25,7 +25,7 @@ type appRoute struct {
 func (a *App) Handler() http.Handler {
 	routes := a.routes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.serveHTTP(w, r, routes)
+		a.serveObservedHTTP(w, r, routes)
 	})
 }
 

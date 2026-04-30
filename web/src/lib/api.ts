@@ -174,10 +174,26 @@ export type ManagedImage = {
 
 export type SystemLog = {
   time: string;
-  type: "call" | "account" | string;
+  type: "call" | "account" | "audit" | string;
   summary?: string;
   detail?: Record<string, unknown>;
   [key: string]: unknown;
+};
+
+export type SystemLogFilters = {
+  username?: string;
+  module?: string;
+  summary?: string;
+  method?: string;
+  status?: string;
+  ip_address?: string;
+  operation_type?: string;
+  log_level?: string;
+  start_date?: string;
+  end_date?: string;
+  start_time?: string;
+  end_time?: string;
+  page_size?: number | string;
 };
 
 export type ImageResponse = {
@@ -692,11 +708,14 @@ export async function deleteManagedImages(paths: string[]) {
   });
 }
 
-export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
+export async function fetchSystemLogs(filters: SystemLogFilters) {
   const params = new URLSearchParams();
-  if (filters.type) params.set("type", filters.type);
-  if (filters.start_date) params.set("start_date", filters.start_date);
-  if (filters.end_date) params.set("end_date", filters.end_date);
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === undefined || value === null || value === "" || value === "all") {
+      continue;
+    }
+    params.set(key, String(value));
+  }
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 

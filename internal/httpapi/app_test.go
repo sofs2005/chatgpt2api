@@ -1450,6 +1450,54 @@ func TestModelsCallLogIncludesUserKeyName(t *testing.T) {
 	}
 }
 
+func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings?section=logging", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	req.Header.Set("User-Agent", "chatgpt2api-test")
+	req.RemoteAddr = "203.0.113.10:12345"
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("settings status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/logs?username=admin&method=GET&status=200&summary=%2Fapi%2Fsettings", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("audit logs status = %d body = %s", res.Code, res.Body.String())
+	}
+	var logs map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("audit logs json: %v", err)
+	}
+	items := logItems(logs)
+	if len(items) == 0 {
+		t.Fatalf("expected audit log, got %#v", logs)
+	}
+	item := findLogByDetail(items, "path", "/api/settings")
+	if item == nil {
+		t.Fatalf("expected audit log for /api/settings, got %#v", items)
+	}
+	if item["type"] != service.LogTypeAudit {
+		t.Fatalf("audit log type = %#v", item["type"])
+	}
+	detail, _ := item["detail"].(map[string]any)
+	if detail["method"] != http.MethodGet || detail["status"] != float64(http.StatusOK) || detail["log_level"] != "info" {
+		t.Fatalf("unexpected audit detail = %#v", detail)
+	}
+	if detail["operation_type"] != "查询" || detail["subject_id"] != testAdminUsername || detail["user_agent"] != "chatgpt2api-test" {
+		t.Fatalf("missing audit identity/request fields = %#v", detail)
+	}
+	if _, ok := detail["duration_ms"].(float64); !ok {
+		t.Fatalf("duration_ms not numeric in audit detail = %#v", detail)
+	}
+}
+
 func logItems(payload map[string]any) []map[string]any {
 	rawItems, _ := payload["items"].([]any)
 	items := make([]map[string]any, 0, len(rawItems))
@@ -1464,6 +1512,16 @@ func logItems(payload map[string]any) []map[string]any {
 func findHTTPItem(items []map[string]any, id string) map[string]any {
 	for _, item := range items {
 		if item["id"] == id {
+			return item
+		}
+	}
+	return nil
+}
+
+func findLogByDetail(items []map[string]any, key, value string) map[string]any {
+	for _, item := range items {
+		detail, _ := item["detail"].(map[string]any)
+		if detail[key] == value {
 			return item
 		}
 	}

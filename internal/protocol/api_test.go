@@ -74,6 +74,33 @@ func TestTextModelDoesNotForceImageChatRoute(t *testing.T) {
 	}
 }
 
+func TestListModelsUsesInjectedLister(t *testing.T) {
+	called := false
+	engine := &Engine{
+		ListModelsFunc: func(context.Context) (map[string]any, error) {
+			called = true
+			return map[string]any{
+				"object": "list",
+				"data": []map[string]any{
+					{"id": "custom-model", "object": "model"},
+				},
+			}, nil
+		},
+	}
+
+	result, err := engine.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels() error = %v", err)
+	}
+	if !called {
+		t.Fatal("ListModelsFunc was not called")
+	}
+	data, _ := result["data"].([]map[string]any)
+	if len(data) == 0 || data[0]["id"] != "custom-model" {
+		t.Fatalf("ListModels() data = %#v", result["data"])
+	}
+}
+
 func TestImageContextPromptIncludesHistory(t *testing.T) {
 	messages := []map[string]any{
 		{"role": "system", "content": "保持水彩风格"},

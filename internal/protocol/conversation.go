@@ -34,6 +34,8 @@ type Engine struct {
 	Proxy    *service.ProxyService
 	Logger   *service.Logger
 
+	ListModelsFunc func(context.Context) (map[string]any, error)
+
 	responseContextMu sync.Mutex
 	ResponseContexts  *ResponseContextStore
 }
@@ -142,7 +144,7 @@ func (e *Engine) TextBackend(accessToken string) *backend.Client {
 }
 
 func (e *Engine) ListModels(ctx context.Context) (map[string]any, error) {
-	result, err := backend.NewClient("", e.Accounts, e.Proxy).ListModels(ctx)
+	result, err := e.listModels(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +162,13 @@ func (e *Engine) ListModels(ctx context.Context) (map[string]any, error) {
 	}
 	result["data"] = data
 	return result, nil
+}
+
+func (e *Engine) listModels(ctx context.Context) (map[string]any, error) {
+	if e != nil && e.ListModelsFunc != nil {
+		return e.ListModelsFunc(ctx)
+	}
+	return backend.NewClient("", e.Accounts, e.Proxy).ListModels(ctx)
 }
 
 func (e *Engine) StreamTextDeltas(ctx context.Context, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {

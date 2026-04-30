@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"image"
 	"image/color"
@@ -1116,6 +1117,9 @@ func newTestApp(t *testing.T) *App {
 	app, err := NewApp()
 	if err != nil {
 		t.Fatalf("NewApp() error = %v", err)
+	}
+	app.engine.ListModelsFunc = func(context.Context) (map[string]any, error) {
+		return map[string]any{"object": "list", "data": []map[string]any{}}, nil
 	}
 	return app
 }

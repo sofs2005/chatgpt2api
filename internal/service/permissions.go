@@ -57,9 +57,12 @@ var apiPermissionCatalog = []APIPermission{
 	apiPermission("POST", "/api/auth/users", "创建/更新个人 API 令牌", "用户令牌", true),
 	apiPermission("DELETE", "/api/auth/users", "删除个人 API 令牌", "用户令牌", true),
 
-	apiPermission("GET", "/api/accounts", "查看号池", "号池管理", true),
-	apiPermission("POST", "/api/accounts", "修改号池", "号池管理", true),
-	apiPermission("DELETE", "/api/accounts", "删除号池", "号池管理", true),
+	apiPermission("GET", "/api/accounts", "查看号池", "号池管理", false),
+	apiPermission("GET", "/api/accounts/tokens", "导出号池 Token", "号池管理", false),
+	apiPermission("POST", "/api/accounts", "导入号池 Token", "号池管理", false),
+	apiPermission("POST", "/api/accounts/refresh", "刷新号池", "号池管理", false),
+	apiPermission("POST", "/api/accounts/update", "编辑号池账号", "号池管理", false),
+	apiPermission("DELETE", "/api/accounts", "删除号池账号", "号池管理", false),
 	apiPermission("GET", "/api/register", "查看注册机", "注册机", true),
 	apiPermission("POST", "/api/register", "控制注册机", "注册机", true),
 	apiPermission("GET", "/api/logs", "查看日志", "日志管理", false),
@@ -186,14 +189,16 @@ func MatchAPIPermissionKey(method, path string) (string, bool) {
 		if permission.Method != method {
 			continue
 		}
-		if permission.Subtree {
-			base := strings.TrimRight(permission.Path, "/")
-			if path == base || strings.HasPrefix(path, base+"/") {
-				return permission.Key, true
-			}
+		if path == permission.Path {
+			return permission.Key, true
+		}
+	}
+	for _, permission := range apiPermissionCatalog {
+		if permission.Method != method || !permission.Subtree {
 			continue
 		}
-		if path == permission.Path {
+		base := strings.TrimRight(permission.Path, "/")
+		if path == base || strings.HasPrefix(path, base+"/") {
 			return permission.Key, true
 		}
 	}

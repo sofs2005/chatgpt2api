@@ -402,7 +402,7 @@ func TestImageServicePublicVisibility(t *testing.T) {
 	if _, err := service.UpdateImageVisibility(aliceRel, ImageVisibilityPrivate, ImageAccessScope{OwnerID: "linuxdo:456"}); err == nil {
 		t.Fatal("UpdateImageVisibility(other owner) error = nil")
 	}
-	if _, err := service.UpdateImageVisibility(aliceRel, ImageVisibilityPrivate, ImageAccessScope{OwnerID: "linuxdo:123"}); err != nil {
+	if _, err := service.UpdateImageVisibility("http://127.0.0.1:8000/images/"+aliceRel, ImageVisibilityPrivate, ImageAccessScope{OwnerID: "linuxdo:123"}); err != nil {
 		t.Fatalf("UpdateImageVisibility(owner private) error = %v", err)
 	}
 	public = service.ListImages("http://127.0.0.1:8000", "", "", ImageAccessScope{Public: true})

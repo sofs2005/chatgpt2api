@@ -72,6 +72,42 @@ func (s *AccountService) ListTokens() []string {
 	return out
 }
 
+func (s *AccountService) ListTokensByIDs(ids []string) []string {
+	targets := cleanAccountIDs(ids)
+	if len(targets) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(targets))
+	for _, item := range s.items {
+		token := util.Clean(item["access_token"])
+		if token == "" {
+			continue
+		}
+		if _, ok := targets[accountIDFromToken(token)]; ok {
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+func (s *AccountService) GetTokenByID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.items {
+		token := util.Clean(item["access_token"])
+		if token != "" && accountIDFromToken(token) == id {
+			return token
+		}
+	}
+	return ""
+}
+
 func (s *AccountService) ListAccounts() []map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -878,7 +914,8 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			continue
 		}
 		out = append(out, map[string]any{
-			"id":                 util.SHA1Short(token, 16),
+			"id":                 accountIDFromToken(token),
+			"token_preview":      util.AnonymizeToken(token),
 			"access_token":       token,
 			"type":               util.ValueOr(account["type"], "Free"),
 			"status":             util.ValueOr(account["status"], "正常"),
@@ -893,6 +930,21 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			"fail":               util.ToInt(account["fail"], 0),
 			"lastUsedAt":         account["last_used_at"],
 		})
+	}
+	return out
+}
+
+func accountIDFromToken(token string) string {
+	return util.SHA1Short(token, 16)
+}
+
+func cleanAccountIDs(ids []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			out[id] = struct{}{}
+		}
 	}
 	return out
 }

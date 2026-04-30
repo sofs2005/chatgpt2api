@@ -79,7 +79,8 @@ export type ApiPermission = {
 
 export type Account = {
   id: string;
-  access_token: string;
+  access_token?: string;
+  token_preview?: string;
   type: AccountType;
   status: AccountStatus;
   quota: number;
@@ -102,19 +103,23 @@ type AccountListResponse = {
   items: Account[];
 };
 
+type AccountTokensResponse = {
+  tokens: string[];
+};
+
 type AccountMutationResponse = {
   items: Account[];
   added?: number;
   skipped?: number;
   removed?: number;
   refreshed?: number;
-  errors?: Array<{ access_token: string; error: string }>;
+  errors?: Array<{ access_token?: string; account_id?: string; error: string }>;
 };
 
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
-  errors: Array<{ access_token: string; error: string }>;
+  errors: Array<{ access_token?: string; account_id?: string; error: string }>;
 };
 
 type AccountUpdateResponse = {
@@ -472,6 +477,10 @@ export async function fetchAccounts() {
   return httpRequest<AccountListResponse>("/api/accounts");
 }
 
+export async function fetchAccountTokens() {
+  return httpRequest<AccountTokensResponse>("/api/accounts/tokens");
+}
+
 export async function createAccounts(tokens: string[]) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
@@ -479,22 +488,22 @@ export async function createAccounts(tokens: string[]) {
   });
 }
 
-export async function deleteAccounts(tokens: string[]) {
+export async function deleteAccounts(accountIds: string[]) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens },
+    body: { account_ids: accountIds },
   });
 }
 
-export async function refreshAccounts(accessTokens: string[]) {
+export async function refreshAccounts(accountIds: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
-    body: { access_tokens: accessTokens },
+    body: { account_ids: accountIds },
   });
 }
 
 export async function updateAccount(
-  accessToken: string,
+  accountId: string,
   updates: {
     type?: AccountType;
     status?: AccountStatus;
@@ -504,7 +513,7 @@ export async function updateAccount(
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {
     method: "POST",
     body: {
-      access_token: accessToken,
+      account_id: accountId,
       ...updates,
     },
   });

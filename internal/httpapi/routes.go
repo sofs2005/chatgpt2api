@@ -555,12 +555,15 @@ func (a *App) handleAdminAnnouncements(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireIdentity(w, r, ""); !ok {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
 		return
 	}
 	switch {
 	case r.URL.Path == "/api/accounts" && r.Method == http.MethodGet:
-		util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.accounts.ListAccounts()})
+		util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.accountItemsForIdentity(identity)})
+	case r.URL.Path == "/api/accounts/tokens" && r.Method == http.MethodGet:
+		util.WriteJSON(w, http.StatusOK, map[string]any{"tokens": a.accounts.ListTokens()})
 	case r.URL.Path == "/api/accounts" && r.Method == http.MethodPost:
 		body, _ := readJSONMap(r)
 		tokens := util.AsStringSlice(body["tokens"])
@@ -575,31 +578,60 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 				result[key] = value
 			}
 		}
+		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts" && r.Method == http.MethodDelete:
 		body, _ := readJSONMap(r)
 		tokens := util.AsStringSlice(body["tokens"])
+		accountIDs := util.AsStringSlice(body["account_ids"])
 		if len(tokens) == 0 {
-			util.WriteError(w, http.StatusBadRequest, "tokens is required")
+			tokens = a.accounts.ListTokensByIDs(accountIDs)
+		}
+		if len(tokens) == 0 {
+			if len(accountIDs) > 0 {
+				util.WriteError(w, http.StatusNotFound, "account not found")
+				return
+			}
+			util.WriteError(w, http.StatusBadRequest, "tokens or account_ids is required")
 			return
 		}
-		util.WriteJSON(w, http.StatusOK, a.accounts.DeleteAccounts(tokens))
+		result := a.accounts.DeleteAccounts(tokens)
+		a.redactAccountPayloadForIdentity(identity, result)
+		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts/refresh" && r.Method == http.MethodPost:
 		body, _ := readJSONMap(r)
 		tokens := util.AsStringSlice(body["access_tokens"])
-		if len(tokens) == 0 {
+		accountIDs := util.AsStringSlice(body["account_ids"])
+		if len(tokens) == 0 && len(accountIDs) > 0 {
+			tokens = a.accounts.ListTokensByIDs(accountIDs)
+		}
+		if len(tokens) == 0 && len(accountIDs) == 0 {
 			tokens = a.accounts.ListTokens()
 		}
 		if len(tokens) == 0 {
-			util.WriteError(w, http.StatusBadRequest, "access_tokens is required")
+			if len(accountIDs) > 0 {
+				util.WriteError(w, http.StatusNotFound, "account not found")
+				return
+			}
+			util.WriteError(w, http.StatusBadRequest, "access_tokens or account_ids is required")
 			return
 		}
-		util.WriteJSON(w, http.StatusOK, a.accounts.RefreshAccounts(r.Context(), tokens))
+		result := a.accounts.RefreshAccounts(r.Context(), tokens)
+		a.redactAccountPayloadForIdentity(identity, result)
+		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts/update" && r.Method == http.MethodPost:
 		body, _ := readJSONMap(r)
 		token := util.Clean(body["access_token"])
+		accountID := util.Clean(body["account_id"])
+		if token == "" && accountID != "" {
+			token = a.accounts.GetTokenByID(accountID)
+			if token == "" {
+				util.WriteError(w, http.StatusNotFound, "account not found")
+				return
+			}
+		}
 		if token == "" {
-			util.WriteError(w, http.StatusBadRequest, "access_token is required")
+			util.WriteError(w, http.StatusBadRequest, "access_token or account_id is required")
 			return
 		}
 		updates := map[string]any{}
@@ -617,10 +649,51 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusNotFound, "account not found")
 			return
 		}
-		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": a.accounts.ListAccounts()})
+		result := map[string]any{"item": item, "items": a.accounts.ListAccounts()}
+		a.redactAccountPayloadForIdentity(identity, result)
+		util.WriteJSON(w, http.StatusOK, result)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (a *App) accountItemsForIdentity(identity service.Identity) []map[string]any {
+	items := a.accounts.ListAccounts()
+	if !a.identityCanAccessAPI(identity, http.MethodGet, "/api/accounts/tokens") {
+		redactAccountTokens(items)
+	}
+	return items
+}
+
+func (a *App) redactAccountPayloadForIdentity(identity service.Identity, payload map[string]any) {
+	if a.identityCanAccessAPI(identity, http.MethodGet, "/api/accounts/tokens") {
+		return
+	}
+	if item, ok := payload["item"].(map[string]any); ok {
+		redactAccountToken(item)
+	}
+	if items, ok := payload["items"].([]map[string]any); ok {
+		redactAccountTokens(items)
+	}
+	if errors, ok := payload["errors"].([]map[string]string); ok {
+		for _, item := range errors {
+			token := item["access_token"]
+			delete(item, "access_token")
+			if token != "" {
+				item["account_id"] = util.SHA1Short(token, 16)
+			}
+		}
+	}
+}
+
+func redactAccountTokens(items []map[string]any) {
+	for _, item := range items {
+		redactAccountToken(item)
+	}
+}
+
+func redactAccountToken(item map[string]any) {
+	delete(item, "access_token")
 }
 
 func (a *App) handleCPA(w http.ResponseWriter, r *http.Request) {

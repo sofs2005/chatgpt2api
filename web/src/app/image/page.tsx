@@ -45,12 +45,15 @@ import {
   isImageModel,
   isImageQuality,
   isImageTaskModel,
+  updateManagedImageVisibility,
   type ImageModel,
   type ImageQuality,
   type CreationTask,
   type CreationTaskMessage,
   type ImageVisibility,
 } from "@/lib/api";
+import { clearImageManagerCache } from "@/lib/image-manager-cache";
+import { getManagedImagePathFromUrl } from "@/lib/image-path";
 import { cn } from "@/lib/utils";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
@@ -103,6 +106,8 @@ type EditingTurnDraft = {
   visibility: ImageVisibility;
   referenceImages: StoredReferenceImage[];
 };
+
+type CreationTaskDataItem = NonNullable<CreationTask["data"]>[number];
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -256,6 +261,8 @@ const STORED_IMAGE_FIELDS: Array<keyof StoredImage> = [
   "id",
   "taskId",
   "status",
+  "path",
+  "visibility",
   "b64_json",
   "url",
   "revised_prompt",
@@ -268,7 +275,19 @@ function updateStoredImage(image: StoredImage, updates: Partial<StoredImage>): S
   return STORED_IMAGE_FIELDS.every((field) => image[field] === next[field]) ? image : next;
 }
 
-function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex = 0): StoredImage {
+function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex = 0, fallbackVisibility?: ImageVisibility): StoredImage {
+  const taskVisibility = task.visibility || fallbackVisibility || image.visibility || "private";
+  const successUpdates = (item: CreationTaskDataItem) => ({
+    taskId: task.id,
+    status: "success" as const,
+    b64_json: item.b64_json,
+    url: item.url,
+    path: item.url ? getManagedImagePathFromUrl(item.url) || image.path : image.path,
+    visibility: taskVisibility,
+    revised_prompt: item.revised_prompt,
+    text_response: undefined,
+    error: undefined,
+  });
   if (task.status === "success") {
     if (task.output_type === "text") {
       return updateStoredImage(image, {
@@ -277,6 +296,8 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
         text_response: task.data?.[dataIndex]?.text_response || task.error || "",
         b64_json: undefined,
         url: undefined,
+        path: undefined,
+        visibility: undefined,
         revised_prompt: undefined,
         error: undefined,
       });
@@ -296,15 +317,7 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
         error: `未返回第 ${dataIndex + 1} 张图片数据`,
       });
     }
-    return updateStoredImage(image, {
-      taskId: task.id,
-      status: "success",
-      b64_json: item.b64_json,
-      url: item.url,
-      revised_prompt: item.revised_prompt,
-      text_response: undefined,
-      error: undefined,
-    });
+    return updateStoredImage(image, successUpdates(item));
   }
 
   if (task.status === "error") {
@@ -315,21 +328,15 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
         text_response: task.error || "",
         b64_json: undefined,
         url: undefined,
+        path: undefined,
+        visibility: undefined,
         revised_prompt: undefined,
         error: undefined,
       });
     }
     const item = task.data?.[dataIndex];
     if (item?.b64_json || item?.url) {
-      return updateStoredImage(image, {
-        taskId: task.id,
-        status: "success",
-        b64_json: item.b64_json,
-        url: item.url,
-        revised_prompt: item.revised_prompt,
-        text_response: undefined,
-        error: undefined,
-      });
+      return updateStoredImage(image, successUpdates(item));
     }
     return updateStoredImage(image, {
       taskId: task.id,
@@ -342,15 +349,7 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
   if (task.status === "cancelled") {
     const item = task.data?.[dataIndex];
     if (item?.b64_json || item?.url) {
-      return updateStoredImage(image, {
-        taskId: task.id,
-        status: "success",
-        b64_json: item.b64_json,
-        url: item.url,
-        revised_prompt: item.revised_prompt,
-        text_response: undefined,
-        error: undefined,
-      });
+      return updateStoredImage(image, successUpdates(item));
     }
     return updateStoredImage(image, {
       taskId: task.id,
@@ -565,7 +564,7 @@ async function syncConversationCreationTasks(items: ImageConversation[]) {
         if (!task) {
           return image;
         }
-        const nextImage = taskDataToStoredImage(image, task, imageDataIndexForTask(turn.images, imageIndex));
+        const nextImage = taskDataToStoredImage(image, task, imageDataIndexForTask(turn.images, imageIndex), turn.visibility);
         if (nextImage !== image) {
           turnChanged = true;
         }
@@ -714,7 +713,7 @@ function ImagePageContent() {
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("");
   const [imageQuality, setImageQuality] = useState<ImageQuality>(getStoredImageQuality);
-  const [publishToGallery, setPublishToGallery] = useState(false);
+  const [defaultImageVisibility, setDefaultImageVisibility] = useState<ImageVisibility>("private");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isPromptMarketOpen, setIsPromptMarketOpen] = useState(false);
   const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
@@ -731,6 +730,7 @@ function ImagePageContent() {
   );
   const [progressNow, setProgressNow] = useState(Date.now());
   const [composerDockHeight, setComposerDockHeight] = useState(0);
+  const [visibilityMutatingImageKey, setVisibilityMutatingImageKey] = useState("");
 
   const parsedCount = useMemo(() => normalizeRequestedImageCount(imageCount), [imageCount]);
   const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_TASK_MODEL_OPTIONS;
@@ -1032,7 +1032,7 @@ function ImagePageContent() {
     promptApplyRequestIdRef.current += 1;
     setImagePrompt("");
     setImageCount("1");
-    setPublishToGallery(false);
+    setDefaultImageVisibility("private");
     setReferenceImages([]);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -1047,7 +1047,7 @@ function ImagePageContent() {
     setComposerMode(mode);
     if (mode === "chat") {
       promptApplyRequestIdRef.current += 1;
-      setPublishToGallery(false);
+      setDefaultImageVisibility("private");
       setReferenceImages([]);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -1069,7 +1069,7 @@ function ImagePageContent() {
     setImagePrompt(preset.prompt);
     setImageCount(String(preset.count));
     setImageSize(preset.size);
-    setPublishToGallery(false);
+    setDefaultImageVisibility("private");
     setReferenceImages([]);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -1106,7 +1106,7 @@ function ImagePageContent() {
     setImagePrompt(prompt.prompt);
     setImageCount("1");
     setImageSize("");
-    setPublishToGallery(false);
+    setDefaultImageVisibility("private");
     setReferenceImages([]);
     setIsPromptMarketOpen(false);
     if (fileInputRef.current) {
@@ -1289,6 +1289,71 @@ function ImagePageContent() {
     setLightboxOpen(true);
   }, []);
 
+  const handleImageVisibilityChange = useCallback(
+    async (conversationId: string, turnId: string, imageIndex: number, visibility: ImageVisibility) => {
+      const targetConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
+      const targetTurn = targetConversation?.turns.find((turn) => turn.id === turnId);
+      const targetImage = targetTurn?.images[imageIndex];
+      if (!targetConversation || !targetTurn || !targetImage) {
+        toast.error("未找到对应的图片记录");
+        return;
+      }
+      if (targetImage.status !== "success") {
+        toast.error("图片生成成功后才能修改公开状态");
+        return;
+      }
+      const path = targetImage.path || (targetImage.url ? getManagedImagePathFromUrl(targetImage.url) : "");
+      if (!path) {
+        toast.error("未找到可同步到图库的图片路径");
+        return;
+      }
+
+      const mutatingKey = `${conversationId}:${turnId}:${targetImage.id}`;
+      if (visibilityMutatingImageKey === mutatingKey) {
+        return;
+      }
+      if (visibilityMutatingImageKey) {
+        return;
+      }
+      setVisibilityMutatingImageKey(mutatingKey);
+      try {
+        const data = await updateManagedImageVisibility(path, visibility);
+        const updatedVisibility = data.item.visibility || visibility;
+        const updatedPath = data.item.path || path;
+        await updateConversation(conversationId, (current) => {
+          const conversation = current ?? targetConversation;
+          return {
+            ...conversation,
+            updatedAt: new Date().toISOString(),
+            turns: conversation.turns.map((turn) =>
+              turn.id === turnId
+                ? {
+                    ...turn,
+                    images: turn.images.map((image, index) =>
+                      index === imageIndex
+                        ? {
+                            ...image,
+                            path: updatedPath,
+                            visibility: updatedVisibility,
+                          }
+                        : image,
+                    ),
+                  }
+                : turn,
+            ),
+          };
+        });
+        clearImageManagerCache();
+        toast.success(updatedVisibility === "public" ? "已公开到公开图库" : "已取消公开");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "更新公开状态失败");
+      } finally {
+        setVisibilityMutatingImageKey("");
+      }
+    },
+    [updateConversation, visibilityMutatingImageKey],
+  );
+
   const openEditTurnDialog = useCallback((conversationId: string, turnId: string) => {
     const targetConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
     const targetTurn = targetConversation?.turns.find((turn) => turn.id === turnId);
@@ -1400,7 +1465,7 @@ function ImagePageContent() {
               const taskId = image.taskId || image.id;
               const task = taskMap.get(taskId);
               const taskImage = image.taskId === taskId ? image : { ...image, taskId };
-              return task ? taskDataToStoredImage(taskImage, task, imageDataIndexForTask(turn.images, imageIndex)) : image;
+              return task ? taskDataToStoredImage(taskImage, task, imageDataIndexForTask(turn.images, imageIndex), turn.visibility) : image;
             });
             const derived = deriveTurnStatus({ ...turn, status: "generating", images });
             const nextTurn = {
@@ -1695,7 +1760,7 @@ function ImagePageContent() {
               const taskId = image.taskId || image.id;
               const task = taskMap.get(taskId);
               if (task) {
-                return taskDataToStoredImage({ ...image, taskId }, task, imageDataIndexForTask(turn.images, imageIndex));
+                return taskDataToStoredImage({ ...image, taskId }, task, imageDataIndexForTask(turn.images, imageIndex), turn.visibility);
               }
               return {
                 ...image,
@@ -1775,6 +1840,8 @@ function ImagePageContent() {
                       status: "loading" as const,
                       b64_json: undefined,
                       url: undefined,
+                      path: undefined,
+                      visibility: targetTurn.mode === "chat" ? undefined : targetTurn.visibility || "private",
                       revised_prompt: undefined,
                       text_response: undefined,
                       error: undefined,
@@ -1837,6 +1904,7 @@ function ImagePageContent() {
             }
 
             const imageCount = turn.mode === "chat" ? 1 : normalizeRequestedImageCount(turn.count || turn.images.length || 1);
+            const visibility = turn.mode === "chat" ? undefined : turn.visibility || "private";
             return {
               ...turn,
               count: imageCount,
@@ -1848,6 +1916,7 @@ function ImagePageContent() {
                   id: imageId,
                   taskId: imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
                   status: "loading" as const,
+                  visibility,
                 };
               }),
             };
@@ -1924,6 +1993,7 @@ function ImagePageContent() {
                   id: imageId,
                   taskId: imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
                   status: "loading" as const,
+                  visibility: baseTurn.mode === "chat" ? undefined : baseTurn.visibility,
                 };
               }),
             };
@@ -1985,13 +2055,14 @@ function ImagePageContent() {
         count: requestedCount,
         size: effectiveImageMode === "chat" ? "" : imageSize,
         quality: effectiveImageMode === "chat" ? undefined : imageQuality,
-        visibility: effectiveImageMode === "chat" ? "private" : publishToGallery ? "public" : "private",
+        visibility: effectiveImageMode === "chat" ? "private" : defaultImageVisibility,
         images: Array.from({ length: requestedCount }, (_, index) => {
           const imageId = `${turnId}-${index}`;
           return {
             id: imageId,
             taskId: imageTaskBatchId(turnId, index),
             status: "loading" as const,
+            visibility: effectiveImageMode === "chat" ? undefined : defaultImageVisibility,
           };
         }),
         createdAt: now,
@@ -2342,6 +2413,8 @@ function ImagePageContent() {
               onCancelTurn={handleCancelTurn}
               onRegenerateTurn={handleRegenerateTurn}
               onRetryImage={handleRetryImage}
+              onImageVisibilityChange={handleImageVisibilityChange}
+              visibilityMutatingImageKey={visibilityMutatingImageKey}
               formatConversationTime={formatConversationTime}
             />
           </div>
@@ -2365,7 +2438,6 @@ function ImagePageContent() {
                 imageSize={imageSize}
                 imageQuality={imageQuality}
                 imageQualityOptions={IMAGE_QUALITY_OPTIONS}
-                publishToGallery={publishToGallery}
                 imageOutputHint={imageOutputHint}
                 referenceImages={referenceImages}
                 textareaRef={textareaRef}
@@ -2376,7 +2448,6 @@ function ImagePageContent() {
                 onImageModelChange={setImageModel}
                 onImageSizeChange={setImageSize}
                 onImageQualityChange={setImageQuality}
-                onPublishToGalleryChange={setPublishToGallery}
                 onSubmit={handleSubmit}
                 onPickReferenceImage={() => fileInputRef.current?.click()}
                 onOpenPromptMarket={() => setIsPromptMarketOpen(true)}

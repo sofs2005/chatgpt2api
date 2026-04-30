@@ -488,12 +488,85 @@ func TestRBACPermissionsGateManagementAPIs(t *testing.T) {
 		t.Fatalf("granted user accounts status = %d body = %s", res.Code, res.Body.String())
 	}
 
+	app.accounts.AddAccounts([]string{"pool-token"})
+	req = httptest.NewRequest(http.MethodGet, "/api/accounts", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("granted user accounts with token status = %d body = %s", res.Code, res.Body.String())
+	}
+	var accountsBody map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &accountsBody); err != nil {
+		t.Fatalf("accounts json: %v", err)
+	}
+	accountItems := logItems(accountsBody)
+	if len(accountItems) != 1 {
+		t.Fatalf("accounts body = %#v", accountsBody)
+	}
+	if _, ok := accountItems[0]["access_token"]; ok {
+		t.Fatalf("account list should not expose access_token without export permission: %#v", accountItems[0])
+	}
+	accountID, _ := accountItems[0]["id"].(string)
+	if accountID == "" || accountItems[0]["token_preview"] == "" {
+		t.Fatalf("account list missing id/token preview: %#v", accountItems[0])
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/accounts/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("ungranted account token export status = %d body = %s", res.Code, res.Body.String())
+	}
+
 	req = httptest.NewRequest(http.MethodPost, "/api/accounts", strings.NewReader(`{"tokens":["x"]}`))
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 	res = httptest.NewRecorder()
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("ungranted write accounts status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	if _, err := app.auth.UpdateRole(role["id"].(string), map[string]any{
+		"api_permissions": []string{
+			service.APIPermissionKey(http.MethodGet, "/api/accounts"),
+			service.APIPermissionKey(http.MethodDelete, "/api/accounts"),
+		},
+	}); err != nil {
+		t.Fatalf("UpdateRole(delete accounts) error = %v", err)
+	}
+	req = httptest.NewRequest(http.MethodDelete, "/api/accounts", strings.NewReader(`{"account_ids":["`+accountID+`"]}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("delete account by id status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	app.accounts.AddAccounts([]string{"pool-token"})
+	if _, err := app.auth.UpdateRole(role["id"].(string), map[string]any{
+		"api_permissions": []string{
+			service.APIPermissionKey(http.MethodGet, "/api/accounts"),
+			service.APIPermissionKey(http.MethodGet, "/api/accounts/tokens"),
+		},
+	}); err != nil {
+		t.Fatalf("UpdateRole(export tokens) error = %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/accounts/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("granted account token export status = %d body = %s", res.Code, res.Body.String())
+	}
+	var tokenExport map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &tokenExport); err != nil {
+		t.Fatalf("token export json: %v", err)
+	}
+	tokens := util.AsStringSlice(tokenExport["tokens"])
+	if len(tokens) != 1 || tokens[0] != "pool-token" {
+		t.Fatalf("exported tokens = %#v", tokenExport["tokens"])
 	}
 }
 
@@ -731,6 +804,29 @@ func TestImageManagementIsScopedByOwner(t *testing.T) {
 	}
 	if items := logItems(list); len(items) != 0 {
 		t.Fatalf("unpublished image should leave public gallery: %#v", list)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/images?scope=public", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin public gallery status = %d body = %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &list); err != nil {
+		t.Fatalf("admin public gallery json: %v", err)
+	}
+	items = logItems(list)
+	if len(items) != 3 {
+		t.Fatalf("admin public gallery should see all images, got %#v", list)
+	}
+	seenPaths := make(map[string]bool, len(items))
+	for _, item := range items {
+		path, _ := item["path"].(string)
+		seenPaths[path] = true
+	}
+	if !seenPaths[aliceRel] || !seenPaths[bobRel] || !seenPaths[legacyRel] {
+		t.Fatalf("admin public gallery paths = %#v", items)
 	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/images", strings.NewReader(`{"paths":["`+bobRel+`","`+aliceRel+`"]}`))

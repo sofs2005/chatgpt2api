@@ -13,6 +13,7 @@ import {
   type ImageQuality,
   type ImageVisibility,
 } from "@/lib/api";
+import { getManagedImagePathFromUrl } from "@/lib/image-path";
 import { getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 export type ImageConversationMode = "chat" | "generate" | "image" | "edit";
@@ -29,6 +30,8 @@ export type StoredImage = {
   id: string;
   taskId?: string;
   status?: "loading" | "success" | "error" | "cancelled" | "message";
+  path?: string;
+  visibility?: ImageVisibility;
   b64_json?: string;
   url?: string;
   revised_prompt?: string;
@@ -102,10 +105,19 @@ async function imageConversationsStorageKey() {
 }
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
+  const url = typeof image.url === "string" && image.url ? image.url : undefined;
   const normalized = {
     ...image,
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
-    url: typeof image.url === "string" && image.url ? image.url : undefined,
+    path:
+      typeof image.path === "string" && image.path
+        ? image.path
+        : url
+          ? getManagedImagePathFromUrl(url) || undefined
+          : undefined,
+    visibility:
+      image.visibility === "public" || image.visibility === "private" ? image.visibility : undefined,
+    url,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
     text_response: typeof image.text_response === "string" && image.text_response ? image.text_response : undefined,
   };
@@ -186,6 +198,10 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
   const normalizedImages = Array.isArray(turn.images) ? turn.images.map(normalizeStoredImage) : [];
   const referenceImages = getLegacyReferenceImages(turn);
   const mode = normalizeImageMode(turn.mode, referenceImages);
+  const visibility: ImageVisibility = turn.visibility === "public" ? "public" : "private";
+  const images = normalizedImages.map((image) =>
+    image.visibility ? image : { ...image, visibility },
+  );
   const model =
     mode === "chat"
       ? isChatModel(turn.model)
@@ -195,13 +211,13 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
         ? turn.model
         : DEFAULT_IMAGE_MODEL;
   const derivedStatus: ImageTurnStatus =
-    normalizedImages.some((image) => image.status === "loading")
+    images.some((image) => image.status === "loading")
       ? "generating"
-      : normalizedImages.some((image) => image.status === "error")
+      : images.some((image) => image.status === "error")
         ? "error"
-        : normalizedImages.some((image) => image.status === "cancelled")
+        : images.some((image) => image.status === "cancelled")
           ? "cancelled"
-          : normalizedImages.some((image) => image.status === "message")
+          : images.some((image) => image.status === "message")
             ? "message"
             : "success";
 
@@ -211,11 +227,11 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     model,
     mode,
     referenceImages,
-    count: Math.max(1, Number(turn.count || normalizedImages.length || 1)),
+    count: Math.max(1, Number(turn.count || images.length || 1)),
     size: typeof turn.size === "string" ? turn.size : "",
     quality: isImageQuality(turn.quality) ? turn.quality : undefined,
-    visibility: turn.visibility === "public" ? "public" : "private",
-    images: normalizedImages,
+    visibility,
+    images,
     createdAt: String(turn.createdAt || new Date().toISOString()),
     status:
       turn.status === "queued" ||

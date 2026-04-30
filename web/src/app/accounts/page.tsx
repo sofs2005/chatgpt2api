@@ -44,6 +44,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   deleteAccounts,
+  fetchAccountTokens,
   fetchAccounts,
   refreshAccounts,
   updateAccount,
@@ -53,6 +54,7 @@ import {
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
+import { hasAPIPermission, type StoredAuthSession } from "@/store/auth";
 
 import { AccountImportDialog } from "./components/account-import-dialog";
 
@@ -187,8 +189,8 @@ function maskToken(token?: string) {
   return `${token.slice(0, 16)}...${token.slice(-8)}`;
 }
 
-function downloadTokens(accounts: Account[]) {
-  const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
+function downloadTokenFile(tokens: string[]) {
+  const content = `${tokens.join("\n")}\n`;
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -213,7 +215,7 @@ function normalizeAccounts(items: Account[] | null | undefined): Account[] {
   }));
 }
 
-function AccountsPageContent() {
+function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -230,6 +232,13 @@ function AccountsPageContent() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+
+  const canImportAccounts = hasAPIPermission(session, "POST", "/api/accounts");
+  const canRefreshAccounts = hasAPIPermission(session, "POST", "/api/accounts/refresh");
+  const canUpdateAccount = hasAPIPermission(session, "POST", "/api/accounts/update");
+  const canDeleteAccounts = hasAPIPermission(session, "DELETE", "/api/accounts");
+  const canExportTokens = hasAPIPermission(session, "GET", "/api/accounts/tokens");
 
   const applyAccountItems = useCallback((items: Account[] | null | undefined) => {
     const nextAccounts = normalizeAccounts(items);
@@ -294,13 +303,13 @@ function AccountsPageContent() {
     return { total, active, limited, abnormal, disabled, quota };
   }, [accounts]);
 
-  const selectedTokens = useMemo(() => {
+  const selectedAccountIds = useMemo(() => {
     const selectedSet = new Set(selectedIds);
-    return accounts.filter((item) => selectedSet.has(item.id)).map((item) => item.access_token);
+    return accounts.filter((item) => selectedSet.has(item.id)).map((item) => item.id);
   }, [accounts, selectedIds]);
 
-  const abnormalTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
+  const abnormalAccountIds = useMemo(() => {
+    return accounts.filter((item) => item.status === "异常").map((item) => item.id);
   }, [accounts]);
 
   const paginationItems = useMemo(() => {
@@ -317,15 +326,19 @@ function AccountsPageContent() {
     return items;
   }, [pageCount, safePage]);
 
-  const handleDeleteTokens = async (tokens: string[]) => {
-    if (tokens.length === 0) {
+  const handleDeleteAccounts = async (accountIds: string[]) => {
+    if (!canDeleteAccounts) {
+      toast.error("没有删除账号权限");
+      return;
+    }
+    if (accountIds.length === 0) {
       toast.error("请先选择要删除的账户");
       return;
     }
 
     setIsDeleting(true);
     try {
-      const data = await deleteAccounts(tokens);
+      const data = await deleteAccounts(accountIds);
       applyAccountItems(data.items);
       toast.success(`删除 ${data.removed ?? 0} 个账户`);
     } catch (error) {
@@ -336,15 +349,19 @@ function AccountsPageContent() {
     }
   };
 
-  const handleRefreshAccounts = async (accessTokens: string[]) => {
-    if (accessTokens.length === 0) {
+  const handleRefreshAccounts = async (accountIds: string[]) => {
+    if (!canRefreshAccounts) {
+      toast.error("没有刷新账号权限");
+      return;
+    }
+    if (accountIds.length === 0) {
       toast.error("没有需要刷新的账户");
       return;
     }
 
     setIsRefreshing(true);
     try {
-      const data = await refreshAccounts(accessTokens);
+      const data = await refreshAccounts(accountIds);
       applyAccountItems(data.items);
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
@@ -362,7 +379,35 @@ function AccountsPageContent() {
     }
   };
 
+  const handleExportTokens = async () => {
+    if (!canExportTokens) {
+      toast.error("没有导出 Token 权限");
+      return;
+    }
+    setIsExporting(true);
+    try {
+      const data = await fetchAccountTokens();
+      const tokens = (Array.isArray(data.tokens) ? data.tokens : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+      if (tokens.length === 0) {
+        toast.error("暂无可导出的 Token");
+        return;
+      }
+      downloadTokenFile(tokens);
+      toast.success(`已导出 ${tokens.length} 个 Token`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "导出 Token 失败";
+      toast.error(message);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const openEditDialog = (account: Account) => {
+    if (!canUpdateAccount) {
+      return;
+    }
     setEditingAccount(account);
     setEditType(account.type);
     setEditStatus(account.status);
@@ -370,13 +415,13 @@ function AccountsPageContent() {
   };
 
   const handleUpdateAccount = async () => {
-    if (!editingAccount) {
+    if (!editingAccount || !canUpdateAccount) {
       return;
     }
 
     setIsUpdating(true);
     try {
-      const data = await updateAccount(editingAccount.access_token, {
+      const data = await updateAccount(editingAccount.id, {
         type: editType,
         status: editStatus,
         quota: Number(editQuota || 0),
@@ -416,32 +461,38 @@ function AccountsPageContent() {
             <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
             刷新
           </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-lg"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
-            disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
-          >
-            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            一键刷新所有账号信息和额度
-          </Button>
-          <AccountImportDialog
-            disabled={isLoading || isRefreshing || isDeleting}
-            onImported={(items) => {
-              applyAccountItems(items);
-              setSelectedIds([]);
-              setPage(1);
-            }}
-          />
-          <Button
-            variant="outline"
-            className="h-10 rounded-lg"
-            onClick={() => downloadTokens(accounts)}
-            disabled={accounts.length === 0}
-          >
-            <Download className="size-4" />
-            导出全部 Token
-          </Button>
+          {canRefreshAccounts ? (
+            <Button
+              variant="outline"
+              className="h-10 rounded-lg"
+              onClick={() => void handleRefreshAccounts(accounts.map((item) => item.id))}
+              disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
+            >
+              <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+              一键刷新所有账号信息和额度
+            </Button>
+          ) : null}
+          {canImportAccounts ? (
+            <AccountImportDialog
+              disabled={isLoading || isRefreshing || isDeleting}
+              onImported={(items) => {
+                applyAccountItems(items);
+                setSelectedIds([]);
+                setPage(1);
+              }}
+            />
+          ) : null}
+          {canExportTokens ? (
+            <Button
+              variant="outline"
+              className="h-10 rounded-lg"
+              onClick={() => void handleExportTokens()}
+              disabled={accounts.length === 0 || isExporting}
+            >
+              {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+              导出全部 Token
+            </Button>
+          ) : null}
           </>
         }
       />
@@ -510,7 +561,7 @@ function AccountsPageContent() {
             <Button
               className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
               onClick={() => void handleUpdateAccount()}
-              disabled={isUpdating}
+              disabled={isUpdating || !canUpdateAccount}
             >
               {isUpdating ? <LoaderCircle className="size-4 animate-spin" /> : null}
               保存修改
@@ -627,33 +678,39 @@ function AccountsPageContent() {
           <CardContent className="space-y-0 p-0">
             <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleRefreshAccounts(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isRefreshing}
-                >
-                  {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-                  刷新选中账号信息和额度
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                  onClick={() => void handleDeleteTokens(abnormalTokens)}
-                  disabled={abnormalTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  移除异常账号
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                  onClick={() => void handleDeleteTokens(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  删除所选
-                </Button>
+                {canRefreshAccounts ? (
+                  <Button
+                    variant="ghost"
+                    className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                    onClick={() => void handleRefreshAccounts(selectedAccountIds)}
+                    disabled={selectedAccountIds.length === 0 || isRefreshing}
+                  >
+                    {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                    刷新选中账号信息和额度
+                  </Button>
+                ) : null}
+                {canDeleteAccounts ? (
+                  <>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                      onClick={() => void handleDeleteAccounts(abnormalAccountIds)}
+                      disabled={abnormalAccountIds.length === 0 || isDeleting}
+                    >
+                      {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                      移除异常账号
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                      onClick={() => void handleDeleteAccounts(selectedAccountIds)}
+                      disabled={selectedAccountIds.length === 0 || isDeleting}
+                    >
+                      {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                      删除所选
+                    </Button>
+                  </>
+                ) : null}
                 {selectedIds.length > 0 ? (
                   <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
                     已选择 {selectedIds.length} 项
@@ -719,18 +776,20 @@ function AccountsPageContent() {
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <span className="font-medium tracking-tight text-foreground">
-                              {maskToken(account.access_token)}
+                              {maskToken(account.access_token || account.token_preview || account.id)}
                             </span>
-                            <button
-                              type="button"
-                              className="rounded-md p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                              onClick={() => {
-                                void navigator.clipboard.writeText(account.access_token);
-                                toast.success("token 已复制");
-                              }}
-                            >
-                              <Copy className="size-4" />
-                            </button>
+                            {canExportTokens && account.access_token ? (
+                              <button
+                                type="button"
+                                className="rounded-md p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                onClick={() => {
+                                  void navigator.clipboard.writeText(account.access_token || "");
+                                  toast.success("token 已复制");
+                                }}
+                              >
+                                <Copy className="size-4" />
+                              </button>
+                            ) : null}
                           </div>
                         </TableCell>
                         <TableCell>
@@ -770,30 +829,36 @@ function AccountsPageContent() {
                         <TableCell>{account.fail}</TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1 text-muted-foreground">
-                            <button
-                              type="button"
-                              className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
-                              onClick={() => openEditDialog(account)}
-                              disabled={isUpdating}
-                            >
-                              <Pencil className="size-4" />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
-                              onClick={() => void handleRefreshAccounts([account.access_token])}
-                              disabled={isRefreshing}
-                            >
-                              <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                              onClick={() => void handleDeleteTokens([account.access_token])}
-                              disabled={isDeleting}
-                            >
-                              <Trash2 className="size-4" />
-                            </button>
+                            {canUpdateAccount ? (
+                              <button
+                                type="button"
+                                className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
+                                onClick={() => openEditDialog(account)}
+                                disabled={isUpdating}
+                              >
+                                <Pencil className="size-4" />
+                              </button>
+                            ) : null}
+                            {canRefreshAccounts ? (
+                              <button
+                                type="button"
+                                className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
+                                onClick={() => void handleRefreshAccounts([account.id])}
+                                disabled={isRefreshing}
+                              >
+                                <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+                              </button>
+                            ) : null}
+                            {canDeleteAccounts ? (
+                              <button
+                                type="button"
+                                className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
+                                onClick={() => void handleDeleteAccounts([account.id])}
+                                disabled={isDeleting}
+                              >
+                                <Trash2 className="size-4" />
+                              </button>
+                            ) : null}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -904,5 +969,5 @@ export default function AccountsPage() {
     );
   }
 
-  return <AccountsPageContent />;
+  return <AccountsPageContent session={session} />;
 }

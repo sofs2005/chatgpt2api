@@ -14,7 +14,6 @@ import {
 
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
@@ -31,7 +30,6 @@ type ImageComposerProps = {
   imageSize: string;
   imageQuality: ImageQuality;
   imageQualityOptions: ReadonlyArray<{ value: ImageQuality; label: string; description: string }>;
-  publishToGallery: boolean;
   imageOutputHint: ReactNode;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
@@ -42,7 +40,6 @@ type ImageComposerProps = {
   onImageModelChange: (value: ImageModel) => void;
   onImageSizeChange: (value: string) => void;
   onImageQualityChange: (value: ImageQuality) => void;
-  onPublishToGalleryChange: (value: boolean) => void;
   onSubmit: () => void | Promise<void>;
   onPickReferenceImage: () => void;
   onOpenPromptMarket: () => void;
@@ -81,7 +78,6 @@ export function ImageComposer({
   imageSize,
   imageQuality,
   imageQualityOptions,
-  publishToGallery,
   imageOutputHint,
   referenceImages,
   textareaRef,
@@ -92,7 +88,6 @@ export function ImageComposer({
   onImageModelChange,
   onImageSizeChange,
   onImageQualityChange,
-  onPublishToGalleryChange,
   onSubmit,
   onPickReferenceImage,
   onOpenPromptMarket,
@@ -405,16 +400,6 @@ export function ImageComposer({
                       <ImagePlus className="size-3.5" />
                       <span>上传</span>
                     </Button>
-                    <label
-                      className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-2 rounded-full border border-[#e5e7eb] bg-white px-3 text-xs font-medium text-[#45515e] shadow-none transition hover:bg-black/[0.05]"
-                      title="公开到公开图库"
-                    >
-                      <Checkbox
-                        checked={publishToGallery}
-                        onCheckedChange={(checked) => onPublishToGalleryChange(checked === true)}
-                      />
-                      <span>公开</span>
-                    </label>
                   </>
                 ) : null}
                 <div

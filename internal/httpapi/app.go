@@ -841,7 +841,14 @@ func (a *App) identityCanAccessRequest(identity service.Identity, r *http.Reques
 	if identity.Role == service.AuthRoleAdmin || isPermissionCheckSkipped(r.URL.Path) {
 		return true
 	}
-	return service.HasAPIPermission(a.identityPermissions(identity), r.Method, r.URL.Path)
+	return a.identityCanAccessAPI(identity, r.Method, r.URL.Path)
+}
+
+func (a *App) identityCanAccessAPI(identity service.Identity, method, path string) bool {
+	if identity.Role == service.AuthRoleAdmin {
+		return true
+	}
+	return service.HasAPIPermission(a.identityPermissions(identity), method, path)
 }
 
 func isPermissionCheckSkipped(path string) bool {
@@ -1061,6 +1068,9 @@ func imageListAccessScope(identity service.Identity, value string) (service.Imag
 	case "mine":
 		return service.ImageAccessScope{OwnerID: identityScope(identity)}, 0, ""
 	case "public":
+		if identity.Role == service.AuthRoleAdmin {
+			return service.ImageAccessScope{All: true}, 0, ""
+		}
 		return service.ImageAccessScope{Public: true}, 0, ""
 	case "all":
 		if identity.Role != service.AuthRoleAdmin {

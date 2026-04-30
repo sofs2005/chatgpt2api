@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
-import { ChevronDown, Github, LogOut, Moon, Send, Sun, UserCircle2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ChevronDown, LogOut, Moon, Sun, UserCircle2 } from "lucide-react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { AnnouncementNotifications } from "@/components/announcement-banner";
@@ -103,24 +103,6 @@ function NavPill({ item, pathname }: { item: NavItem; pathname: string }) {
   );
 }
 
-function ExternalIconButton({
-  href,
-  label,
-  children,
-}: {
-  href: string;
-  label: string;
-  children: ReactNode;
-}) {
-  return (
-    <Button asChild variant="ghost" size="icon" className="size-9 rounded-full">
-      <a href={href} target="_blank" rel="noreferrer" aria-label={label} title={label}>
-        {children}
-      </a>
-    </Button>
-  );
-}
-
 function AccountMenu({
   session,
   roleLabel,
@@ -204,27 +186,6 @@ function AccountMenu({
             <UserCircle2 className="size-4" />
             个人中心
           </Link>
-
-          <div className="grid grid-cols-2 gap-2">
-            <a
-              href="https://t.me/+YBR7t_CPOYBkYzU1"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm text-muted-foreground transition hover:bg-accent hover:text-accent-foreground"
-            >
-              <Send className="size-4" />
-              Telegram
-            </a>
-            <a
-              href="https://github.com/ZyphrZero/chatgpt2api"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm text-muted-foreground transition hover:bg-accent hover:text-accent-foreground"
-            >
-              <Github className="size-4" />
-              GitHub
-            </a>
-          </div>
 
           <button
             type="button"
@@ -382,12 +343,6 @@ export function TopNav() {
           ))}
         </nav>
         <div className="hidden items-center justify-end gap-1.5 lg:flex">
-          <ExternalIconButton href="https://t.me/+YBR7t_CPOYBkYzU1" label="Telegram 群组">
-            <Send />
-          </ExternalIconButton>
-          <ExternalIconButton href="https://github.com/ZyphrZero/chatgpt2api" label="GitHub repository">
-            <Github />
-          </ExternalIconButton>
           {canAccessImageTasks ? <ImageTaskQueue /> : null}
           <AnnouncementNotifications target="image" className="size-8" />
           <ThemeToggleButton theme={theme} onToggle={handleThemeToggle} />

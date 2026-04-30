@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Copy, Download, Eye, Globe2, ImageIcon, LoaderCircle, Lock, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Check, Copy, Download, Eye, Globe2, ImageIcon, LoaderCircle, Lock, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -17,6 +17,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   deleteManagedImages,
   fetchManagedImages,
@@ -24,6 +26,15 @@ import {
   type ImageVisibility,
   type ManagedImage,
 } from "@/lib/api";
+import {
+  clearImageManagerCache,
+  getImageManagerCache,
+  imageManagerCacheKey,
+  isFreshImageManagerCache,
+  removeCachedManagedImages,
+  updateImageManagerCache,
+  type ImageGalleryView,
+} from "@/lib/image-manager-cache";
 import { formatImageFileSize } from "@/lib/image-size";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { hasAPIPermission, type StoredAuthSession } from "@/store/auth";
@@ -85,48 +96,76 @@ type DeleteImageTarget = {
   paths: string[];
 };
 
-type ImageGalleryView = "mine" | "public";
-
-type ImageManagerCacheEntry = {
-  items: ManagedImage[];
-  updatedAt: number;
-};
-
-const IMAGE_MANAGER_CACHE_TTL_MS = 30 * 1000;
-const imageManagerCache = new Map<string, ImageManagerCacheEntry>();
+type ImageVisibilityFilter = "all" | ImageVisibility;
+type ImageFormatFilter = "all" | "png" | "jpg" | "webp" | "gif" | "other";
+type ImageOrientationFilter = "all" | "landscape" | "portrait" | "square" | "unknown";
 
 function imageManagerCacheScope(session: StoredAuthSession) {
   return [session.provider || "local", session.role, session.subjectId || session.key].join(":");
 }
 
-function imageManagerCacheKey(cacheScope: string, view: ImageGalleryView, startDate: string, endDate: string) {
-  return [cacheScope, view, startDate, endDate].join("|");
-}
-
-function isFreshImageManagerCache(entry: ImageManagerCacheEntry) {
-  return Date.now() - entry.updatedAt < IMAGE_MANAGER_CACHE_TTL_MS;
-}
-
-function updateImageManagerCache(cacheKey: string, items: ManagedImage[]) {
-  imageManagerCache.set(cacheKey, { items, updatedAt: Date.now() });
-}
-
-function removeCachedManagedImages(paths: string[]) {
-  const pathSet = new Set(paths);
-  for (const [key, entry] of imageManagerCache) {
-    const items = entry.items.filter((item) => !pathSet.has(item.path));
-    if (items.length !== entry.items.length) {
-      imageManagerCache.set(key, { items, updatedAt: Date.now() });
-    }
+function getManagedImageFormat(item: ManagedImage) {
+  const extension = (item.name || item.url || item.path).split("?")[0]?.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  if (!extension) {
+    return "other";
   }
+  if (extension === "jpeg") {
+    return "jpg";
+  }
+  return ["png", "jpg", "webp", "gif"].includes(extension) ? extension : "other";
 }
 
 function imageOwnerLabel(item: ManagedImage) {
   return item.owner_name?.trim() || "未知用户";
 }
 
+function getManagedImageOrientation(item: ManagedImage): ImageOrientationFilter {
+  if (!item.width || !item.height) {
+    return "unknown";
+  }
+  if (item.width === item.height) {
+    return "square";
+  }
+  return item.width > item.height ? "landscape" : "portrait";
+}
+
+function matchesManagedImageKeyword(item: ManagedImage, keyword: string) {
+  const normalizedKeyword = keyword.trim().toLowerCase();
+  if (!normalizedKeyword) {
+    return true;
+  }
+  return [
+    item.name,
+    item.path,
+    item.url,
+    item.owner_name,
+    item.owner_id,
+    item.created_at,
+    item.date,
+  ].some((value) => String(value || "").toLowerCase().includes(normalizedKeyword));
+}
+
 function imageVisibilityLabel(visibility: ImageVisibility) {
   return visibility === "public" ? "已公开" : "私有";
+}
+
+function imageVisibilityPillClass(visibility: ImageVisibility) {
+  return visibility === "public"
+    ? "bg-[#e8f2ff] text-[#1456f0] ring-1 ring-[#bfdbfe]"
+    : "bg-[#181e25]/82 text-white ring-1 ring-white/20";
+}
+
+function imageVisibilityActionClass(visibility: ImageVisibility) {
+  return visibility === "public"
+    ? "bg-white/95 text-[#1456f0] hover:bg-[#e8f2ff]"
+    : "bg-white/95 text-stone-800 hover:bg-stone-100";
+}
+
+function blurFocusedElementInContainer(container: HTMLElement) {
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement && container.contains(activeElement)) {
+    activeElement.blur();
+  }
 }
 
 const IMAGE_MASONRY_BREAKPOINTS = [
@@ -134,6 +173,11 @@ const IMAGE_MASONRY_BREAKPOINTS = [
   { minWidth: 1024, columns: 3 },
   { minWidth: 640, columns: 2 },
 ] as const;
+const IMAGE_MANAGER_BATCH_SIZE = 40;
+const IMAGE_MANAGER_LOAD_MORE_DELAY_MS = 220;
+const AUTO_REFRESH_INTERVAL_OPTIONS = [60, 30, 10, 5] as const;
+
+type ImageAutoRefreshInterval = (typeof AUTO_REFRESH_INTERVAL_OPTIONS)[number];
 
 function getImageMasonryColumnCount() {
   if (typeof window === "undefined") {
@@ -171,16 +215,21 @@ function useOrderedImageMasonryColumns(items: ManagedImage[]) {
 function ImageManagerContent({
   cacheScope,
   canDeleteImages,
+  isAdmin,
 }: {
   cacheScope: string;
   canDeleteImages: boolean;
+  isAdmin: boolean;
 }) {
   const activeLoadRef = useRef<AbortController | null>(null);
+  const autoRefreshAbortRef = useRef<AbortController | null>(null);
+  const loadMoreTargetRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreTimerRef = useRef<number | null>(null);
   const [galleryView, setGalleryView] = useState<ImageGalleryView>("mine");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const currentCacheKey = imageManagerCacheKey(cacheScope, galleryView, startDate, endDate);
-  const initialCache = imageManagerCache.get(currentCacheKey);
+  const initialCache = getImageManagerCache(currentCacheKey);
   const [items, setItems] = useState<ManagedImage[]>(() => initialCache?.items ?? []);
   const [selectedImageIds, setSelectedImageIds] = useState<Record<string, boolean>>({});
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
@@ -191,19 +240,52 @@ function ImageManagerContent({
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(() => !initialCache);
   const [loadError, setLoadError] = useState("");
+  const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState<ImageAutoRefreshInterval>(30);
+  const [visibleItemLimit, setVisibleItemLimit] = useState(IMAGE_MANAGER_BATCH_SIZE);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [visibilityFilter, setVisibilityFilter] = useState<ImageVisibilityFilter>("all");
+  const [formatFilter, setFormatFilter] = useState<ImageFormatFilter>("all");
+  const [orientationFilter, setOrientationFilter] = useState<ImageOrientationFilter>("all");
+  const filteredItems = useMemo(
+    () =>
+      items.filter((item) => {
+        if (!matchesManagedImageKeyword(item, searchKeyword)) {
+          return false;
+        }
+        if (visibilityFilter !== "all" && item.visibility !== visibilityFilter) {
+          return false;
+        }
+        if (formatFilter !== "all" && getManagedImageFormat(item) !== formatFilter) {
+          return false;
+        }
+        if (orientationFilter !== "all" && getManagedImageOrientation(item) !== orientationFilter) {
+          return false;
+        }
+        return true;
+      }),
+    [formatFilter, items, orientationFilter, searchKeyword, visibilityFilter],
+  );
+  const hasLocalFilters = searchKeyword.trim() !== "" || visibilityFilter !== "all" || formatFilter !== "all" || orientationFilter !== "all";
+  const visibleItems = useMemo(
+    () => filteredItems.slice(0, visibleItemLimit),
+    [filteredItems, visibleItemLimit],
+  );
+  const hasMoreFilteredItems = visibleItems.length < filteredItems.length;
   const lightboxImages = useMemo(
     () =>
-      items.map((item) => ({
+      filteredItems.map((item) => ({
         id: item.name,
         src: item.url,
         sizeLabel: formatImageFileSize(item.size),
         dimensions: item.width && item.height ? `${item.width} x ${item.height}` : undefined,
       })),
-    [items],
+    [filteredItems],
   );
   const selectedItems = useMemo(
-    () => items.filter((item) => selectedImageIds[managedImageKey(item)]),
-    [items, selectedImageIds],
+    () => filteredItems.filter((item) => selectedImageIds[managedImageKey(item)]),
+    [filteredItems, selectedImageIds],
   );
   const selectedPrivateItems = useMemo(
     () => selectedItems.filter((item) => item.visibility !== "public"),
@@ -214,18 +296,20 @@ function ImageManagerContent({
     [selectedItems],
   );
   const selectedCount = selectedItems.length;
-  const allSelected = items.length > 0 && selectedCount === items.length;
+  const allSelected = filteredItems.length > 0 && selectedCount === filteredItems.length;
   const isMutatingImages = downloadingKey !== null || isDeleting || visibilityMutatingPath !== null;
-  const imageColumns = useOrderedImageMasonryColumns(items);
+  const imageColumns = useOrderedImageMasonryColumns(visibleItems);
   const showImageLoadingState = isLoading && items.length === 0;
   const showImageErrorState = !isLoading && loadError !== "" && items.length === 0;
   const showImageEmptyState = !isLoading && loadError === "" && items.length === 0;
+  const showImageFilteredEmptyState = !isLoading && loadError === "" && items.length > 0 && filteredItems.length === 0;
 
   const loadImages = useCallback(async ({ force = false }: { force?: boolean } = {}) => {
-    const cached = imageManagerCache.get(currentCacheKey);
+    const cached = getImageManagerCache(currentCacheKey);
     if (!force && cached) {
       setItems(cached.items);
       setSelectedImageIds({});
+      setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
       setLoadError("");
       if (isFreshImageManagerCache(cached)) {
         setIsLoading(false);
@@ -246,6 +330,7 @@ function ImageManagerContent({
       updateImageManagerCache(currentCacheKey, data.items);
       setItems(data.items);
       setSelectedImageIds({});
+      setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
     } catch (error) {
       if (controller.signal.aborted || isRequestCanceled(error)) {
         return;
@@ -263,18 +348,124 @@ function ImageManagerContent({
     }
   }, [currentCacheKey, endDate, galleryView, startDate]);
 
+  const refreshNewImages = useCallback(async () => {
+    if (isLoading || isMutatingImages || autoRefreshAbortRef.current) {
+      return;
+    }
+
+    const controller = new AbortController();
+    autoRefreshAbortRef.current = controller;
+    setIsAutoRefreshing(true);
+    try {
+      const data = await fetchManagedImages(
+        { scope: galleryView, start_date: startDate, end_date: endDate },
+        { signal: controller.signal },
+      );
+      const incomingByPath = new Map(data.items.map((item) => [item.path, item]));
+      const incomingPathSet = new Set(incomingByPath.keys());
+      const knownPaths = new Set(items.map((item) => item.path));
+      const incomingNewItems = data.items.filter((item) => !knownPaths.has(item.path));
+      const hasRemovedItems = items.some((item) => !incomingPathSet.has(item.path));
+      const hasUpdatedItems = items.some((item) => {
+        const incoming = incomingByPath.get(item.path);
+        return incoming ? JSON.stringify(incoming) !== JSON.stringify(item) : false;
+      });
+      if (incomingNewItems.length === 0 && !hasRemovedItems && !hasUpdatedItems) {
+        return;
+      }
+      setItems((current) => {
+        const currentPaths = new Set(current.map((item) => item.path));
+        const newItems = data.items.filter((item) => !currentPaths.has(item.path));
+        const existingItems = current.flatMap((item) => {
+          const incoming = incomingByPath.get(item.path);
+          return incoming ? [{ ...item, ...incoming }] : [];
+        });
+        const next = [...newItems, ...existingItems];
+        if (next.length === current.length && newItems.length === 0 && !hasUpdatedItems) {
+          return current;
+        }
+        updateImageManagerCache(currentCacheKey, next);
+        return next;
+      });
+      if (hasRemovedItems) {
+        setSelectedImageIds((current) => {
+          const next = { ...current };
+          Object.keys(next).forEach((path) => {
+            if (!incomingPathSet.has(path)) {
+              delete next[path];
+            }
+          });
+          return next;
+        });
+      }
+      setVisibleItemLimit((current) => current + incomingNewItems.length);
+    } catch (error) {
+      if (controller.signal.aborted || isRequestCanceled(error)) {
+        return;
+      }
+    } finally {
+      if (autoRefreshAbortRef.current === controller) {
+        autoRefreshAbortRef.current = null;
+      }
+      setIsAutoRefreshing(false);
+    }
+  }, [currentCacheKey, endDate, galleryView, isLoading, isMutatingImages, items, startDate]);
+
+  const scheduleLoadMoreImages = useCallback(() => {
+    if (isLoadingMore || visibleItemLimit >= filteredItems.length) {
+      return;
+    }
+    if (loadMoreTimerRef.current !== null) {
+      return;
+    }
+
+    setIsLoadingMore(true);
+    loadMoreTimerRef.current = window.setTimeout(() => {
+      setVisibleItemLimit((current) => Math.min(current + IMAGE_MANAGER_BATCH_SIZE, filteredItems.length));
+      setIsLoadingMore(false);
+      loadMoreTimerRef.current = null;
+    }, IMAGE_MANAGER_LOAD_MORE_DELAY_MS);
+  }, [filteredItems.length, isLoadingMore, visibleItemLimit]);
+
   const handleGalleryViewChange = (view: ImageGalleryView) => {
     if (view === galleryView) {
       return;
     }
     setGalleryView(view);
     setSelectedImageIds({});
+    setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
     setLoadError("");
   };
 
-  const clearFilters = () => {
-    setStartDate("");
-    setEndDate("");
+  const updateSearchKeyword = (value: string) => {
+    setSearchKeyword(value);
+    setSelectedImageIds({});
+    setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
+  };
+
+  const updateVisibilityFilter = (value: ImageVisibilityFilter) => {
+    setVisibilityFilter(value);
+    setSelectedImageIds({});
+    setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
+  };
+
+  const updateFormatFilter = (value: ImageFormatFilter) => {
+    setFormatFilter(value);
+    setSelectedImageIds({});
+    setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
+  };
+
+  const updateOrientationFilter = (value: ImageOrientationFilter) => {
+    setOrientationFilter(value);
+    setSelectedImageIds({});
+    setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
+  };
+
+  const updateAutoRefreshInterval = (value: string) => {
+    const interval = Number(value);
+    if (AUTO_REFRESH_INTERVAL_OPTIONS.includes(interval as ImageAutoRefreshInterval)) {
+      setAutoRefreshInterval(interval as ImageAutoRefreshInterval);
+    }
   };
 
   const toggleImageSelection = (item: ManagedImage) => {
@@ -292,7 +483,7 @@ function ImageManagerContent({
     }
 
     setSelectedImageIds(
-      Object.fromEntries(items.map((item) => [managedImageKey(item), true])),
+      Object.fromEntries(filteredItems.map((item) => [managedImageKey(item), true])),
     );
   };
 
@@ -377,7 +568,7 @@ function ImageManagerContent({
         path: item.path,
         visibility: data.item.visibility || visibility,
       };
-      imageManagerCache.clear();
+      clearImageManagerCache();
       setItems((current) => {
         const next = current.map((currentItem) =>
           currentItem.path === item.path
@@ -424,7 +615,7 @@ function ImageManagerContent({
 
       if (updates.length > 0) {
         const updatesByPath = new Map(updates.map((item) => [item.path, item]));
-        imageManagerCache.clear();
+        clearImageManagerCache();
         setItems((current) => {
           const next = current.map((currentItem) => {
             const updated = updatesByPath.get(currentItem.path);
@@ -451,67 +642,191 @@ function ImageManagerContent({
     void loadImages();
   }, [loadImages]);
 
-  useEffect(() => () => activeLoadRef.current?.abort(), []);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshNewImages();
+    }, autoRefreshInterval * 1000);
+    return () => window.clearInterval(timer);
+  }, [autoRefreshInterval, refreshNewImages]);
+
+  useEffect(() => {
+    autoRefreshAbortRef.current?.abort();
+  }, [currentCacheKey]);
+
+  useEffect(() => {
+    if (!hasMoreFilteredItems) {
+      return;
+    }
+    const target = loadMoreTargetRef.current;
+    if (!target) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          scheduleLoadMoreImages();
+        }
+      },
+      { rootMargin: "520px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMoreFilteredItems, scheduleLoadMoreImages]);
+
+  useEffect(() => {
+    return () => {
+      activeLoadRef.current?.abort();
+      autoRefreshAbortRef.current?.abort();
+      if (loadMoreTimerRef.current !== null) {
+        window.clearTimeout(loadMoreTimerRef.current);
+      }
+    };
+  }, []);
 
   return (
     <section className="flex flex-col gap-5">
-      <PageHeader
-        eyebrow="Images"
-        title="图片库"
-        actions={
-          <>
-          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
-          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-lg">
-            清除筛选条件
-          </Button>
-          <Button onClick={() => void loadImages({ force: true })} disabled={isLoading || isMutatingImages} className="h-10 rounded-lg">
-            {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
-            查询
-          </Button>
-          </>
-        }
-      />
+      <PageHeader eyebrow="Images" title="图片库" />
 
       <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="inline-flex rounded-lg border border-border bg-muted/50 p-1">
-            {[
-              { value: "mine" as const, label: "个人图库", icon: ImageIcon },
-              { value: "public" as const, label: "公开图库", icon: Globe2 },
-            ].map((option) => {
-              const Icon = option.icon;
-              const active = galleryView === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition ${
-                    active
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                  onClick={() => handleGalleryViewChange(option.value)}
-                  aria-pressed={active}
-                >
-                  <Icon className="size-4" />
-                  {option.label}
-                </button>
-              );
-            })}
+        <section className="flex flex-col gap-3 rounded-[18px] border border-border bg-background/80 p-3 shadow-[0_6px_20px_rgba(15,23,42,0.04)]">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-col gap-1">
+              <div className="text-sm font-medium text-foreground">筛选项</div>
+              <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                <ImageIcon className="size-4" />
+                {galleryView === "mine" ? "个人图库" : "公开图库"}
+                {hasLocalFilters ? `显示 ${filteredItems.length} / ${items.length} 张` : `共 ${items.length} 张`}
+                {isAutoRefreshing ? (
+                  <span className="inline-flex items-center gap-1 text-[#1456f0]">
+                    <LoaderCircle className="size-3 animate-spin" />
+                    自动刷新中
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            <div className="inline-flex rounded-lg border border-border bg-muted/50 p-1">
+              {[
+                { value: "mine" as const, label: "个人图库", icon: ImageIcon },
+                { value: "public" as const, label: "公开图库", icon: Globe2 },
+              ].map((option) => {
+                const Icon = option.icon;
+                const active = galleryView === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition ${
+                      active
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    onClick={() => handleGalleryViewChange(option.value)}
+                    aria-pressed={active}
+                  >
+                    <Icon className="size-4" />
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <ImageIcon className="size-4" />
-            {galleryView === "mine" ? "个人图库" : "公开图库"}共 {items.length} 张
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[240px_minmax(220px,1fr)_150px_140px_140px_140px]">
+            <DateRangeFilter
+              startDate={startDate}
+              endDate={endDate}
+              onChange={(start, end) => {
+                setStartDate(start);
+                setEndDate(end);
+                setSelectedImageIds({});
+              }}
+            />
+            <div className="relative">
+              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={searchKeyword}
+                onChange={(event) => updateSearchKeyword(event.target.value)}
+                placeholder="搜索文件、路径、作者、日期"
+                className="h-10 rounded-lg pr-9 pl-9"
+              />
+              {searchKeyword ? (
+                <button
+                  type="button"
+                  className="absolute top-1/2 right-2 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                  onClick={() => updateSearchKeyword("")}
+                  aria-label="清空搜索"
+                  title="清空搜索"
+                >
+                  <X className="size-3.5" />
+                </button>
+              ) : null}
+            </div>
+            <Select value={visibilityFilter} onValueChange={(value) => updateVisibilityFilter(value as ImageVisibilityFilter)}>
+              <SelectTrigger className="h-10 rounded-lg">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="all">全部状态</SelectItem>
+                  <SelectItem value="public">已公开</SelectItem>
+                  <SelectItem value="private">私有</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <Select value={formatFilter} onValueChange={(value) => updateFormatFilter(value as ImageFormatFilter)}>
+              <SelectTrigger className="h-10 rounded-lg">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="all">全部格式</SelectItem>
+                  <SelectItem value="png">PNG</SelectItem>
+                  <SelectItem value="jpg">JPG</SelectItem>
+                  <SelectItem value="webp">WEBP</SelectItem>
+                  <SelectItem value="gif">GIF</SelectItem>
+                  <SelectItem value="other">其他</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <Select value={orientationFilter} onValueChange={(value) => updateOrientationFilter(value as ImageOrientationFilter)}>
+              <SelectTrigger className="h-10 rounded-lg">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="all">全部方向</SelectItem>
+                  <SelectItem value="landscape">横图</SelectItem>
+                  <SelectItem value="portrait">竖图</SelectItem>
+                  <SelectItem value="square">方图</SelectItem>
+                  <SelectItem value="unknown">未知尺寸</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <Select value={String(autoRefreshInterval)} onValueChange={updateAutoRefreshInterval}>
+              <SelectTrigger className="h-10 rounded-lg">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="60">60 秒刷新</SelectItem>
+                  <SelectItem value="30">30 秒刷新</SelectItem>
+                  <SelectItem value="10">10 秒刷新</SelectItem>
+                  <SelectItem value="5">5 秒刷新</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </div>
+
+        </section>
+
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
               type="button"
               variant="outline"
               className="h-8 rounded-lg px-3 text-xs"
-              disabled={items.length === 0 || isMutatingImages}
+              disabled={filteredItems.length === 0 || isMutatingImages}
               onClick={toggleAllImages}
             >
               {allSelected ? "取消全选" : "全选"}
@@ -577,15 +892,15 @@ function ImageManagerContent({
               type="button"
               variant="outline"
               className="h-8 rounded-lg px-2.5 text-[11px]"
-              disabled={items.length === 0 || isMutatingImages}
-              onClick={() => void downloadItems("all", items)}
+              disabled={filteredItems.length === 0 || isMutatingImages}
+              onClick={() => void downloadItems("all", filteredItems)}
             >
               {downloadingKey === "all" ? (
                 <LoaderCircle className="size-3 animate-spin" />
               ) : (
                 <Download className="size-3" />
               )}
-              下载全部
+              下载全部 ({filteredItems.length})
             </Button>
             <Button variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => void loadImages({ force: true })} disabled={isLoading || isMutatingImages}>
               <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
@@ -625,7 +940,7 @@ function ImageManagerContent({
           </Card>
         ) : null}
 
-        {items.length > 0 ? (
+        {filteredItems.length > 0 ? (
           <div
             className="grid gap-3 sm:gap-4"
             style={{ gridTemplateColumns: `repeat(${imageColumns.length}, minmax(0, 1fr))` }}
@@ -639,6 +954,7 @@ function ImageManagerContent({
                 const imageMeta = [dimensions, sizeLabel].filter(Boolean).join(" | ");
                 const ownerLabel = imageOwnerLabel(item);
                 const canUpdateVisibility = galleryView === "mine";
+                const showVisibilityStatus = canUpdateVisibility || (isAdmin && galleryView === "public");
                 return (
                   <figure
                     key={item.url}
@@ -647,10 +963,14 @@ function ImageManagerContent({
                       contentVisibility: "auto",
                       containIntrinsicSize: item.width && item.height ? `${Math.min(360, item.width)}px ${Math.min(480, item.height)}px` : "320px 320px",
                     }}
+                    onMouseLeave={(event) => blurFocusedElementInContainer(event.currentTarget)}
                   >
                     <button
                       type="button"
-                      onClick={() => toggleImageSelection(item)}
+                      onClick={(event) => {
+                        toggleImageSelection(item);
+                        event.currentTarget.blur();
+                      }}
                       className="block w-full cursor-pointer overflow-hidden text-left"
                       aria-label={selected ? "取消选择图片" : "选择图片"}
                     >
@@ -667,7 +987,10 @@ function ImageManagerContent({
                     </button>
                     <button
                       type="button"
-                      onClick={() => toggleImageSelection(item)}
+                      onClick={(event) => {
+                        toggleImageSelection(item);
+                        event.currentTarget.blur();
+                      }}
                       className={`absolute top-2 left-2 z-10 inline-flex size-6 items-center justify-center rounded-full border transition duration-150 ${
                         selected
                           ? "border-[#1456f0] bg-[#1456f0] text-white opacity-100 shadow-sm"
@@ -680,7 +1003,8 @@ function ImageManagerContent({
                     <div className="pointer-events-none absolute top-2 right-2 z-10 flex items-center gap-1 opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={(event) => {
+                          event.currentTarget.blur();
                           setLightboxIndex(index);
                           setLightboxOpen(true);
                         }}
@@ -693,7 +1017,8 @@ function ImageManagerContent({
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={(event) => {
+                          event.currentTarget.blur();
                           void navigator.clipboard.writeText(item.url);
                           toast.success("图片地址已复制");
                         }}
@@ -706,7 +1031,10 @@ function ImageManagerContent({
                       {canDeleteImages ? (
                         <button
                           type="button"
-                          onClick={() => openDeleteConfirm([item])}
+                          onClick={(event) => {
+                            event.currentTarget.blur();
+                            openDeleteConfirm([item]);
+                          }}
                           disabled={isDeleting}
                           className="inline-flex size-7 items-center justify-center rounded-full bg-white/95 text-rose-600 shadow-sm transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
                           aria-label="删除图片"
@@ -720,13 +1048,39 @@ function ImageManagerContent({
                         </button>
                       ) : null}
                     </div>
-                    <div className="pointer-events-none absolute right-2 bottom-2 left-2 z-10 flex items-center justify-between gap-2">
+                    <div className="absolute right-2 bottom-2 left-2 z-10 flex items-center justify-between gap-2">
                       <div className="min-w-0 rounded-full bg-black/45 px-2 py-1 text-[11px] font-medium text-white shadow-sm backdrop-blur-sm">
                         <span className="block max-w-[12rem] truncate">{ownerLabel}</span>
                       </div>
-                      <div className="shrink-0 rounded-full bg-white/95 px-2 py-1 text-[11px] font-medium text-stone-800 shadow-sm">
-                        {imageVisibilityLabel(item.visibility)}
-                      </div>
+                      {showVisibilityStatus ? (
+                        <div className="flex shrink-0 items-center gap-1">
+                          {canUpdateVisibility ? (
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                event.currentTarget.blur();
+                                void handleVisibilityChange(item, item.visibility === "public" ? "private" : "public");
+                              }}
+                              disabled={visibilityMutatingPath !== null || isDeleting}
+                              className={`inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium opacity-0 shadow-sm transition group-hover:opacity-100 group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:opacity-70 ${imageVisibilityActionClass(item.visibility)}`}
+                            >
+                              {visibilityMutatingPath === item.path ? (
+                                <LoaderCircle className="size-3 animate-spin" />
+                              ) : item.visibility === "public" ? (
+                                <Lock className="size-3" />
+                              ) : (
+                                <Globe2 className="size-3" />
+                              )}
+                              {item.visibility === "public" ? "取消公开" : "公开"}
+                            </button>
+                          ) : null}
+                          <div className={`pointer-events-none inline-flex h-7 items-center gap-1 rounded-full px-2 text-[11px] font-medium shadow-sm backdrop-blur-sm ${imageVisibilityPillClass(item.visibility)}`}>
+                            {item.visibility === "public" ? <Globe2 className="size-3" /> : <Lock className="size-3" />}
+                            {imageVisibilityLabel(item.visibility)}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                     <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/55 via-black/20 to-transparent px-2.5 pt-8 pb-10 opacity-0 transition duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
                       <div className="text-left text-white drop-shadow-sm">
@@ -735,26 +1089,6 @@ function ImageManagerContent({
                         <div className="mt-0.5 truncate text-[11px] text-white/90">作者：{ownerLabel}</div>
                         {imageMeta ? (
                           <div className="mt-0.5 truncate text-[11px] text-white/90">{imageMeta}</div>
-                        ) : null}
-                        {canUpdateVisibility ? (
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void handleVisibilityChange(item, item.visibility === "public" ? "private" : "public");
-                            }}
-                            disabled={visibilityMutatingPath !== null || isDeleting}
-                            className="pointer-events-auto mt-2 inline-flex h-7 items-center gap-1.5 rounded-full bg-white/95 px-2.5 text-[11px] font-medium text-stone-800 shadow-sm transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-70"
-                          >
-                            {visibilityMutatingPath === item.path ? (
-                              <LoaderCircle className="size-3 animate-spin" />
-                            ) : item.visibility === "public" ? (
-                              <Lock className="size-3" />
-                            ) : (
-                              <Globe2 className="size-3" />
-                            )}
-                            {item.visibility === "public" ? "取消公开" : "公开"}
-                          </button>
                         ) : null}
                       </div>
                     </div>
@@ -766,7 +1100,20 @@ function ImageManagerContent({
           </div>
         ) : null}
 
-        {showImageEmptyState ? (
+        {hasMoreFilteredItems ? (
+          <div ref={loadMoreTargetRef} className="flex min-h-16 items-center justify-center py-4 text-sm text-muted-foreground">
+            <div className="inline-flex items-center gap-2 rounded-full border border-border bg-background px-4 py-2 shadow-sm">
+              <LoaderCircle className={`size-4 text-[#1456f0] ${isLoadingMore ? "animate-spin" : ""}`} />
+              {isLoadingMore
+                ? "加载中..."
+                : `下滑加载更多（${visibleItems.length} / ${filteredItems.length}）`}
+            </div>
+          </div>
+        ) : filteredItems.length > IMAGE_MANAGER_BATCH_SIZE ? (
+          <div className="flex justify-center py-4 text-xs text-muted-foreground">已显示全部图片</div>
+        ) : null}
+
+        {showImageEmptyState || showImageFilteredEmptyState ? (
           <Card className="overflow-hidden rounded-[20px]">
             <CardContent className="flex min-h-[320px] flex-col items-center justify-center gap-4 px-6 py-14 text-center">
               <div className="grid aspect-[4/3] w-[min(320px,72vw)] place-items-center rounded-[24px] border border-dashed border-border bg-muted/60 shadow-[0_0_15px_rgba(44,30,116,0.10)]">
@@ -775,9 +1122,13 @@ function ImageManagerContent({
                 </div>
               </div>
               <div className="space-y-1">
-                <p className="text-sm font-medium text-foreground">暂无图片</p>
+                <p className="text-sm font-medium text-foreground">{showImageFilteredEmptyState ? "没有匹配的图片" : "暂无图片"}</p>
                 <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
-                  {galleryView === "mine" ? "图片生成成功后会自动进入个人图库。" : "公开图库暂无公开图片。"}
+                  {showImageFilteredEmptyState
+                    ? "调整关键词、状态、格式或方向筛选后再试。"
+                    : galleryView === "mine"
+                      ? "图片生成成功后会自动进入个人图库。"
+                      : "公开图库暂无公开图片。"}
                 </p>
               </div>
             </CardContent>
@@ -833,5 +1184,5 @@ export default function ImageManagerPage() {
     return <div className="flex min-h-[40vh] items-center justify-center"><LoaderCircle className="size-5 animate-spin text-stone-400" /></div>;
   }
   const canDeleteImages = hasAPIPermission(session, "DELETE", "/api/images");
-  return <ImageManagerContent cacheScope={imageManagerCacheScope(session)} canDeleteImages={canDeleteImages} />;
+  return <ImageManagerContent cacheScope={imageManagerCacheScope(session)} canDeleteImages={canDeleteImages} isAdmin={session.role === "admin"} />;
 }

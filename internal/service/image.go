@@ -170,7 +170,7 @@ func (s *ImageService) UpdateImageVisibility(value, visibility string, scope Ima
 	if err != nil {
 		return nil, err
 	}
-	rel, err := cleanImageRelativePath(value)
+	rel, err := imageRelativePathFromValue(value)
 	if err != nil {
 		return nil, err
 	}

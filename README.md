@@ -355,8 +355,12 @@ Telegram 群组：[ChatGPT2API](https://t.me/+YBR7t_CPOYBkYzU1)
 
 内置提示词参考来源：
 
-- [banana-prompt-quicker](https://github.com/glidea/banana-prompt-quicker)，作者：[peiyizhi](https://linux.do/u/peiyizhi)
+- [banana-prompt-quicker](https://github.com/glidea/banana-prompt-quicker)，作者：[阿良](https://linux.do/u/ajd)
 - [awesome-gpt-image-2-prompts](https://github.com/EvoLinkAI/awesome-gpt-image-2-prompts)
+
+生图配置相关参考：
+- [ChatGpt-Image-Studio](https://github.com/peiyizhi0724/ChatGpt-Image-Studio)，作者：[小怪兽](https://linux.do/u/peiyizhi)
+
 
 ## Contributors
 

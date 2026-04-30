@@ -44,6 +44,8 @@ func (a *App) routes() []appRoute {
 		exact("", "/auth/providers", a.handleAuthProviders),
 		exact("", "/auth/linuxdo/start", a.handleLinuxDoOAuthStart),
 		exact("", "/auth/linuxdo/oauth/callback", a.handleLinuxDoOAuthCallback),
+		exact(http.MethodGet, "/auth/linuxdo/callback", a.serveWeb),
+		exact(http.MethodHead, "/auth/linuxdo/callback", a.serveWeb),
 		exact(http.MethodGet, "/version", func(w http.ResponseWriter, _ *http.Request) {
 			util.WriteJSON(w, http.StatusOK, map[string]any{"version": version.Get()})
 		}),

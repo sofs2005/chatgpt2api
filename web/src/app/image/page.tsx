@@ -2296,7 +2296,7 @@ function ImagePageContent() {
                             <button
                               type="button"
                               onClick={() => handleRemoveEditReferenceImage(index)}
-                              className="absolute -top-1 -right-1 inline-flex size-6 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 transition hover:text-stone-900"
+                              className="absolute -top-1 -right-1 z-10 inline-flex size-6 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 shadow-sm transition hover:text-stone-900"
                               aria-label={`移除参考图 ${image.name || index + 1}`}
                             >
                               <X className="size-3.5" />
@@ -2542,7 +2542,6 @@ function ImagePageContent() {
                 onImageResolutionChange={setImageResolution}
                 onImageQualityChange={setImageQuality}
                 onSubmit={handleSubmit}
-                onPickReferenceImage={() => fileInputRef.current?.click()}
                 onOpenPromptMarket={() => setIsPromptMarketOpen(true)}
                 onReferenceImageChange={handleReferenceImageChange}
                 onRemoveReferenceImage={handleRemoveReferenceImage}

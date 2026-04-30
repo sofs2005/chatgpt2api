@@ -351,6 +351,13 @@ Telegram 群组：[ChatGPT2API](https://t.me/+YBR7t_CPOYBkYzU1)
 
 学 AI , 上 L 站：[LinuxDO](https://linux.do)
 
+## 提示词来源
+
+内置提示词参考来源：
+
+- [banana-prompt-quicker](https://github.com/glidea/banana-prompt-quicker)，作者：[peiyizhi](https://linux.do/u/peiyizhi)
+- [awesome-gpt-image-2-prompts](https://github.com/EvoLinkAI/awesome-gpt-image-2-prompts)
+
 ## Contributors
 
 感谢所有为本项目做出贡献的开发者：

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, LoaderCircle, RefreshCcw, Search } from "lucide-react";
+import { ExternalLink, LoaderCircle, RefreshCcw, Search, SlidersHorizontal } from "lucide-react";
 
 import {
   AWESOME_GPT_IMAGE_2_PROMPTS_SOURCE_URL,
@@ -32,6 +32,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 
 type PromptMarketModeFilter = "all" | BananaPromptMode;
 type PromptMarketNsfwFilter = "safe" | "include" | "only";
@@ -119,6 +120,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const [category, setCategory] = useState(ALL_CATEGORY_VALUE);
   const [mode, setMode] = useState<PromptMarketModeFilter>("all");
   const [nsfwFilter, setNsfwFilter] = useState<PromptMarketNsfwFilter>("safe");
+  const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
@@ -174,7 +176,9 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   useEffect(() => {
     if (open) {
       scrollAreaRef.current?.scrollTo({ top: 0 });
+      return;
     }
+    setIsMobileFiltersOpen(false);
   }, [open]);
 
   const sourceFilteredPrompts = useMemo(() => {
@@ -232,15 +236,117 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
 
   const visiblePrompts = filteredPrompts.slice(0, visibleCount);
   const hasMore = visiblePrompts.length < filteredPrompts.length;
+  const selectedSourceLabel =
+    source === "all" ? "" : PROMPT_MARKET_SOURCE_OPTIONS.find((item) => item.value === source)?.label || source;
+  const selectedLanguageLabel = promptLanguage === "zh-CN" ? "" : "English";
+  const selectedCategoryLabel = category === ALL_CATEGORY_VALUE ? "" : category;
+  const selectedModeLabel = mode === "all" ? "" : mode === "edit" ? "编辑" : "文生图";
+  const selectedNsfwLabel =
+    nsfwFilter === "safe" ? "" : nsfwFilter === "include" ? "包含 NSFW" : "仅 NSFW";
+  const activeFilterLabels = [
+    selectedSourceLabel,
+    selectedLanguageLabel,
+    selectedCategoryLabel,
+    selectedModeLabel,
+    selectedNsfwLabel,
+  ].filter(Boolean);
+  const activeFilterCount = activeFilterLabels.length;
+
+  const resetFilters = () => {
+    setSource("all");
+    setPromptLanguage("zh-CN");
+    setCategory(ALL_CATEGORY_VALUE);
+    setMode("all");
+    setNsfwFilter("safe");
+  };
+
+  const renderFilterControls = () => (
+    <>
+      <Select
+        value={source}
+        onValueChange={(value) => setSource(value as PromptMarketSourceFilter)}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder="来源" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value="all">全部</SelectItem>
+            {PROMPT_MARKET_SOURCE_OPTIONS.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      <Select
+        value={promptLanguage}
+        onValueChange={(value) => setPromptLanguage(value as PromptMarketLanguage)}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder="语言" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value="zh-CN">中文</SelectItem>
+            <SelectItem value="en">English</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      <Select value={category} onValueChange={setCategory}>
+        <SelectTrigger>
+          <SelectValue placeholder="分类" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value={ALL_CATEGORY_VALUE}>全部分类</SelectItem>
+            {categories.map((item) => (
+              <SelectItem key={item} value={item}>
+                {item}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      <Select value={mode} onValueChange={(value) => setMode(value as PromptMarketModeFilter)}>
+        <SelectTrigger>
+          <SelectValue placeholder="模式" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value="all">全部模式</SelectItem>
+            <SelectItem value="generate">文生图</SelectItem>
+            <SelectItem value="edit">编辑</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      <Select
+        value={nsfwFilter}
+        onValueChange={(value) => setNsfwFilter(value as PromptMarketNsfwFilter)}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder="NSFW" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value="safe">隐藏 NSFW</SelectItem>
+            <SelectItem value="include">包含 NSFW</SelectItem>
+            <SelectItem value="only">仅 NSFW</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </>
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[min(90dvh,860px)] w-[min(96vw,1180px)] max-w-none flex-col overflow-hidden rounded-[28px] p-0">
-        <DialogHeader className="border-b border-[#f2f3f5] px-5 pt-5 pb-4 sm:px-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <DialogContent className="flex h-[min(94dvh,860px)] w-[min(96vw,1180px)] max-w-none flex-col overflow-hidden rounded-[24px] p-0 sm:h-[min(90dvh,860px)] sm:rounded-[28px]">
+        <DialogHeader className="border-b border-[#f2f3f5] px-4 pt-4 pb-3 sm:px-6 sm:pt-5 sm:pb-4">
+          <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <DialogTitle className="text-2xl leading-tight">Prompts 提示词市场</DialogTitle>
-              <DialogDescription className="mt-2 leading-6">
+              <DialogTitle className="text-xl leading-tight sm:text-2xl">Prompts 提示词市场</DialogTitle>
+              <DialogDescription className="mt-2 hidden leading-6 sm:block">
                 来自{" "}
                 <a
                   href={BANANA_PROMPTS_SOURCE_URL}
@@ -262,16 +368,83 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                 ，可按来源筛选并一键套用到当前生图输入框。
               </DialogDescription>
             </div>
-            <div className="flex shrink-0 items-center gap-2 text-xs text-[#8e8e93]">
-              <span className="rounded-full bg-[#f0f0f0] px-3 py-1">
+            <div className="flex shrink-0 items-center gap-2 pt-0.5 text-xs text-[#8e8e93]">
+              <span className="rounded-full bg-[#f0f0f0] px-2.5 py-1 sm:px-3">
                 {prompts.length > 0 ? `${filteredPrompts.length} / ${sourceFilteredPrompts.length}` : "远程市场"}
               </span>
             </div>
           </div>
         </DialogHeader>
 
-        <div className="border-b border-[#f2f3f5] px-5 py-3 sm:px-6">
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_220px_120px_160px_130px_140px] xl:items-center">
+        <div className="border-b border-[#f2f3f5] px-4 py-2.5 sm:px-6 sm:py-3">
+          <div className="md:hidden">
+            <div className="flex items-center gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8e8e93]" />
+                <Input
+                  value={keyword}
+                  onChange={(event) => setKeyword(event.target.value)}
+                  placeholder="搜索提示词"
+                  className="h-10 pl-9"
+                />
+              </div>
+              <button
+                type="button"
+                className={cn(
+                  "relative inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-[#e5e7eb] bg-white text-[#45515e] transition hover:bg-black/[0.05]",
+                  isMobileFiltersOpen && "border-[#bfdbfe] bg-[#eef4ff] text-[#1456f0]",
+                )}
+                onClick={() => setIsMobileFiltersOpen((open) => !open)}
+                aria-label={isMobileFiltersOpen ? "收起筛选项" : "展开筛选项"}
+                aria-expanded={isMobileFiltersOpen}
+                title={isMobileFiltersOpen ? "收起筛选" : "筛选"}
+              >
+                <SlidersHorizontal className="size-4" />
+                {activeFilterCount > 0 ? (
+                  <span className="absolute -right-0.5 -top-0.5 inline-flex size-4 items-center justify-center rounded-full bg-[#1456f0] text-[10px] font-semibold text-white">
+                    {activeFilterCount}
+                  </span>
+                ) : null}
+              </button>
+            </div>
+
+            {activeFilterLabels.length > 0 && !isMobileFiltersOpen ? (
+              <div className="hide-scrollbar mt-2 flex gap-1.5 overflow-x-auto">
+                {activeFilterLabels.map((label) => (
+                  <span
+                    key={label}
+                    className="shrink-0 rounded-full bg-[#f0f0f0] px-2.5 py-1 text-[11px] font-medium text-[#45515e]"
+                  >
+                    {label}
+                  </span>
+                ))}
+                <button
+                  type="button"
+                  className="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium text-[#1456f0]"
+                  onClick={resetFilters}
+                >
+                  清除
+                </button>
+              </div>
+            ) : null}
+
+            {isMobileFiltersOpen ? (
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {renderFilterControls()}
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="col-span-2 h-9 rounded-full border-[#e5e7eb] bg-white text-xs text-[#45515e] shadow-none"
+                  onClick={resetFilters}
+                  disabled={activeFilterCount === 0}
+                >
+                  重置筛选
+                </Button>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="hidden gap-2 md:grid md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_220px_120px_160px_130px_140px] xl:items-center">
             <div className="relative">
               <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8e8e93]" />
               <Input
@@ -281,84 +454,11 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                 className="pl-9"
               />
             </div>
-            <Select
-              value={source}
-              onValueChange={(value) => setSource(value as PromptMarketSourceFilter)}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="来源" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="all">全部</SelectItem>
-                  {PROMPT_MARKET_SOURCE_OPTIONS.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>
-                      {item.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <Select
-              value={promptLanguage}
-              onValueChange={(value) => setPromptLanguage(value as PromptMarketLanguage)}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="语言" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="zh-CN">中文</SelectItem>
-                  <SelectItem value="en">English</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <Select value={category} onValueChange={setCategory}>
-              <SelectTrigger>
-                <SelectValue placeholder="分类" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value={ALL_CATEGORY_VALUE}>全部分类</SelectItem>
-                  {categories.map((item) => (
-                    <SelectItem key={item} value={item}>
-                      {item}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <Select value={mode} onValueChange={(value) => setMode(value as PromptMarketModeFilter)}>
-              <SelectTrigger>
-                <SelectValue placeholder="模式" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="all">全部模式</SelectItem>
-                  <SelectItem value="generate">文生图</SelectItem>
-                  <SelectItem value="edit">编辑</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <Select
-              value={nsfwFilter}
-              onValueChange={(value) => setNsfwFilter(value as PromptMarketNsfwFilter)}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="NSFW" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="safe">隐藏 NSFW</SelectItem>
-                  <SelectItem value="include">包含 NSFW</SelectItem>
-                  <SelectItem value="only">仅 NSFW</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+            {renderFilterControls()}
           </div>
         </div>
 
-        <div ref={scrollAreaRef} className="min-h-0 flex-1 overflow-y-auto bg-white px-5 py-4 sm:px-6">
+        <div ref={scrollAreaRef} className="min-h-0 flex-1 overflow-y-auto bg-white px-4 py-3 sm:px-6 sm:py-4">
           {isLoading ? (
             <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-3 text-[#45515e]">
               <LoaderCircle className="size-6 animate-spin text-[#1456f0]" />

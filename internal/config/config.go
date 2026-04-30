@@ -27,6 +27,7 @@ var settingEnvKeys = map[string]string{
 	"image_retention_days":              "CHATGPT2API_IMAGE_RETENTION_DAYS",
 	"auto_remove_invalid_accounts":      "CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS",
 	"auto_remove_rate_limited_accounts": "CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS",
+	"log_retention_days":                "CHATGPT2API_LOG_RETENTION_DAYS",
 	"log_levels":                        "CHATGPT2API_LOG_LEVELS",
 	"linuxdo_enabled":                   "CHATGPT2API_LINUXDO_ENABLED",
 	"linuxdo_client_id":                 "CHATGPT2API_LINUXDO_CLIENT_ID",
@@ -177,6 +178,17 @@ func (s *Store) ImageRetentionDays() int {
 	value := intSetting(s.settingValue("image_retention_days", 30), 30)
 	if value < 1 {
 		return 1
+	}
+	return value
+}
+
+func (s *Store) LogRetentionDays() int {
+	value := intSetting(s.settingValue("log_retention_days", 7), 7)
+	if value < 1 {
+		return 1
+	}
+	if value > 3650 {
+		return 3650
 	}
 	return value
 }
@@ -346,6 +358,7 @@ func (s *Store) Get() map[string]any {
 	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
 	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
 	data["image_retention_days"] = s.ImageRetentionDays()
+	data["log_retention_days"] = s.LogRetentionDays()
 	data["auto_remove_invalid_accounts"] = s.AutoRemoveInvalidAccounts()
 	data["auto_remove_rate_limited_accounts"] = s.AutoRemoveRateLimitedAccounts()
 	data["log_levels"] = s.LogLevels()

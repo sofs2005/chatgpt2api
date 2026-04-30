@@ -36,7 +36,11 @@ type JSONDocumentBackend interface {
 
 type LogBackend interface {
 	AppendLog(item map[string]any) error
-	QueryLogs(logType, startDate, endDate string, limit int) ([]map[string]any, error)
+	QueryLogs(startDate, endDate string, limit int) ([]map[string]any, error)
+}
+
+type LogMaintenanceBackend interface {
+	DeleteLogsBefore(day string) (int, error)
 }
 
 const LogEventsDocumentName = "logs/events.jsonl"
@@ -154,6 +158,10 @@ func (b *JSONBackend) DeleteJSONDocument(name string) error {
 }
 
 func (b *JSONBackend) AppendLog(item map[string]any) error {
+	if item == nil {
+		item = map[string]any{}
+	}
+	item["type"] = "event"
 	full, err := b.documentPath(LogEventsDocumentName)
 	if err != nil {
 		return err
@@ -174,7 +182,7 @@ func (b *JSONBackend) AppendLog(item map[string]any) error {
 	return err
 }
 
-func (b *JSONBackend) QueryLogs(logType, startDate, endDate string, limit int) ([]map[string]any, error) {
+func (b *JSONBackend) QueryLogs(startDate, endDate string, limit int) ([]map[string]any, error) {
 	full, err := b.documentPath(LogEventsDocumentName)
 	if err != nil {
 		return nil, err
@@ -196,12 +204,58 @@ func (b *JSONBackend) QueryLogs(logType, startDate, endDate string, limit int) (
 			break
 		}
 		item, ok := decodeLogLine(lines[i])
-		if !ok || !matchLogFilter(item, logType, startDate, endDate) {
+		if !ok || !matchLogFilter(item, startDate, endDate) {
 			continue
 		}
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+func (b *JSONBackend) DeleteLogsBefore(day string) (int, error) {
+	day = strings.TrimSpace(day)
+	if day == "" {
+		return 0, nil
+	}
+	full, err := b.documentPath(LogEventsDocumentName)
+	if err != nil {
+		return 0, err
+	}
+	data, err := os.ReadFile(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+	kept := make([]string, 0, len(lines))
+	removed := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		item, ok := decodeLogLine(line)
+		if ok {
+			itemDay := logDay(strings.TrimSpace(fmt.Sprint(item["time"])))
+			if itemDay != "" && itemDay < day {
+				removed++
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	next := []byte{}
+	if len(kept) > 0 {
+		next = []byte(strings.Join(kept, "\n") + "\n")
+	}
+	if err := os.WriteFile(full, next, 0o644); err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 
 func (b *JSONBackend) documentPath(name string) (string, error) {
@@ -291,7 +345,6 @@ func (b *DatabaseBackend) init() error {
 		`CREATE TABLE IF NOT EXISTS auth_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, key_id TEXT UNIQUE NOT NULL, data TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS json_documents (name TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, type TEXT NOT NULL, day TEXT NOT NULL, data TEXT NOT NULL)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_type_day_id ON logs (type, day, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_day_id ON logs (day, id)`,
 	}
 	if b.driver == "postgres" {
@@ -300,7 +353,6 @@ func (b *DatabaseBackend) init() error {
 			`CREATE TABLE IF NOT EXISTS auth_keys (id SERIAL PRIMARY KEY, key_id TEXT UNIQUE NOT NULL, data TEXT NOT NULL)`,
 			`CREATE TABLE IF NOT EXISTS json_documents (name TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 			`CREATE TABLE IF NOT EXISTS logs (id SERIAL PRIMARY KEY, created_at TEXT NOT NULL, type TEXT NOT NULL, day TEXT NOT NULL, data TEXT NOT NULL)`,
-			`CREATE INDEX IF NOT EXISTS idx_logs_type_day_id ON logs (type, day, id)`,
 			`CREATE INDEX IF NOT EXISTS idx_logs_day_id ON logs (day, id)`,
 		}
 	}
@@ -310,7 +362,6 @@ func (b *DatabaseBackend) init() error {
 			`CREATE TABLE IF NOT EXISTS auth_keys (id INTEGER PRIMARY KEY AUTO_INCREMENT, key_id TEXT UNIQUE NOT NULL, data TEXT NOT NULL)`,
 			`CREATE TABLE IF NOT EXISTS json_documents (name VARCHAR(512) PRIMARY KEY, data LONGTEXT NOT NULL, updated_at TEXT NOT NULL)`,
 			`CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTO_INCREMENT, created_at TEXT NOT NULL, type VARCHAR(64) NOT NULL, day VARCHAR(10) NOT NULL, data LONGTEXT NOT NULL)`,
-			`CREATE INDEX idx_logs_type_day_id ON logs (type, day, id)`,
 			`CREATE INDEX idx_logs_day_id ON logs (day, id)`,
 		}
 	}
@@ -482,6 +533,7 @@ func (b *DatabaseBackend) AppendLog(item map[string]any) error {
 	if item == nil {
 		item = map[string]any{}
 	}
+	item["type"] = "event"
 	data, err := json.Marshal(item)
 	if err != nil {
 		return err
@@ -490,7 +542,7 @@ func (b *DatabaseBackend) AppendLog(item map[string]any) error {
 	if createdAt == "" {
 		createdAt = time.Now().Format("2006-01-02 15:04:05")
 	}
-	logType := strings.TrimSpace(fmt.Sprint(item["type"]))
+	logType := "event"
 	day := logDay(createdAt)
 	if day == "" {
 		day = time.Now().Format("2006-01-02")
@@ -505,14 +557,10 @@ func (b *DatabaseBackend) AppendLog(item map[string]any) error {
 	return err
 }
 
-func (b *DatabaseBackend) QueryLogs(logType, startDate, endDate string, limit int) ([]map[string]any, error) {
+func (b *DatabaseBackend) QueryLogs(startDate, endDate string, limit int) ([]map[string]any, error) {
 	query := "SELECT data FROM logs"
 	var filters []string
 	var args []any
-	if strings.TrimSpace(logType) != "" {
-		args = append(args, strings.TrimSpace(logType))
-		filters = append(filters, "type = "+b.placeholder(len(args)))
-	}
 	if strings.TrimSpace(startDate) != "" {
 		args = append(args, strings.TrimSpace(startDate))
 		filters = append(filters, "day >= "+b.placeholder(len(args)))
@@ -549,6 +597,22 @@ func (b *DatabaseBackend) QueryLogs(logType, startDate, endDate string, limit in
 		}
 	}
 	return out, rows.Err()
+}
+
+func (b *DatabaseBackend) DeleteLogsBefore(day string) (int, error) {
+	day = strings.TrimSpace(day)
+	if day == "" {
+		return 0, nil
+	}
+	result, err := b.db.Exec("DELETE FROM logs WHERE day < "+b.placeholder(1), day)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return int(rows), nil
 }
 
 func (b *DatabaseBackend) placeholder(index int) string {
@@ -648,11 +712,8 @@ func decodeLogLine(line string) (map[string]any, bool) {
 	return item, ok
 }
 
-func matchLogFilter(item map[string]any, logType, startDate, endDate string) bool {
+func matchLogFilter(item map[string]any, startDate, endDate string) bool {
 	day := logDay(strings.TrimSpace(fmt.Sprint(item["time"])))
-	if strings.TrimSpace(logType) != "" && strings.TrimSpace(fmt.Sprint(item["type"])) != strings.TrimSpace(logType) {
-		return false
-	}
 	if strings.TrimSpace(startDate) != "" && day < strings.TrimSpace(startDate) {
 		return false
 	}

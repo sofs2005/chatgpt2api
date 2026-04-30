@@ -189,10 +189,6 @@ def write_database(
             "type TEXT NOT NULL, day TEXT NOT NULL, data TEXT NOT NULL)"
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_logs_type_day_id "
-            "ON logs (type, day, id)"
-        )
-        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_day_id ON logs (day, id)"
         )
         conn.execute("DELETE FROM accounts")

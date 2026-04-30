@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -17,9 +18,7 @@ import (
 )
 
 const (
-	LogTypeCall    = "call"
-	LogTypeAccount = "account"
-	LogTypeAudit   = "audit"
+	LogTypeEvent = "event"
 )
 
 type LogService struct {
@@ -29,7 +28,6 @@ type LogService struct {
 }
 
 type LogQuery struct {
-	Type          string
 	Username      string
 	Module        string
 	Method        string
@@ -43,6 +41,19 @@ type LogQuery struct {
 	StartTime     string
 	EndTime       string
 	Limit         int
+}
+
+type LogGovernanceSummary struct {
+	Total      int    `json:"total"`
+	OldestTime string `json:"oldest_time,omitempty"`
+	LatestTime string `json:"latest_time,omitempty"`
+}
+
+type LogCleanupResult struct {
+	RetentionDays int    `json:"retention_days"`
+	CutoffDate    string `json:"cutoff_date"`
+	Deleted       int    `json:"deleted"`
+	Remaining     int    `json:"remaining"`
 }
 
 type userUsageDay struct {
@@ -66,13 +77,13 @@ func NewLogService(dataDir string, backend ...storage.Backend) *LogService {
 	return &LogService{path: path, store: firstLogStore(backend)}
 }
 
-func (s *LogService) Add(logType, summary string, detail map[string]any) error {
+func (s *LogService) Add(summary string, detail map[string]any) error {
 	if detail == nil {
 		detail = map[string]any{}
 	}
 	item := map[string]any{
 		"time":    util.NowLocal(),
-		"type":    logType,
+		"type":    LogTypeEvent,
 		"summary": summary,
 		"detail":  detail,
 	}
@@ -96,14 +107,14 @@ func (s *LogService) Add(logType, summary string, detail map[string]any) error {
 	return err
 }
 
-func (s *LogService) List(logType, startDate, endDate string, limit int) []map[string]any {
-	return s.Search(LogQuery{Type: logType, StartDate: startDate, EndDate: endDate, Limit: limit})
+func (s *LogService) List(startDate, endDate string, limit int) []map[string]any {
+	return s.Search(LogQuery{StartDate: startDate, EndDate: endDate, Limit: limit})
 }
 
 func (s *LogService) Search(query LogQuery) []map[string]any {
 	limit := normalizedLogLimit(query.Limit)
 	startDate, endDate := logQueryDateBounds(query)
-	items, ok := s.loadLogItems(query.Type, startDate, endDate)
+	items, ok := s.loadLogItems(startDate, endDate)
 	if !ok {
 		return []map[string]any{}
 	}
@@ -112,7 +123,7 @@ func (s *LogService) Search(query LogQuery) []map[string]any {
 		if !matchLogQuery(item, query) {
 			continue
 		}
-		out = append(out, item)
+		out = append(out, publicLogItem(item))
 		if len(out) >= limit {
 			break
 		}
@@ -120,9 +131,109 @@ func (s *LogService) Search(query LogQuery) []map[string]any {
 	return out
 }
 
-func (s *LogService) loadLogItems(logType, startDate, endDate string) ([]map[string]any, bool) {
+func (s *LogService) GovernanceSummary() LogGovernanceSummary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.governanceSummaryLocked()
+}
+
+func (s *LogService) CleanupOlderThan(retentionDays int) (LogCleanupResult, error) {
+	if retentionDays < 1 || retentionDays > 3650 {
+		return LogCleanupResult{}, errors.New("retention days must be between 1 and 3650")
+	}
+	cutoffDate := time.Now().AddDate(0, 0, -retentionDays+1).Format("2006-01-02")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deleted, err := s.deleteLogsBeforeLocked(cutoffDate)
+	if err != nil {
+		return LogCleanupResult{}, err
+	}
+	return LogCleanupResult{
+		RetentionDays: retentionDays,
+		CutoffDate:    cutoffDate,
+		Deleted:       deleted,
+		Remaining:     s.governanceSummaryLocked().Total,
+	}, nil
+}
+
+func (s *LogService) governanceSummaryLocked() LogGovernanceSummary {
+	items, ok := s.loadLogItems("", "")
+	summary := LogGovernanceSummary{}
+	if !ok {
+		return summary
+	}
+	summary.Total = len(items)
+	for _, item := range items {
+		logTime := util.Clean(item["time"])
+		if logTime == "" {
+			continue
+		}
+		if summary.LatestTime == "" || logTime > summary.LatestTime {
+			summary.LatestTime = logTime
+		}
+		if summary.OldestTime == "" || logTime < summary.OldestTime {
+			summary.OldestTime = logTime
+		}
+	}
+	return summary
+}
+
+func (s *LogService) deleteLogsBeforeLocked(day string) (int, error) {
 	if s.store != nil {
-		items, err := s.store.QueryLogs(logType, startDate, endDate, 0)
+		if maintenance, ok := s.store.(storage.LogMaintenanceBackend); ok {
+			return maintenance.DeleteLogsBefore(day)
+		}
+	}
+	return s.deleteFileLogsBeforeLocked(day)
+}
+
+func (s *LogService) deleteFileLogsBeforeLocked(day string) (int, error) {
+	day = strings.TrimSpace(day)
+	if day == "" {
+		return 0, nil
+	}
+	data, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+	kept := make([]string, 0, len(lines))
+	removed := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var item map[string]any
+		if json.Unmarshal([]byte(line), &item) == nil {
+			itemDay := logDay(item)
+			if itemDay != "" && itemDay < day {
+				removed++
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	next := []byte{}
+	if len(kept) > 0 {
+		next = []byte(strings.Join(kept, "\n") + "\n")
+	}
+	if err := os.WriteFile(s.path, next, 0o644); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+func (s *LogService) loadLogItems(startDate, endDate string) ([]map[string]any, bool) {
+	if s.store != nil {
+		items, err := s.store.QueryLogs(startDate, endDate, 0)
 		if err == nil {
 			return items, true
 		}
@@ -143,7 +254,7 @@ func (s *LogService) loadLogItems(logType, startDate, endDate string) ([]map[str
 		if json.Unmarshal([]byte(lines[i]), &item) != nil {
 			continue
 		}
-		if !matchLogDate(item, logType, startDate, endDate) {
+		if !matchLogDate(item, startDate, endDate) {
 			continue
 		}
 		out = append(out, item)
@@ -174,7 +285,7 @@ func logQueryDateBounds(query LogQuery) (string, string) {
 }
 
 func matchLogQuery(item map[string]any, query LogQuery) bool {
-	if !matchLogDate(item, query.Type, strings.TrimSpace(query.StartDate), strings.TrimSpace(query.EndDate)) {
+	if !matchLogDate(item, strings.TrimSpace(query.StartDate), strings.TrimSpace(query.EndDate)) {
 		return false
 	}
 	logTime := util.Clean(item["time"])
@@ -211,11 +322,8 @@ func matchLogQuery(item map[string]any, query LogQuery) bool {
 	return true
 }
 
-func matchLogDate(item map[string]any, logType, startDate, endDate string) bool {
+func matchLogDate(item map[string]any, startDate, endDate string) bool {
 	day := logDay(item)
-	if strings.TrimSpace(logType) != "" && util.Clean(item["type"]) != strings.TrimSpace(logType) {
-		return false
-	}
 	if strings.TrimSpace(startDate) != "" && day < strings.TrimSpace(startDate) {
 		return false
 	}
@@ -262,38 +370,21 @@ func logModule(item map[string]any) string {
 	if value := logDetailString(item, "module"); value != "" {
 		return value
 	}
-	switch util.Clean(item["type"]) {
-	case LogTypeCall:
-		return "调用日志"
-	case LogTypeAccount:
-		return "账号管理"
-	case LogTypeAudit:
-		return "审计日志"
-	default:
-		return util.Clean(item["type"])
-	}
+	return "系统日志"
 }
 
 func logOperationType(item map[string]any) string {
 	if value := logDetailString(item, "operation_type"); value != "" {
 		return value
 	}
-	switch util.Clean(item["type"]) {
-	case LogTypeCall:
-		return "调用"
-	case LogTypeAccount:
-		return "账号管理"
-	default:
-		return ""
-	}
+	return ""
 }
 
 func logLevel(item map[string]any) string {
 	if value := logDetailString(item, "log_level"); value != "" {
 		return strings.ToLower(value)
 	}
-	status := logStatus(item)
-	if status == "failed" {
+	if logOutcome(item) == "failed" {
 		return "warning"
 	}
 	return "info"
@@ -301,6 +392,26 @@ func logLevel(item map[string]any) string {
 
 func logStatus(item map[string]any) string {
 	return util.Clean(util.StringMap(item["detail"])["status"])
+}
+
+func logOutcome(item map[string]any) string {
+	detail := util.StringMap(item["detail"])
+	if outcome := util.Clean(detail["outcome"]); outcome != "" {
+		return outcome
+	}
+	status := util.Clean(detail["status"])
+	switch status {
+	case "success", "failed":
+		return status
+	}
+	code := util.ToInt(detail["status"], 0)
+	if code >= 400 {
+		return "failed"
+	}
+	if code > 0 {
+		return "success"
+	}
+	return ""
 }
 
 func logDetailString(item map[string]any, key string) string {
@@ -325,7 +436,7 @@ func (s *LogService) UserUsageStats(days int) map[string]map[string]any {
 	endDate := dates[len(dates)-1]
 	byUser := map[string]*userUsageAccumulator{}
 	if s.store != nil {
-		items, err := s.store.QueryLogs(LogTypeCall, startDate, endDate, 0)
+		items, err := s.store.QueryLogs(startDate, endDate, 0)
 		if err == nil {
 			for _, item := range items {
 				accumulateUserUsageLog(byUser, item, startDate, endDate)
@@ -344,7 +455,7 @@ func (s *LogService) UserUsageStats(days int) map[string]map[string]any {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		var item map[string]any
-		if json.Unmarshal([]byte(scanner.Text()), &item) != nil || item["type"] != LogTypeCall {
+		if json.Unmarshal([]byte(scanner.Text()), &item) != nil {
 			continue
 		}
 		accumulateUserUsageLog(byUser, item, startDate, endDate)
@@ -356,7 +467,7 @@ func (s *LogService) UserUsageStats(days int) map[string]map[string]any {
 }
 
 func accumulateUserUsageLog(byUser map[string]*userUsageAccumulator, item map[string]any, startDate, endDate string) {
-	if item["type"] != LogTypeCall {
+	if !isUsageLog(item) {
 		return
 	}
 	day := logDay(item)
@@ -376,13 +487,13 @@ func accumulateUserUsageLog(byUser map[string]*userUsageAccumulator, item map[st
 		acc = newUserUsageAccumulator()
 		byUser[userID] = acc
 	}
-	status := util.Clean(detail["status"])
-	quotaUsed := logQuotaUsed(detail, status)
+	outcome := logOutcome(item)
+	quotaUsed := logQuotaUsed(detail, outcome)
 	acc.Calls++
 	acc.QuotaUsed += quotaUsed
-	if status == "success" {
+	if outcome == "success" {
 		acc.Success++
-	} else if status == "failed" {
+	} else if outcome == "failed" {
 		acc.Failure++
 	}
 	daily := acc.Daily[day]
@@ -392,11 +503,30 @@ func accumulateUserUsageLog(byUser map[string]*userUsageAccumulator, item map[st
 	}
 	daily.Calls++
 	daily.QuotaUsed += quotaUsed
-	if status == "success" {
+	if outcome == "success" {
 		daily.Success++
-	} else if status == "failed" {
+	} else if outcome == "failed" {
 		daily.Failure++
 	}
+}
+
+func publicLogItem(item map[string]any) map[string]any {
+	out := make(map[string]any, len(item))
+	for key, value := range item {
+		if key == "type" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func isUsageLog(item map[string]any) bool {
+	detail := util.StringMap(item["detail"])
+	if util.Clean(detail["endpoint"]) == "" {
+		return false
+	}
+	return logOutcome(item) != ""
 }
 
 func ZeroUserUsageStats(days int) map[string]any {
@@ -457,8 +587,8 @@ func logDay(item map[string]any) string {
 	return day[:10]
 }
 
-func logQuotaUsed(detail map[string]any, status string) int {
-	if status != "success" {
+func logQuotaUsed(detail map[string]any, outcome string) int {
+	if outcome != "success" {
 		return 0
 	}
 	if urls := util.AsStringSlice(detail["urls"]); len(urls) > 0 {

@@ -21,7 +21,6 @@ import { cn } from "@/lib/utils";
 import { useSettingsStore } from "../store";
 import { SettingsCard, settingsInputClassName } from "./settings-ui";
 
-const LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"];
 const configSectionClassName = "flex flex-col gap-3";
 const configFieldClassName = "min-w-0 gap-1.5";
 
@@ -125,7 +124,6 @@ export function ConfigCard() {
   const setAutoRemoveRateLimitedAccounts = useSettingsStore(
     (state) => state.setAutoRemoveRateLimitedAccounts,
   );
-  const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
   const setRegistrationEnabled = useSettingsStore(
@@ -163,7 +161,7 @@ export function ConfigCard() {
       <SettingsCard
         icon={Settings2}
         title="系统配置"
-        description="调整账号刷新、代理、图片任务和运行日志。"
+        description="调整账号刷新、代理和图片任务。"
       >
         <div className="flex items-center justify-center py-10">
           <LoaderCircle className="size-5 animate-spin text-muted-foreground" />
@@ -176,7 +174,7 @@ export function ConfigCard() {
     <SettingsCard
       icon={Settings2}
       title="系统配置"
-      description="调整账号刷新、代理、图片任务和运行日志。"
+      description="调整账号刷新、代理和图片任务。"
       action={
         <Button
           size="lg"
@@ -380,22 +378,6 @@ export function ConfigCard() {
           </div>
         </section>
 
-        <section className={configSectionClassName}>
-          <SectionHeading
-            title="控制台日志级别"
-            tip="不选择时使用默认 info / warning / error。"
-          />
-          <div className="grid grid-cols-2 gap-2">
-            {LOG_LEVEL_OPTIONS.map((level) => (
-              <ConfigOption
-                key={level}
-                checked={Boolean(config?.log_levels?.includes(level))}
-                onCheckedChange={(checked) => setLogLevel(level, checked)}
-                label={level.charAt(0).toUpperCase() + level.slice(1)}
-              />
-            ))}
-          </div>
-        </section>
       </div>
     </SettingsCard>
   );

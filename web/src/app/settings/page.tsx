@@ -11,6 +11,7 @@ import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
 import { LinuxDoLoginCard } from "./components/linuxdo-login-card";
+import { LogGovernanceCard } from "./components/log-governance-card";
 import { LoginPageImageCard } from "./components/login-page-image-card";
 import { SettingsHeader } from "./components/settings-header";
 import { Sub2APIConnections } from "./components/sub2api-connections";
@@ -60,6 +61,9 @@ function AdminSettingsPageContent() {
       <section className="columns-1 gap-5 md:columns-2">
         <SettingsMasonryItem>
           <ConfigCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
+          <LogGovernanceCard />
         </SettingsMasonryItem>
         <SettingsMasonryItem>
           <LinuxDoLoginCard />

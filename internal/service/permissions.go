@@ -63,6 +63,8 @@ var apiPermissionCatalog = []APIPermission{
 	apiPermission("GET", "/api/register", "查看注册机", "注册机", true),
 	apiPermission("POST", "/api/register", "控制注册机", "注册机", true),
 	apiPermission("GET", "/api/logs", "查看日志", "日志管理", false),
+	apiPermission("GET", "/api/logs/governance", "查看日志治理", "日志管理", false),
+	apiPermission("POST", "/api/logs/governance", "清理日志数据", "日志管理", false),
 	apiPermission("GET", "/api/settings", "查看设置", "设置", false),
 	apiPermission("POST", "/api/settings", "修改设置", "设置", false),
 	apiPermission("POST", "/api/settings/login-page-image", "修改登录页图片", "设置", false),

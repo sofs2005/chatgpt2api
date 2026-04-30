@@ -18,7 +18,7 @@ import { fetchSystemLogs, type SystemLog, type SystemLogFilters } from "@/lib/ap
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const methodOptions = ["GET", "POST", "PUT", "PATCH", "DELETE"];
-const statusOptions = ["200", "201", "400", "401", "403", "404", "422", "500"];
+const statusOptions = ["200", "201", "400", "401", "403", "404", "422", "429", "500", "502"];
 const logLevelOptions = ["info", "warning", "error"];
 
 const emptyFilters: SystemLogFilters = {
@@ -34,12 +34,6 @@ const emptyFilters: SystemLogFilters = {
   end_date: "",
 };
 
-const typeLabels: Record<string, string> = {
-  call: "调用",
-  account: "账号",
-  audit: "审计",
-};
-
 const detailLabels: Record<string, string> = {
   endpoint: "接口",
   model: "模型",
@@ -47,6 +41,7 @@ const detailLabels: Record<string, string> = {
   path: "路径",
   module: "模块",
   status: "状态",
+  outcome: "结果",
   log_level: "日志级别",
   operation_type: "操作类型",
   duration_ms: "耗时",
@@ -76,6 +71,7 @@ const primaryDetailKeys = [
   "module",
   "operation_type",
   "status",
+  "outcome",
   "log_level",
   "duration_ms",
   "username",
@@ -104,7 +100,7 @@ function actorText(item: SystemLog | null) {
 }
 
 function moduleText(item: SystemLog | null) {
-  return detailText(item, "module") || typeLabels[item?.type || ""] || item?.type || "-";
+  return detailText(item, "module") || "系统日志";
 }
 
 function pathText(item: SystemLog | null) {
@@ -122,6 +118,9 @@ function statusText(item: SystemLog | null) {
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
   if (typeof status === "string" || typeof status === "number") return String(status);
+  const outcome = detailValue(item, "outcome");
+  if (outcome === "success") return "成功";
+  if (outcome === "failed") return "失败";
   return "-";
 }
 
@@ -140,6 +139,9 @@ function statusBadgeVariant(item: SystemLog | null) {
     if (numeric >= 400) return "warning";
     return "success";
   }
+  const outcome = detailValue(item, "outcome");
+  if (outcome === "success") return "success";
+  if (outcome === "failed") return "danger";
   return "secondary";
 }
 
@@ -172,7 +174,7 @@ function isPrimitiveDetail(value: unknown) {
 function formatDetailValue(key: string, value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
   if ((key === "duration_ms" || key === "response_time") && typeof value === "number") return `${(value / 1000).toFixed(2)} s`;
-  if (key === "status") {
+  if (key === "status" || key === "outcome") {
     if (value === "success") return "成功";
     if (value === "failed") return "失败";
   }

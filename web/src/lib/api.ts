@@ -131,6 +131,7 @@ export type SettingsConfig = {
   user_default_concurrent_limit?: number | string;
   user_default_rpm_limit?: number | string;
   image_retention_days?: number | string;
+  log_retention_days?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
@@ -174,7 +175,6 @@ export type ManagedImage = {
 
 export type SystemLog = {
   time: string;
-  type: "call" | "account" | "audit" | string;
   summary?: string;
   detail?: Record<string, unknown>;
   [key: string]: unknown;
@@ -194,6 +194,19 @@ export type SystemLogFilters = {
   start_time?: string;
   end_time?: string;
   page_size?: number | string;
+};
+
+export type LogGovernanceSummary = {
+  total: number;
+  oldest_time?: string;
+  latest_time?: string;
+};
+
+export type LogCleanupResult = {
+  retention_days: number;
+  cutoff_date: string;
+  deleted: number;
+  remaining: number;
 };
 
 export type ImageResponse = {
@@ -734,6 +747,17 @@ export async function fetchSystemLogs(filters: SystemLogFilters) {
     params.set(key, String(value));
   }
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function fetchLogGovernance() {
+  return httpRequest<{ governance: LogGovernanceSummary }>("/api/logs/governance");
+}
+
+export async function cleanupLogs(retentionDays: number) {
+  return httpRequest<{ cleanup: LogCleanupResult; governance: LogGovernanceSummary }>("/api/logs/governance", {
+    method: "POST",
+    body: { retention_days: retentionDays },
+  });
 }
 
 export async function fetchUserKeys() {

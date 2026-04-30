@@ -136,7 +136,12 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 	_ = s.saveLocked()
 	items := publicAccounts(s.items)
 	s.mu.Unlock()
-	s.logs.Add(LogTypeAccount, fmt.Sprintf("新增 %d 个账号，跳过 %d 个", added, skipped), map[string]any{"added": added, "skipped": skipped})
+	s.logs.Add(fmt.Sprintf("新增 %d 个账号，跳过 %d 个", added, skipped), map[string]any{
+		"module":         "accounts",
+		"operation_type": "新增",
+		"added":          added,
+		"skipped":        skipped,
+	})
 	return map[string]any{"added": added, "skipped": skipped, "items": items}
 }
 
@@ -172,7 +177,11 @@ func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 	items := publicAccounts(s.items)
 	s.mu.Unlock()
 	if removed > 0 {
-		s.logs.Add(LogTypeAccount, fmt.Sprintf("删除 %d 个账号", removed), map[string]any{"removed": removed})
+		s.logs.Add(fmt.Sprintf("删除 %d 个账号", removed), map[string]any{
+			"module":         "accounts",
+			"operation_type": "删除",
+			"removed":        removed,
+		})
 	}
 	return map[string]any{"removed": removed, "items": items}
 }
@@ -200,12 +209,21 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 		delete(s.imageReservations, accessToken)
 		s.items = append(s.items[:idx], s.items[idx+1:]...)
 		_ = s.saveLocked()
-		s.logs.Add(LogTypeAccount, "自动移除限流账号", map[string]any{"token": util.AnonymizeToken(accessToken)})
+		s.logs.Add("自动移除限流账号", map[string]any{
+			"module":         "accounts",
+			"operation_type": "自动移除",
+			"token":          util.AnonymizeToken(accessToken),
+		})
 		return nil
 	}
 	s.items[idx] = account
 	_ = s.saveLocked()
-	s.logs.Add(LogTypeAccount, "更新账号", map[string]any{"token": util.AnonymizeToken(accessToken), "status": account["status"]})
+	s.logs.Add("更新账号", map[string]any{
+		"module":         "accounts",
+		"operation_type": "更新",
+		"token":          util.AnonymizeToken(accessToken),
+		"status":         account["status"],
+	})
 	return util.CopyMap(account)
 }
 
@@ -369,7 +387,11 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 		delete(s.imageReservations, accessToken)
 		s.items = append(s.items[:idx], s.items[idx+1:]...)
 		_ = s.saveLocked()
-		s.logs.Add(LogTypeAccount, "自动移除限流账号", map[string]any{"token": util.AnonymizeToken(accessToken)})
+		s.logs.Add("自动移除限流账号", map[string]any{
+			"module":         "accounts",
+			"operation_type": "自动移除",
+			"token":          util.AnonymizeToken(accessToken),
+		})
 		return nil
 	}
 	s.items[idx] = account
@@ -383,7 +405,12 @@ func (s *AccountService) RemoveInvalidToken(accessToken, event string) bool {
 	}
 	removed := s.RemoveToken(accessToken)
 	if removed {
-		s.logs.Add(LogTypeAccount, "自动移除异常账号", map[string]any{"source": event, "token": util.AnonymizeToken(accessToken)})
+		s.logs.Add("自动移除异常账号", map[string]any{
+			"module":         "accounts",
+			"operation_type": "自动移除",
+			"source":         event,
+			"token":          util.AnonymizeToken(accessToken),
+		})
 	}
 	return removed
 }

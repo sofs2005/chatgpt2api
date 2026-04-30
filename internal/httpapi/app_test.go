@@ -355,7 +355,7 @@ func TestCreationTaskFailureWritesCallLog(t *testing.T) {
 	var logs map[string]any
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		req = httptest.NewRequest(http.MethodGet, "/api/logs?type=call", nil)
+		req = httptest.NewRequest(http.MethodGet, "/api/logs", nil)
 		req.Header.Set("Authorization", adminAuthHeader(t, app))
 		res = httptest.NewRecorder()
 		app.Handler().ServeHTTP(res, req)
@@ -372,15 +372,25 @@ func TestCreationTaskFailureWritesCallLog(t *testing.T) {
 	}
 	items := logItems(logs)
 	if len(items) == 0 {
-		t.Fatalf("expected creation task failure to write a call log, got %#v", logs)
+		t.Fatalf("expected creation task failure to write a log event, got %#v", logs)
 	}
 	item := items[0]
-	if item["type"] != "call" || item["summary"] != "文生图调用失败" {
-		t.Fatalf("unexpected call log item: %#v", item)
+	if _, ok := item["type"]; ok {
+		t.Fatalf("log item should not expose type: %#v", item)
+	}
+	if item["summary"] != "文生图调用失败" {
+		t.Fatalf("unexpected log item: %#v", item)
 	}
 	detail, _ := item["detail"].(map[string]any)
-	if detail["endpoint"] != "/api/creation-tasks/image-generations" || detail["status"] != "failed" {
-		t.Fatalf("unexpected call log detail: %#v", detail)
+	if detail["endpoint"] != "/api/creation-tasks/image-generations" ||
+		detail["path"] != "/api/creation-tasks/image-generations" ||
+		detail["method"] != http.MethodPost ||
+		detail["module"] != "creation-tasks" ||
+		detail["outcome"] != "failed" {
+		t.Fatalf("unexpected log detail: %#v", detail)
+	}
+	if _, ok := detail["status"].(float64); !ok {
+		t.Fatalf("log status should use numeric HTTP-style status: %#v", detail)
 	}
 	if detail["key_name"] != "frontend" || detail["key_role"] != "user" {
 		t.Fatalf("call log did not include user key identity: %#v", detail)
@@ -1086,7 +1096,7 @@ func TestAdminUsersManageLinuxDoUsers(t *testing.T) {
 		t.Fatalf("CreateAPIKey(local) error = %v", err)
 	}
 	localID, _ := local["id"].(string)
-	app.logs.Add(service.LogTypeCall, "文生图调用完成", map[string]any{
+	app.logs.Add("文生图调用完成", map[string]any{
 		"subject_id":  owner.ID,
 		"key_id":      "linuxdo-session",
 		"status":      "success",
@@ -1094,13 +1104,13 @@ func TestAdminUsersManageLinuxDoUsers(t *testing.T) {
 		"duration_ms": 120,
 		"urls":        []string{"https://example.test/a.png", "https://example.test/b.png"},
 	})
-	app.logs.Add(service.LogTypeCall, "文生图调用失败", map[string]any{
+	app.logs.Add("文生图调用失败", map[string]any{
 		"subject_id": owner.ID,
 		"key_id":     "linuxdo-session",
 		"status":     "failed",
 		"endpoint":   "/v1/images/generations",
 	})
-	app.logs.Add(service.LogTypeCall, "图生图调用完成", map[string]any{
+	app.logs.Add("图生图调用完成", map[string]any{
 		"key_id":   localID,
 		"status":   "success",
 		"endpoint": "/api/creation-tasks/image-edits",
@@ -1429,7 +1439,7 @@ func TestModelsCallLogIncludesUserKeyName(t *testing.T) {
 		t.Fatalf("models status = %d body = %s", res.Code, res.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/logs?type=call", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/logs", nil)
 	req.Header.Set("Authorization", adminAuthHeader(t, app))
 	res = httptest.NewRecorder()
 	app.Handler().ServeHTTP(res, req)
@@ -1442,10 +1452,26 @@ func TestModelsCallLogIncludesUserKeyName(t *testing.T) {
 	}
 	items := logItems(logs)
 	if len(items) == 0 {
-		t.Fatalf("expected models call to write a call log, got %#v", logs)
+		t.Fatalf("expected models call to write a log event, got %#v", logs)
 	}
-	detail, _ := items[0]["detail"].(map[string]any)
-	if detail["endpoint"] != "/v1/models" || detail["key_name"] != "frontend" || detail["key_role"] != "user" {
+	item := findLogByDetails(items, map[string]any{
+		"endpoint": "/v1/models",
+		"outcome":  "success",
+	})
+	if item == nil {
+		t.Fatalf("expected models call log event, got %#v", items)
+	}
+	if _, ok := item["type"]; ok {
+		t.Fatalf("log item should not expose type: %#v", item)
+	}
+	detail, _ := item["detail"].(map[string]any)
+	if detail["endpoint"] != "/v1/models" ||
+		detail["path"] != "/v1/models" ||
+		detail["method"] != http.MethodGet ||
+		detail["status"] != float64(http.StatusOK) ||
+		detail["outcome"] != "success" ||
+		detail["key_name"] != "frontend" ||
+		detail["key_role"] != "user" {
 		t.Fatalf("models call log did not include user key identity: %#v", detail)
 	}
 }
@@ -1483,8 +1509,8 @@ func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
 	if item == nil {
 		t.Fatalf("expected audit log for /api/settings, got %#v", items)
 	}
-	if item["type"] != service.LogTypeAudit {
-		t.Fatalf("audit log type = %#v", item["type"])
+	if _, ok := item["type"]; ok {
+		t.Fatalf("log item should not expose type: %#v", item)
 	}
 	detail, _ := item["detail"].(map[string]any)
 	if detail["method"] != http.MethodGet || detail["status"] != float64(http.StatusOK) || detail["log_level"] != "info" {
@@ -1495,6 +1521,53 @@ func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
 	}
 	if _, ok := detail["duration_ms"].(float64); !ok {
 		t.Fatalf("duration_ms not numeric in audit detail = %#v", detail)
+	}
+}
+
+func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	logDir := filepath.Join(app.config.DataDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	logData := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧日志","detail":{"status":"success"}}` + "\n" +
+		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
+	if err := os.WriteFile(filepath.Join(logDir, "events.jsonl"), logData, 0o644); err != nil {
+		t.Fatalf("write log data: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/governance", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("governance status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("governance json: %v", err)
+	}
+	governance, _ := payload["governance"].(map[string]any)
+	if governance["total"] != float64(2) {
+		t.Fatalf("governance total = %#v, want 2 in %#v", governance["total"], payload)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/logs/governance", strings.NewReader(`{"retention_days":1}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("cleanup status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("cleanup json: %v", err)
+	}
+	cleanup, _ := payload["cleanup"].(map[string]any)
+	if cleanup["deleted"] != float64(1) || cleanup["remaining"] != float64(2) {
+		t.Fatalf("cleanup result = %#v, want deleted 1 remaining 2", cleanup)
 	}
 }
 
@@ -1519,9 +1592,20 @@ func findHTTPItem(items []map[string]any, id string) map[string]any {
 }
 
 func findLogByDetail(items []map[string]any, key, value string) map[string]any {
+	return findLogByDetails(items, map[string]any{key: value})
+}
+
+func findLogByDetails(items []map[string]any, values map[string]any) map[string]any {
 	for _, item := range items {
 		detail, _ := item["detail"].(map[string]any)
-		if detail[key] == value {
+		matches := true
+		for key, value := range values {
+			if detail[key] != value {
+				matches = false
+				break
+			}
+		}
+		if matches {
 			return item
 		}
 	}

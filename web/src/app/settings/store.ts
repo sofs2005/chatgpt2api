@@ -4,10 +4,12 @@ import { create } from "zustand";
 import { toast } from "sonner";
 
 import {
+  cleanupLogs,
   createCPAPool,
   deleteCPAPool,
   fetchCPAPoolFiles,
   fetchCPAPools,
+  fetchLogGovernance,
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
   fetchSettingsConfig,
@@ -20,6 +22,8 @@ import {
   updateSettingsConfig,
   type CPAPool,
   type CPARemoteFile,
+  type LogCleanupResult,
+  type LogGovernanceSummary,
   type LoginPageImageSettings,
   type RegisterConfig,
   type SettingsConfig,
@@ -49,6 +53,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     user_default_concurrent_limit: Number(config.user_default_concurrent_limit || 0),
     user_default_rpm_limit: Number(config.user_default_rpm_limit || 0),
     image_retention_days: Number(config.image_retention_days || 30),
+    log_retention_days: Number(config.log_retention_days || 7),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
@@ -91,6 +96,10 @@ type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
+  logGovernance: LogGovernanceSummary | null;
+  lastLogCleanup: LogCleanupResult | null;
+  isLoadingLogGovernance: boolean;
+  isCleaningLogs: boolean;
 
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
@@ -126,6 +135,7 @@ type SettingsStore = {
   setUserDefaultConcurrentLimit: (value: string) => void;
   setUserDefaultRpmLimit: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
+  setLogRetentionDays: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
@@ -142,6 +152,8 @@ type SettingsStore = {
   setLoginPageImageTransform: (transform: { zoom: number; positionX: number; positionY: number }) => void;
   restoreDefaultLoginPageImage: () => void;
   saveLoginPageImage: (options: { file?: File | null; action: "keep" | "replace" | "remove" }) => Promise<boolean>;
+  loadLogGovernance: (silent?: boolean) => Promise<void>;
+  cleanupLogsByRetention: () => Promise<void>;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -185,6 +197,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
   isLoadingConfig: true,
   isSavingConfig: false,
+  logGovernance: null,
+  lastLogCleanup: null,
+  isLoadingLogGovernance: true,
+  isCleaningLogs: false,
 
   registerConfig: null,
   isLoadingRegister: true,
@@ -213,7 +229,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   isStartingImport: false,
 
   initialize: async () => {
-    await Promise.allSettled([get().loadConfig(), get().loadPools()]);
+    await Promise.allSettled([get().loadConfig(), get().loadPools(), get().loadLogGovernance()]);
   },
 
   loadConfig: async () => {
@@ -246,6 +262,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         user_default_concurrent_limit: Math.max(0, Number(config.user_default_concurrent_limit) || 0),
         user_default_rpm_limit: Math.max(0, Number(config.user_default_rpm_limit) || 0),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
+        log_retention_days: Math.min(3650, Math.max(1, Number(config.log_retention_days) || 7)),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
@@ -290,6 +307,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageRetentionDays: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_retention_days: value } } : {});
+  },
+
+  setLogRetentionDays: (value) => {
+    set((state) => state.config ? { config: { ...state.config, log_retention_days: value } } : {});
   },
 
   setImageConcurrentLimit: (value) => {
@@ -445,6 +466,39 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       return false;
     } finally {
       set({ isSavingConfig: false });
+    }
+  },
+
+  loadLogGovernance: async (silent = false) => {
+    if (!silent) set({ isLoadingLogGovernance: true });
+    try {
+      const data = await fetchLogGovernance();
+      set({ logGovernance: data.governance });
+    } catch (error) {
+      if (!silent) toast.error(error instanceof Error ? error.message : "加载日志治理数据失败");
+    } finally {
+      if (!silent) set({ isLoadingLogGovernance: false });
+    }
+  },
+
+  cleanupLogsByRetention: async () => {
+    const { config } = get();
+    if (!config) {
+      return;
+    }
+    const retentionDays = Math.min(3650, Math.max(1, Number(config.log_retention_days) || 7));
+    set({ isCleaningLogs: true });
+    try {
+      const data = await cleanupLogs(retentionDays);
+      set({
+        lastLogCleanup: data.cleanup,
+        logGovernance: data.governance,
+      });
+      toast.success(`已清理 ${data.cleanup.deleted} 条历史日志`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理日志失败");
+    } finally {
+      set({ isCleaningLogs: false });
     }
   },
 

@@ -25,7 +25,7 @@ func TestDatabaseBackendStoresDocumentsAndLogs(t *testing.T) {
 	}
 	if err := backend.AppendLog(map[string]any{
 		"time":    "2026-04-30 10:00:00",
-		"type":    "call",
+		"type":    "event",
 		"summary": "ok",
 		"detail":  map[string]any{"status": "success"},
 	}); err != nil {
@@ -33,7 +33,7 @@ func TestDatabaseBackendStoresDocumentsAndLogs(t *testing.T) {
 	}
 	if err := backend.AppendLog(map[string]any{
 		"time":    "2026-04-29 10:00:00",
-		"type":    "account",
+		"type":    "event",
 		"summary": "skip",
 	}); err != nil {
 		t.Fatalf("AppendLog() error = %v", err)
@@ -56,7 +56,7 @@ func TestDatabaseBackendStoresDocumentsAndLogs(t *testing.T) {
 		t.Fatalf("LoadJSONDocument() = %#v", doc)
 	}
 
-	logs, err := backend.QueryLogs("call", "2026-04-30", "2026-04-30", 10)
+	logs, err := backend.QueryLogs("2026-04-30", "2026-04-30", 10)
 	if err != nil {
 		t.Fatalf("QueryLogs() error = %v", err)
 	}
@@ -78,7 +78,7 @@ func TestDatabaseBackendQueryLogsEmptyReturnsJSONArray(t *testing.T) {
 	}
 	defer backend.db.Close()
 
-	logs, err := backend.QueryLogs("call", "2026-04-30", "2026-04-30", 10)
+	logs, err := backend.QueryLogs("2026-04-30", "2026-04-30", 10)
 	if err != nil {
 		t.Fatalf("QueryLogs() error = %v", err)
 	}
@@ -91,6 +91,69 @@ func TestDatabaseBackendQueryLogsEmptyReturnsJSONArray(t *testing.T) {
 	}
 	if string(data) != `{"items":[]}` {
 		t.Fatalf("marshaled logs = %s, want {\"items\":[]}", data)
+	}
+}
+
+func TestDatabaseBackendDeletesLogsBeforeDay(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
+	backend, err := NewDatabaseBackend("sqlite:///" + filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatalf("NewDatabaseBackend() error = %v", err)
+	}
+	defer backend.db.Close()
+
+	for _, item := range []map[string]any{
+		{"time": "2026-04-28 10:00:00", "type": "event", "summary": "old"},
+		{"time": "2026-04-29 10:00:00", "type": "event", "summary": "cutoff"},
+		{"time": "2026-04-30 10:00:00", "type": "event", "summary": "new"},
+	} {
+		if err := backend.AppendLog(item); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
+	}
+
+	deleted, err := backend.DeleteLogsBefore("2026-04-29")
+	if err != nil {
+		t.Fatalf("DeleteLogsBefore() error = %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("DeleteLogsBefore() deleted = %d, want 1", deleted)
+	}
+	logs, err := backend.QueryLogs("", "", 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("remaining logs = %#v, want 2", logs)
+	}
+}
+
+func TestJSONBackendDeletesLogsBeforeDay(t *testing.T) {
+	dir := t.TempDir()
+	backend := NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json"))
+	for _, item := range []map[string]any{
+		{"time": "2026-04-28 10:00:00", "type": "event", "summary": "old"},
+		{"time": "2026-04-29 10:00:00", "type": "event", "summary": "cutoff"},
+		{"time": "2026-04-30 10:00:00", "type": "event", "summary": "new"},
+	} {
+		if err := backend.AppendLog(item); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
+	}
+
+	deleted, err := backend.DeleteLogsBefore("2026-04-29")
+	if err != nil {
+		t.Fatalf("DeleteLogsBefore() error = %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("DeleteLogsBefore() deleted = %d, want 1", deleted)
+	}
+	logs, err := backend.QueryLogs("", "", 0)
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("remaining logs = %#v, want 2", logs)
 	}
 }
 

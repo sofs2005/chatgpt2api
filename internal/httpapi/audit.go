@@ -134,7 +134,7 @@ func (a *App) writeAuditLog(r *http.Request, recorder *auditResponseWriter, stat
 		detail["username"] = "anonymous"
 	}
 
-	if err := a.logs.Add(service.LogTypeAudit, strings.TrimSpace(r.Method+" "+r.URL.Path), detail); err != nil && a.logger != nil {
+	if err := a.logs.Add(strings.TrimSpace(r.Method+" "+r.URL.Path), detail); err != nil && a.logger != nil {
 		a.logger.Error("create audit log failed", "error", err, "path", r.URL.Path, "method", r.Method)
 	}
 }
@@ -267,7 +267,6 @@ func parseLogQuery(r *http.Request) (service.LogQuery, error) {
 		return service.LogQuery{}, err
 	}
 	return service.LogQuery{
-		Type:          strings.TrimSpace(values.Get("type")),
 		Username:      strings.TrimSpace(values.Get("username")),
 		Module:        strings.TrimSpace(values.Get("module")),
 		Method:        strings.TrimSpace(values.Get("method")),

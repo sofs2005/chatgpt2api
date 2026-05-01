@@ -773,10 +773,6 @@ func TestImageManagementIsScopedByOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertLinuxDoSession() error = %v", err)
 	}
-	otherOwner := service.AuthOwner{ID: "linuxdo:456", Name: "bob", Provider: service.AuthProviderLinuxDo}
-	if _, _, err := app.auth.UpsertAPIKeyForOwner("bob key", otherOwner); err != nil {
-		t.Fatalf("UpsertAPIKeyForOwner(other) error = %v", err)
-	}
 	aliceRel := "2026/04/29/alice.png"
 	bobRel := "2026/04/29/bob.png"
 	legacyRel := "2026/04/29/legacy.png"
@@ -886,18 +882,12 @@ func TestImageManagementIsScopedByOwner(t *testing.T) {
 		t.Fatalf("admin public gallery should see all images, got %#v", list)
 	}
 	seenPaths := make(map[string]bool, len(items))
-	ownerNamesByPath := make(map[string]string, len(items))
 	for _, item := range items {
 		path, _ := item["path"].(string)
 		seenPaths[path] = true
-		ownerName, _ := item["owner_name"].(string)
-		ownerNamesByPath[path] = ownerName
 	}
 	if !seenPaths[aliceRel] || !seenPaths[bobRel] || !seenPaths[legacyRel] {
 		t.Fatalf("admin public gallery paths = %#v", items)
-	}
-	if ownerNamesByPath[bobRel] != otherOwner.Name {
-		t.Fatalf("admin public gallery should resolve owner name, got owner_name=%q in %#v", ownerNamesByPath[bobRel], items)
 	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/images", strings.NewReader(`{"paths":["`+bobRel+`","`+aliceRel+`"]}`))
@@ -1254,6 +1244,148 @@ func TestProfileAPIKeyIsPersonalAndPermissionIndependent(t *testing.T) {
 	}
 	if identity := app.auth.Authenticate(adminKey); identity == nil || identity.Role != service.AuthRoleAdmin {
 		t.Fatalf("admin profile API identity = %#v", identity)
+	}
+}
+
+func TestProfilePromptFavoritesArePersonalAndPermissionIndependent(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	user, _, err := app.auth.RegisterPasswordUser("alice", "Password123", "Alice")
+	if err != nil {
+		t.Fatalf("RegisterPasswordUser(alice) error = %v", err)
+	}
+	role, err := app.auth.CreateRole(map[string]any{
+		"name":            "models only",
+		"menu_paths":      []string{"/image"},
+		"api_permissions": []string{service.APIPermissionKey("GET", "/v1/models")},
+	})
+	if err != nil {
+		t.Fatalf("CreateRole() error = %v", err)
+	}
+	if updated := app.auth.UpdateUser(user.ID, map[string]any{"role_id": role["id"]}); updated == nil {
+		t.Fatal("UpdateUser(role) returned nil")
+	}
+	_, aliceToken, err := app.auth.LoginPassword("alice", "Password123")
+	if err != nil {
+		t.Fatalf("LoginPassword(alice) error = %v", err)
+	}
+
+	other, otherToken, err := app.auth.RegisterPasswordUser("bob", "Password123", "Bob")
+	if err != nil {
+		t.Fatalf("RegisterPasswordUser(bob) error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/profile/prompt-favorites", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("initial list status = %d body = %s", res.Code, res.Body.String())
+	}
+	var list map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &list); err != nil {
+		t.Fatalf("initial list json: %v", err)
+	}
+	if items := logItems(list); len(items) != 0 {
+		t.Fatalf("initial list should be empty: %#v", list)
+	}
+
+	body := `{
+		"prompt_id":"banana-prompt-quicker:title:author:1",
+		"source":"banana-prompt-quicker",
+		"title":"Prompt A",
+		"preview":"https://example.test/a.png",
+		"reference_image_urls":["https://example.test/ref.png"],
+		"prompt":"draw a cat",
+		"author":"Alice",
+		"mode":"edit",
+		"category":"Animals",
+		"sub_category":"Cats",
+		"source_label":"banana-prompt-quicker",
+		"is_nsfw":false,
+		"localizations":{"zh-CN":{"title":"提示词 A","prompt":"画猫","category":"动物","sub_category":"猫"}}
+	}`
+	req = httptest.NewRequest(http.MethodPost, "/api/profile/prompt-favorites", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("create favorite status = %d body = %s", res.Code, res.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create favorite json: %v", err)
+	}
+	item, _ := created["item"].(map[string]any)
+	favoriteID, _ := item["id"].(string)
+	if favoriteID == "" || item["title"] != "Prompt A" || item["prompt_id"] != "banana-prompt-quicker:title:author:1" {
+		t.Fatalf("create favorite body = %#v", created)
+	}
+	if items := logItems(created); len(items) != 1 {
+		t.Fatalf("created items length = %d body = %#v", len(items), created)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/profile/prompt-favorites", strings.NewReader(strings.Replace(body, "Prompt A", "Prompt A Updated", 1)))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("duplicate favorite status = %d body = %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &created); err != nil {
+		t.Fatalf("duplicate favorite json: %v", err)
+	}
+	if items := logItems(created); len(items) != 1 || items[0]["title"] != "Prompt A Updated" {
+		t.Fatalf("duplicate favorite should update in place: %#v", created)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/profile/prompt-favorites", nil)
+	req.Header.Set("Authorization", "Bearer "+otherToken)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("other list status = %d body = %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &list); err != nil {
+		t.Fatalf("other list json: %v", err)
+	}
+	if items := logItems(list); len(items) != 0 {
+		t.Fatalf("other user saw favorites, user=%s other=%s list=%#v", user.ID, other.ID, list)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/profile/prompt-favorites/"+favoriteID, nil)
+	req.Header.Set("Authorization", "Bearer "+otherToken)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("other delete status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/profile/prompt-favorites/"+favoriteID, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("delete favorite status = %d body = %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &list); err != nil {
+		t.Fatalf("delete favorite json: %v", err)
+	}
+	if items := logItems(list); len(items) != 0 {
+		t.Fatalf("favorite remained after delete: %#v", list)
+	}
+
+	_, unownedKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "legacy user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey(unowned) error = %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/profile/prompt-favorites", nil)
+	req.Header.Set("Authorization", "Bearer "+unownedKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("unowned key list status = %d body = %s", res.Code, res.Body.String())
 	}
 }
 

@@ -253,6 +253,56 @@ func profileAPIKeyFilter(identity service.Identity) (service.AuthKeyFilter, bool
 	return service.AuthKeyFilter{Role: role, Kind: service.AuthKindAPIKey, OwnerID: ownerID}, true
 }
 
+func (a *App) handleProfilePromptFavorites(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	ownerID := util.Clean(identity.OwnerID)
+	if ownerID == "" {
+		util.WriteError(w, http.StatusForbidden, "prompt favorites require a bound user account")
+		return
+	}
+
+	base := "/api/profile/prompt-favorites"
+	if r.URL.Path == base {
+		switch r.Method {
+		case http.MethodGet:
+			util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.prompts.List(ownerID)})
+		case http.MethodPost:
+			body, err := readJSONMap(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, "invalid json body")
+				return
+			}
+			item, err := a.prompts.Upsert(ownerID, body)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": a.prompts.List(ownerID)})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	parts := splitPath(r.URL.Path)
+	if len(parts) != 4 || parts[0] != "api" || parts[1] != "profile" || parts[2] != "prompt-favorites" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.prompts.Delete(ownerID, parts[3]) {
+		util.WriteError(w, http.StatusNotFound, "prompt favorite not found")
+		return
+	}
+	util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.prompts.List(ownerID)})
+}
+
 func (a *App) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireIdentity(w, r, ""); !ok {
 		return

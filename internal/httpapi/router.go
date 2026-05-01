@@ -59,6 +59,7 @@ func (a *App) routes() []appRoute {
 		exact("", "/api/profile", a.handleProfile),
 		exact(http.MethodPost, "/api/profile/password", a.handleProfilePassword),
 		subtree("/api/profile/api-key", a.handleProfileAPIKey),
+		subtree("/api/profile/prompt-favorites", a.handleProfilePromptFavorites),
 		subtree("/api/auth/users", a.handleUserKeys),
 		subtree("/api/accounts", a.handleAccounts),
 		subtree("/api/cpa/pools", a.handleCPA),

@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, LoaderCircle, RefreshCcw, Search, SlidersHorizontal } from "lucide-react";
+import { ExternalLink, LoaderCircle, RefreshCcw, Search, SlidersHorizontal, Star } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   AWESOME_GPT_IMAGE_2_PROMPTS_SOURCE_URL,
@@ -14,6 +15,15 @@ import {
   type PromptMarketLocalization,
   type PromptMarketSourceId,
 } from "@/app/image/banana-prompts";
+import {
+  createPromptFavorite,
+  deletePromptFavorite,
+  fetchPromptFavorites,
+  promptFavoriteKey,
+  promptFavoriteRecordKey,
+  promptFavoriteToBananaPrompt,
+  type PromptFavorite,
+} from "@/app/image/prompt-favorites";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +47,7 @@ import { cn } from "@/lib/utils";
 type PromptMarketModeFilter = "all" | BananaPromptMode;
 type PromptMarketNsfwFilter = "safe" | "include" | "only";
 type PromptMarketSourceFilter = "all" | PromptMarketSourceId;
+type PromptMarketFavoriteFilter = "all" | "favorites";
 
 type ImagePromptMarketProps = {
   open: boolean;
@@ -112,9 +123,13 @@ function PromptPreviewImage({ prompt }: { prompt: BananaPrompt }) {
 
 export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePromptMarketProps) {
   const [prompts, setPrompts] = useState<BananaPrompt[]>([]);
+  const [favoriteItems, setFavoriteItems] = useState<PromptFavorite[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingFavorites, setIsLoadingFavorites] = useState(false);
   const [error, setError] = useState("");
+  const [favoriteError, setFavoriteError] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [favoriteFilter, setFavoriteFilter] = useState<PromptMarketFavoriteFilter>("all");
   const [source, setSource] = useState<PromptMarketSourceFilter>("all");
   const [promptLanguage, setPromptLanguage] = useState<PromptMarketLanguage>("zh-CN");
   const [category, setCategory] = useState(ALL_CATEGORY_VALUE);
@@ -122,7 +137,12 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const [nsfwFilter, setNsfwFilter] = useState<PromptMarketNsfwFilter>("safe");
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
+  const [favoriteBusyIds, setFavoriteBusyIds] = useState<Set<string>>(() => new Set());
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  const updateFavoriteItems = (items: PromptFavorite[]) => {
+    setFavoriteItems(Array.isArray(items) ? items : []);
+  };
 
   const loadPromptData = () => {
     setIsLoading(true);
@@ -137,6 +157,24 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
       })
       .finally(() => {
         setIsLoading(false);
+      });
+  };
+
+  const loadFavoriteData = () => {
+    setIsLoadingFavorites(true);
+    setFavoriteError("");
+
+    void fetchPromptFavorites()
+      .then((data) => {
+        updateFavoriteItems(data.items);
+      })
+      .catch((loadError: unknown) => {
+        const message = loadError instanceof Error ? loadError.message : "读取收藏失败";
+        setFavoriteError(message);
+        toast.error(message);
+      })
+      .finally(() => {
+        setIsLoadingFavorites(false);
       });
   };
 
@@ -169,9 +207,39 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   }, [open, prompts.length]);
 
   useEffect(() => {
+    if (!open || favoriteItems.length > 0) {
+      return;
+    }
+
+    setIsLoadingFavorites(true);
+    setFavoriteError("");
+    const controller = new AbortController();
+
+    void fetchPromptFavorites(controller.signal)
+      .then((data) => {
+        updateFavoriteItems(data.items);
+      })
+      .catch((loadError: unknown) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        const message = loadError instanceof Error ? loadError.message : "读取收藏失败";
+        setFavoriteError(message);
+        toast.error(message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsLoadingFavorites(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [favoriteItems.length, open]);
+
+  useEffect(() => {
     setVisibleCount(INITIAL_VISIBLE_COUNT);
     scrollAreaRef.current?.scrollTo({ top: 0 });
-  }, [keyword, source, promptLanguage, category, mode, nsfwFilter]);
+  }, [keyword, source, promptLanguage, category, mode, nsfwFilter, favoriteFilter]);
 
   useEffect(() => {
     if (open) {
@@ -181,12 +249,29 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
     setIsMobileFiltersOpen(false);
   }, [open]);
 
+  const favoritePrompts = useMemo(
+    () => favoriteItems.map((item) => promptFavoriteToBananaPrompt(item)),
+    [favoriteItems],
+  );
+
+  const favoriteIds = useMemo(() => new Set(favoriteItems.map((item) => promptFavoriteRecordKey(item))), [favoriteItems]);
+
+  const favoriteByPromptKey = useMemo(() => {
+    const items = new Map<string, PromptFavorite>();
+    favoriteItems.forEach((item) => {
+      items.set(promptFavoriteRecordKey(item), item);
+    });
+    return items;
+  }, [favoriteItems]);
+
+  const promptPool = favoriteFilter === "favorites" ? favoritePrompts : prompts;
+
   const sourceFilteredPrompts = useMemo(() => {
     if (source === "all") {
-      return prompts;
+      return promptPool;
     }
-    return prompts.filter((prompt) => prompt.source === source);
-  }, [prompts, source]);
+    return promptPool.filter((prompt) => prompt.source === source);
+  }, [promptPool, source]);
 
   const categories = useMemo(() => {
     const values = new Set<string>();
@@ -243,7 +328,9 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const selectedModeLabel = mode === "all" ? "" : mode === "edit" ? "编辑" : "文生图";
   const selectedNsfwLabel =
     nsfwFilter === "safe" ? "" : nsfwFilter === "include" ? "包含 NSFW" : "仅 NSFW";
+  const selectedFavoriteLabel = favoriteFilter === "favorites" ? "已收藏" : "";
   const activeFilterLabels = [
+    selectedFavoriteLabel,
     selectedSourceLabel,
     selectedLanguageLabel,
     selectedCategoryLabel,
@@ -253,6 +340,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const activeFilterCount = activeFilterLabels.length;
 
   const resetFilters = () => {
+    setFavoriteFilter("all");
     setSource("all");
     setPromptLanguage("zh-CN");
     setCategory(ALL_CATEGORY_VALUE);
@@ -260,13 +348,76 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
     setNsfwFilter("safe");
   };
 
-  const renderFilterControls = () => (
+  const setFavoriteBusy = (id: string, busy: boolean) => {
+    setFavoriteBusyIds((current) => {
+      const next = new Set(current);
+      if (busy) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleFavorite = async (prompt: BananaPrompt) => {
+    const key = promptFavoriteKey(prompt);
+    if (favoriteBusyIds.has(key)) {
+      return;
+    }
+
+    const existing = favoriteByPromptKey.get(key);
+    setFavoriteBusy(key, true);
+    try {
+      if (existing) {
+        const data = await deletePromptFavorite(existing.id);
+        updateFavoriteItems(data.items);
+        toast.success("已取消收藏");
+      } else {
+        const data = await createPromptFavorite(prompt);
+        updateFavoriteItems(data.items);
+        toast.success("已收藏");
+      }
+    } catch (toggleError) {
+      toast.error(toggleError instanceof Error ? toggleError.message : "收藏操作失败");
+    } finally {
+      setFavoriteBusy(key, false);
+    }
+  };
+
+  const renderFavoriteTabs = (className?: string) => (
+    <div className={cn("flex h-10 rounded-full bg-[#f0f0f0] p-1", className)}>
+      <button
+        type="button"
+        className={cn(
+          "inline-flex min-w-0 flex-1 items-center justify-center rounded-full px-3 text-xs font-semibold text-[#45515e] transition",
+          favoriteFilter === "all" && "bg-white text-[#18181b] shadow-sm",
+        )}
+        onClick={() => setFavoriteFilter("all")}
+      >
+        全部
+      </button>
+      <button
+        type="button"
+        className={cn(
+          "inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full px-3 text-xs font-semibold text-[#45515e] transition",
+          favoriteFilter === "favorites" && "bg-white text-[#1456f0] shadow-sm",
+        )}
+        onClick={() => setFavoriteFilter("favorites")}
+      >
+        <Star className={cn("size-3.5", favoriteFilter === "favorites" && "fill-current")} />
+        {favoriteItems.length > 0 ? `收藏 ${favoriteItems.length}` : "收藏"}
+      </button>
+    </div>
+  );
+
+  const renderFilterControls = (triggerClassName?: string) => (
     <>
       <Select
         value={source}
         onValueChange={(value) => setSource(value as PromptMarketSourceFilter)}
       >
-        <SelectTrigger>
+        <SelectTrigger className={triggerClassName}>
           <SelectValue placeholder="来源" />
         </SelectTrigger>
         <SelectContent>
@@ -284,7 +435,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
         value={promptLanguage}
         onValueChange={(value) => setPromptLanguage(value as PromptMarketLanguage)}
       >
-        <SelectTrigger>
+        <SelectTrigger className={triggerClassName}>
           <SelectValue placeholder="语言" />
         </SelectTrigger>
         <SelectContent>
@@ -295,7 +446,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
         </SelectContent>
       </Select>
       <Select value={category} onValueChange={setCategory}>
-        <SelectTrigger>
+        <SelectTrigger className={triggerClassName}>
           <SelectValue placeholder="分类" />
         </SelectTrigger>
         <SelectContent>
@@ -310,7 +461,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
         </SelectContent>
       </Select>
       <Select value={mode} onValueChange={(value) => setMode(value as PromptMarketModeFilter)}>
-        <SelectTrigger>
+        <SelectTrigger className={triggerClassName}>
           <SelectValue placeholder="模式" />
         </SelectTrigger>
         <SelectContent>
@@ -325,7 +476,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
         value={nsfwFilter}
         onValueChange={(value) => setNsfwFilter(value as PromptMarketNsfwFilter)}
       >
-        <SelectTrigger>
+        <SelectTrigger className={triggerClassName}>
           <SelectValue placeholder="NSFW" />
         </SelectTrigger>
         <SelectContent>
@@ -342,7 +493,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[min(94dvh,860px)] w-[min(96vw,1180px)] max-w-none flex-col overflow-hidden rounded-[24px] p-0 sm:h-[min(90dvh,860px)] sm:rounded-[28px]">
-        <DialogHeader className="border-b border-[#f2f3f5] px-4 pt-4 pb-3 sm:px-6 sm:pt-5 sm:pb-4">
+        <DialogHeader className="border-b border-[#f2f3f5] px-4 pt-4 pr-12 pb-3 sm:px-6 sm:pt-5 sm:pr-14 sm:pb-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <DialogTitle className="text-xl leading-tight sm:text-2xl">Prompts 提示词市场</DialogTitle>
@@ -370,7 +521,13 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
             </div>
             <div className="flex shrink-0 items-center gap-2 pt-0.5 text-xs text-[#8e8e93]">
               <span className="rounded-full bg-[#f0f0f0] px-2.5 py-1 sm:px-3">
-                {prompts.length > 0 ? `${filteredPrompts.length} / ${sourceFilteredPrompts.length}` : "远程市场"}
+                {favoriteFilter === "favorites"
+                  ? isLoadingFavorites
+                    ? "读取收藏"
+                    : `已收藏 ${filteredPrompts.length}`
+                  : prompts.length > 0
+                    ? `${filteredPrompts.length} / ${sourceFilteredPrompts.length}`
+                    : "远程市场"}
               </span>
             </div>
           </div>
@@ -378,7 +535,8 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
 
         <div className="border-b border-[#f2f3f5] px-4 py-2.5 sm:px-6 sm:py-3">
           <div className="md:hidden">
-            <div className="flex items-center gap-2">
+            {renderFavoriteTabs()}
+            <div className="mt-2 flex items-center gap-2">
               <div className="relative min-w-0 flex-1">
                 <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8e8e93]" />
                 <Input
@@ -444,27 +602,40 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
             ) : null}
           </div>
 
-          <div className="hidden gap-2 md:grid md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_220px_120px_160px_130px_140px] xl:items-center">
-            <div className="relative">
-              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8e8e93]" />
-              <Input
-                value={keyword}
-                onChange={(event) => setKeyword(event.target.value)}
-                placeholder="搜索标题、作者、分类或提示词"
-                className="pl-9"
-              />
+          <div className="hidden md:flex md:flex-col md:gap-2">
+            <div className="flex min-w-0 gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8e8e93]" />
+                <Input
+                  value={keyword}
+                  onChange={(event) => setKeyword(event.target.value)}
+                  placeholder="搜索标题、作者、分类或提示词"
+                  className="pl-9"
+                />
+              </div>
+              {renderFavoriteTabs("w-[168px] shrink-0")}
             </div>
-            {renderFilterControls()}
+            <div className="grid gap-2 md:grid-cols-[minmax(180px,1fr)_120px_minmax(160px,1fr)_130px_140px]">
+              {renderFilterControls("min-w-0")}
+            </div>
           </div>
+          {favoriteError ? (
+            <div className="mt-2 flex items-center justify-between gap-3 rounded-[12px] bg-[#fff7ed] px-3 py-2 text-xs text-[#9a3412]">
+              <span>{favoriteError}</span>
+              <button type="button" className="font-semibold text-[#1456f0]" onClick={loadFavoriteData}>
+                重试
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div ref={scrollAreaRef} className="min-h-0 flex-1 overflow-y-auto bg-white px-4 py-3 sm:px-6 sm:py-4">
-          {isLoading ? (
+          {favoriteFilter !== "favorites" && isLoading ? (
             <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-3 text-[#45515e]">
               <LoaderCircle className="size-6 animate-spin text-[#1456f0]" />
               <p className="text-sm">正在读取远程提示词市场...</p>
             </div>
-          ) : error ? (
+          ) : favoriteFilter !== "favorites" && error ? (
             <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-4 text-center">
               <div className="max-w-[420px] text-sm leading-6 text-[#45515e]">{error}</div>
               <Button
@@ -477,9 +648,18 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                 重新加载
               </Button>
             </div>
+          ) : favoriteFilter === "favorites" && isLoadingFavorites && favoriteItems.length === 0 ? (
+            <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-3 text-[#45515e]">
+              <LoaderCircle className="size-6 animate-spin text-[#1456f0]" />
+              <p className="text-sm">正在读取收藏...</p>
+            </div>
           ) : visiblePrompts.length === 0 ? (
             <div className="flex h-full min-h-[320px] items-center justify-center text-sm text-[#8e8e93]">
-              没有找到匹配的提示词
+              {favoriteFilter === "favorites"
+                ? favoriteItems.length === 0
+                  ? "还没有收藏提示词"
+                  : "没有匹配的收藏提示词"
+                : "没有找到匹配的提示词"}
             </div>
           ) : (
             <div className="flex flex-col gap-4">
@@ -487,6 +667,9 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                 {visiblePrompts.map((prompt) => {
                   const localizedPrompt = getLocalizedPrompt(prompt, promptLanguage);
                   const dateLabel = formatPromptDate(prompt.created);
+                  const favoriteKey = promptFavoriteKey(prompt);
+                  const isFavorite = favoriteIds.has(favoriteKey);
+                  const isFavoriteBusy = favoriteBusyIds.has(favoriteKey);
                   return (
                     <article
                       key={prompt.id}
@@ -525,18 +708,37 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                               {dateLabel ? <span>/{dateLabel}</span> : null}
                             </div>
                           </div>
-                          {prompt.link ? (
-                            <a
-                              href={prompt.link}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-[#e5e7eb] text-[#45515e] transition hover:bg-black/[0.05] hover:text-[#18181b]"
-                              aria-label="查看来源"
-                              title="查看来源"
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <button
+                              type="button"
+                              className={cn(
+                                "inline-flex size-8 items-center justify-center rounded-full border border-[#e5e7eb] text-[#45515e] transition hover:bg-black/[0.05] hover:text-[#18181b] disabled:cursor-not-allowed disabled:opacity-60",
+                                isFavorite && "border-[#bfdbfe] bg-[#eef4ff] text-[#1456f0]",
+                              )}
+                              onClick={() => void toggleFavorite(prompt)}
+                              disabled={isFavoriteBusy}
+                              aria-label={isFavorite ? "取消收藏提示词" : "收藏提示词"}
+                              title={isFavorite ? "取消收藏" : "收藏"}
                             >
-                              <ExternalLink className="size-3.5" />
-                            </a>
-                          ) : null}
+                              {isFavoriteBusy ? (
+                                <LoaderCircle className="size-3.5 animate-spin" />
+                              ) : (
+                                <Star className={cn("size-3.5", isFavorite && "fill-current")} />
+                              )}
+                            </button>
+                            {prompt.link ? (
+                              <a
+                                href={prompt.link}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex size-8 items-center justify-center rounded-full border border-[#e5e7eb] text-[#45515e] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                                aria-label="查看来源"
+                                title="查看来源"
+                              >
+                                <ExternalLink className="size-3.5" />
+                              </a>
+                            ) : null}
+                          </div>
                         </div>
                         <p className="line-clamp-4 text-sm leading-6 text-[#45515e]">{localizedPrompt.prompt}</p>
                         <div className="mt-auto flex justify-end border-t border-[#f2f3f5] pt-3">

@@ -3,6 +3,7 @@ export type ColorTheme = "light" | "dark";
 export const COLOR_THEME_STORAGE_KEY = "chatgpt2api:color-theme";
 
 type ThemeTransitionOptions = {
+  force?: boolean;
   origin?: {
     x: number;
     y: number;
@@ -64,7 +65,7 @@ export function applyColorTheme(theme: ColorTheme, options: ThemeTransitionOptio
   }
 
   const origin = options.origin;
-  if (origin && shouldAnimateThemeTransition()) {
+  if (origin && (options.force || shouldAnimateThemeTransition())) {
     const root = document.documentElement;
     const radius = getThemeTransitionRadius(origin.x, origin.y);
     root.style.setProperty("--theme-transition-x", `${origin.x}px`);

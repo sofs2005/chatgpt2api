@@ -47,6 +47,7 @@ type App struct {
 	images     *service.ImageService
 	tasks      *service.ImageTaskService
 	announce   *service.AnnouncementService
+	prompts    *service.PromptFavoriteService
 	cpa        *service.CPAConfig
 	cpaImport  *service.CPAImportService
 	sub2       *service.Sub2APIConfig
@@ -86,7 +87,7 @@ func NewApp() (*App, error) {
 	}
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger}
-	app := &App{config: cfg, auth: auth, accounts: accounts, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), prompts: service.NewPromptFavoriteService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), cancel: cancel}
 	app.cpaImport = service.NewCPAImportService(app.cpa, accounts, proxy)
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
 	app.register = service.NewRegisterService(cfg.DataDir, accounts, storageBackend)
@@ -160,6 +161,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["owner_id"] = identityScope(identity)
+	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
@@ -190,6 +192,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["owner_id"] = identityScope(identity)
+	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
@@ -212,6 +215,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["owner_id"] = identityScope(identity)
+	body["owner_name"] = identityDisplayName(identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate)
@@ -228,6 +232,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["owner_id"] = identityScope(identity)
+	body["owner_name"] = identityDisplayName(identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleResponsesScoped(r.Context(), body, identityScope(identity))
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate)
@@ -880,8 +885,10 @@ func isPermissionCheckSkipped(path string) bool {
 		return true
 	case "/api/profile/api-key":
 		return true
+	case "/api/profile/prompt-favorites":
+		return true
 	default:
-		return strings.HasPrefix(path, "/api/profile/api-key/")
+		return strings.HasPrefix(path, "/api/profile/api-key/") || strings.HasPrefix(path, "/api/profile/prompt-favorites/")
 	}
 }
 
@@ -1115,14 +1122,10 @@ func (a *App) decorateImageList(payload map[string]any) {
 }
 
 func (a *App) decorateImageItem(item map[string]any, ownerNames map[string]string) {
-	if item == nil {
+	if item == nil || util.Clean(item["owner_name"]) != "" {
 		return
 	}
-	ownerName := util.Clean(item["owner_name"])
 	ownerID := util.Clean(item["owner_id"])
-	if ownerName != "" && ownerName != "未知用户" {
-		return
-	}
 	if ownerID == "" {
 		item["owner_name"] = "未知用户"
 		return
@@ -1154,6 +1157,7 @@ func (a *App) imageOwnerDisplayNames() map[string]string {
 func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity, payload map[string]any, endpoint, summary string, run func(context.Context, map[string]any) (map[string]any, error)) (map[string]any, error) {
 	start := time.Now()
 	payload["owner_id"] = identityScope(identity)
+	payload["owner_name"] = identityDisplayName(identity)
 	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
 	result, err := run(ctx, payload)
 	urls := collectURLs(result)
@@ -1174,6 +1178,7 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 func (a *App) runLoggedChatTask(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
 	start := time.Now()
 	payload["owner_id"] = identityScope(identity)
+	payload["owner_name"] = identityDisplayName(identity)
 	payload["stream"] = false
 	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
 	result, stream, err := a.engine.HandleChatCompletions(ctx, payload)

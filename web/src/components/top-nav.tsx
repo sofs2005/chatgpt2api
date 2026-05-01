@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronUp, Github, LogOut, Moon, Send, Sun, UserCircle2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Github, LogOut, MoonStar, Send, Sun, UserCircle2 } from "lucide-react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { AnnouncementNotifications } from "@/components/announcement-banner";
@@ -54,7 +54,7 @@ function ThemeToggleButton({
   className,
 }: {
   theme: ColorTheme;
-  onToggle: () => void;
+  onToggle: (button: HTMLButtonElement) => void;
   className?: string;
 }) {
   const dark = theme === "dark";
@@ -64,12 +64,14 @@ function ThemeToggleButton({
       type="button"
       variant="ghost"
       size="icon"
-      className={cn("size-8 rounded-full", className)}
-      onClick={onToggle}
+      className={cn("relative size-8 rounded-full", className)}
+      onClick={(event) => onToggle(event.currentTarget)}
       aria-label={dark ? "切换到浅色模式" : "切换到深色模式"}
       title={dark ? "浅色模式" : "深色模式"}
     >
-      {dark ? <Sun /> : <Moon />}
+      <Sun className="scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
+      <MoonStar className="absolute scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
+      <span className="sr-only">切换界面主题</span>
     </Button>
   );
 }
@@ -238,10 +240,6 @@ export function TopNav() {
   const [navCollapsed, setNavCollapsed] = useState(false);
 
   useEffect(() => {
-    applyColorTheme(theme);
-  }, [theme]);
-
-  useEffect(() => {
     let active = true;
 
     const load = async () => {
@@ -315,13 +313,21 @@ export function TopNav() {
     navigate("/login", { replace: true });
   };
 
-  const handleThemeToggle = () => {
-    setTheme((currentTheme) => {
-      const nextTheme = currentTheme === "dark" ? "light" : "dark";
-      applyColorTheme(nextTheme);
-      saveColorTheme(nextTheme);
-      return nextTheme;
-    });
+  const handleThemeToggle = (button: HTMLButtonElement) => {
+    const nextTheme = theme === "dark" ? "light" : "dark";
+    const rect = button.getBoundingClientRect();
+    applyColorTheme(
+      nextTheme,
+      {
+        force: true,
+        origin: {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        },
+      },
+    );
+    saveColorTheme(nextTheme);
+    setTheme(nextTheme);
   };
 
   if (pathname === "/login" || pathname === "/auth/linuxdo/callback" || session === undefined || !session) {

@@ -414,6 +414,7 @@ func TestCreationTaskFailureWritesCallLog(t *testing.T) {
 	}
 
 	var logs map[string]any
+	var item map[string]any
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		req = httptest.NewRequest(http.MethodGet, "/api/logs", nil)
@@ -426,21 +427,17 @@ func TestCreationTaskFailureWritesCallLog(t *testing.T) {
 		if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
 			t.Fatalf("logs json: %v", err)
 		}
-		if len(logItems(logs)) > 0 {
+		item = findLogBySummary(logItems(logs), "文生图调用失败")
+		if item != nil {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	items := logItems(logs)
-	if len(items) == 0 {
+	if item == nil {
 		t.Fatalf("expected creation task failure to write a log event, got %#v", logs)
 	}
-	item := items[0]
 	if _, ok := item["type"]; ok {
 		t.Fatalf("log item should not expose type: %#v", item)
-	}
-	if item["summary"] != "文生图调用失败" {
-		t.Fatalf("unexpected log item: %#v", item)
 	}
 	detail, _ := item["detail"].(map[string]any)
 	if detail["endpoint"] != "/api/creation-tasks/image-generations" ||
@@ -1891,6 +1888,15 @@ func logItems(payload map[string]any) []map[string]any {
 		}
 	}
 	return items
+}
+
+func findLogBySummary(items []map[string]any, summary string) map[string]any {
+	for _, item := range items {
+		if item["summary"] == summary {
+			return item
+		}
+	}
+	return nil
 }
 
 func findHTTPItem(items []map[string]any, id string) map[string]any {

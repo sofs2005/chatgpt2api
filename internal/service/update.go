@@ -27,7 +27,9 @@ import (
 const (
 	updateCacheTTL       = 20 * time.Minute
 	defaultUpdateRepo    = "ZyphrZero/chatgpt2api"
+	defaultDockerImage   = "zyphrzero/chatgpt2api"
 	defaultGitHubAPIBase = "https://api.github.com"
+	defaultDockerHubBase = "https://hub.docker.com"
 	maxUpdateDownload    = 500 * 1024 * 1024
 )
 
@@ -35,9 +37,12 @@ type UpdateService struct {
 	mu             sync.Mutex
 	repo           string
 	apiBaseURL     string
+	dockerHubBase  string
+	dockerImage    string
 	githubToken    string
 	currentVersion string
 	buildType      string
+	deployment     string
 	httpClient     *http.Client
 	downloadClient *http.Client
 	cached         *UpdateInfo
@@ -47,9 +52,12 @@ type UpdateService struct {
 type UpdateOptions struct {
 	Repo           string
 	APIBaseURL     string
+	DockerHubBase  string
+	DockerImage    string
 	GitHubToken    string
 	CurrentVersion string
 	BuildType      string
+	Deployment     string
 	ProxyURL       string
 }
 
@@ -61,6 +69,8 @@ type UpdateInfo struct {
 	Cached         bool         `json:"cached"`
 	Warning        string       `json:"warning,omitempty"`
 	BuildType      string       `json:"build_type"`
+	Deployment     string       `json:"deployment"`
+	UpdateSource   string       `json:"update_source"`
 }
 
 type ReleaseInfo struct {
@@ -92,6 +102,23 @@ type githubAsset struct {
 	Size               int64  `json:"size"`
 }
 
+type dockerTagResponse struct {
+	Name        string           `json:"name"`
+	Images      []dockerTagImage `json:"images"`
+	Digest      string           `json:"digest"`
+	LastUpdated time.Time        `json:"last_updated"`
+}
+
+type dockerTagsResponse struct {
+	Results []dockerTagResponse `json:"results"`
+}
+
+type dockerTagImage struct {
+	Architecture string `json:"architecture"`
+	OS           string `json:"os"`
+	Digest       string `json:"digest"`
+}
+
 func NewUpdateService(options UpdateOptions) *UpdateService {
 	repo := strings.TrimSpace(options.Repo)
 	if repo == "" {
@@ -101,16 +128,31 @@ func NewUpdateService(options UpdateOptions) *UpdateService {
 	if apiBaseURL == "" {
 		apiBaseURL = defaultGitHubAPIBase
 	}
+	dockerHubBase := strings.TrimRight(strings.TrimSpace(options.DockerHubBase), "/")
+	if dockerHubBase == "" {
+		dockerHubBase = defaultDockerHubBase
+	}
+	dockerImage := strings.Trim(strings.TrimSpace(options.DockerImage), "/")
+	if dockerImage == "" {
+		dockerImage = defaultDockerImage
+	}
 	buildType := strings.TrimSpace(options.BuildType)
 	if buildType == "" {
 		buildType = "source"
 	}
+	deployment := strings.TrimSpace(options.Deployment)
+	if deployment == "" {
+		deployment = "binary"
+	}
 	return &UpdateService{
 		repo:           repo,
 		apiBaseURL:     apiBaseURL,
+		dockerHubBase:  dockerHubBase,
+		dockerImage:    dockerImage,
 		githubToken:    strings.TrimSpace(options.GitHubToken),
 		currentVersion: strings.TrimSpace(options.CurrentVersion),
 		buildType:      buildType,
+		deployment:     deployment,
 		httpClient:     HTTPClientForProxy(options.ProxyURL, 30*time.Second),
 		downloadClient: HTTPClientForProxy(options.ProxyURL, 10*time.Minute),
 	}
@@ -134,6 +176,8 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			HasUpdate:      false,
 			Warning:        err.Error(),
 			BuildType:      s.buildType,
+			Deployment:     s.deployment,
+			UpdateSource:   s.updateSource(),
 		}, nil
 	}
 	s.saveInfo(info)
@@ -141,6 +185,9 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 }
 
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s.isDockerDeployment() {
+		return errors.New("Docker deployment updates are handled by pulling the DockerHub image")
+	}
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -214,6 +261,9 @@ func (s *UpdateService) Rollback() error {
 }
 
 func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {
+	if s.isDockerDeployment() {
+		return s.fetchDockerHubTag(ctx)
+	}
 	apiURL := s.apiBaseURL + "/repos/" + strings.Trim(s.repo, "/") + "/releases/latest"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
@@ -258,9 +308,153 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 			HTMLURL:     release.HTMLURL,
 			Assets:      assets,
 		},
-		Cached:    false,
-		BuildType: s.buildType,
+		Cached:       false,
+		BuildType:    s.buildType,
+		Deployment:   s.deployment,
+		UpdateSource: s.updateSource(),
 	}, nil
+}
+
+func (s *UpdateService) fetchDockerHubTag(ctx context.Context) (*UpdateInfo, error) {
+	image, ok := dockerHubImagePath(s.dockerImage)
+	if !ok {
+		return nil, fmt.Errorf("invalid DockerHub image: %s", s.dockerImage)
+	}
+	apiURL := s.dockerHubBase + "/v2/repositories/" + image + "/tags?page_size=100"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "chatgpt2api-updater")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("DockerHub API returned %d for %s: %s", resp.StatusCode, s.dockerImage, dockerHubErrorMessage(resp.Body))
+	}
+	var tags dockerTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, err
+	}
+	latestTag, ok := latestDockerVersionTag(tags.Results, runtime.GOOS, runtime.GOARCH)
+	if !ok {
+		return nil, fmt.Errorf("DockerHub image %s has no version tag for %s/%s", s.dockerImage, runtime.GOOS, runtime.GOARCH)
+	}
+	latest := strings.TrimPrefix(strings.TrimSpace(latestTag.Name), "v")
+	return &UpdateInfo{
+		CurrentVersion: s.currentVersion,
+		LatestVersion:  latest,
+		HasUpdate:      latest != s.currentVersion && compareVersions(s.currentVersion, latest) < 0,
+		Cached:         false,
+		BuildType:      s.buildType,
+		Deployment:     s.deployment,
+		UpdateSource:   s.updateSource(),
+		ReleaseInfo: &ReleaseInfo{
+			Name:        s.dockerImage + ":latest",
+			PublishedAt: latestTag.LastUpdated,
+			HTMLURL:     "https://hub.docker.com/r/" + image + "/tags",
+		},
+	}, nil
+}
+
+func (s *UpdateService) isDockerDeployment() bool {
+	return strings.EqualFold(strings.TrimSpace(s.deployment), "docker")
+}
+
+func (s *UpdateService) updateSource() string {
+	if s.isDockerDeployment() {
+		return "dockerhub"
+	}
+	return "github-release"
+}
+
+func dockerHubImagePath(image string) (string, bool) {
+	image = strings.Trim(strings.TrimSpace(image), "/")
+	if image == "" || strings.Contains(image, "://") {
+		return "", false
+	}
+	parts := strings.Split(image, "/")
+	if len(parts) == 1 {
+		image = "library/" + parts[0]
+		parts = strings.Split(image, "/")
+	}
+	if len(parts) != 2 {
+		return "", false
+	}
+	for _, part := range parts {
+		if part == "" || strings.ContainsAny(part, " \t\r\n:") {
+			return "", false
+		}
+	}
+	return image, true
+}
+
+func latestDockerVersionTag(tags []dockerTagResponse, goos, goarch string) (dockerTagResponse, bool) {
+	var latest dockerTagResponse
+	for _, tag := range tags {
+		name := strings.TrimSpace(tag.Name)
+		if !isDockerVersionTag(name) || !dockerTagSupportsRuntime(tag.Images, goos, goarch) {
+			continue
+		}
+		if latest.Name == "" || compareVersions(latest.Name, name) < 0 {
+			latest = tag
+		}
+	}
+	return latest, latest.Name != ""
+}
+
+func isDockerVersionTag(name string) bool {
+	name = strings.TrimPrefix(strings.TrimSpace(name), "v")
+	if name == "" || strings.Contains(name, "-") {
+		return false
+	}
+	parts := strings.Split(name, ".")
+	if len(parts) < 2 || len(parts) > 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func dockerTagSupportsRuntime(images []dockerTagImage, goos, goarch string) bool {
+	if len(images) == 0 {
+		return true
+	}
+	for _, image := range images {
+		if strings.EqualFold(image.OS, goos) && strings.EqualFold(image.Architecture, goarch) {
+			return true
+		}
+	}
+	return false
+}
+
+func dockerHubErrorMessage(body io.Reader) string {
+	data, _ := io.ReadAll(io.LimitReader(body, 64*1024))
+	var payload struct {
+		Message string `json:"message"`
+		Detail  string `json:"detail"`
+	}
+	if err := json.Unmarshal(data, &payload); err == nil {
+		if message := strings.TrimSpace(payload.Message); message != "" {
+			return message
+		}
+		if detail := strings.TrimSpace(payload.Detail); detail != "" {
+			return detail
+		}
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func githubAPIStatusError(resp *http.Response, repo string) error {

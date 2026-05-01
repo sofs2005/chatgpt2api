@@ -146,9 +146,6 @@ export type SettingsConfig = {
   linuxdo_client_secret_configured?: boolean;
   linuxdo_redirect_url?: string;
   linuxdo_frontend_redirect_url?: string;
-  update_repo?: string;
-  update_github_token?: string;
-  update_github_token_configured?: boolean;
   login_page_image_url?: string;
   login_page_image_mode?: LoginPageImageMode | string;
   login_page_image_zoom?: number | string;
@@ -239,6 +236,8 @@ export type SystemUpdateInfo = {
   cached: boolean;
   warning?: string;
   build_type: string;
+  deployment?: string;
+  update_source?: string;
 };
 
 export type SystemUpdateResult = {

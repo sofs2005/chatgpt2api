@@ -8,13 +8,11 @@ import {
   RefreshCw,
   RotateCcw,
   RotateCw,
-  Save,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import {
   checkSystemUpdates,
@@ -25,7 +23,6 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-import { useSettingsStore } from "../store";
 import { SettingsCard, settingsListItemClassName } from "./settings-ui";
 
 type OperationState = "idle" | "checking" | "updating" | "restarting" | "rolling-back";
@@ -44,6 +41,9 @@ function releaseDateLabel(value: string | undefined) {
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  if (date.getFullYear() < 2000) {
     return "";
   }
   return date.toLocaleString();
@@ -74,13 +74,6 @@ export function VersionUpdateCard({
   const [operation, setOperation] = useState<OperationState>("idle");
   const [needsRestart, setNeedsRestart] = useState(false);
   const [lastError, setLastError] = useState("");
-  const config = useSettingsStore((state) => state.config);
-  const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
-  const setUpdateRepo = useSettingsStore((state) => state.setUpdateRepo);
-  const setUpdateGitHubToken = useSettingsStore(
-    (state) => state.setUpdateGitHubToken,
-  );
-  const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const currentVersion = updateInfo?.current_version || webConfig.appVersion;
   const latestVersion = updateInfo?.latest_version || "";
@@ -89,17 +82,10 @@ export function VersionUpdateCard({
     [updateInfo?.release_info?.published_at],
   );
   const isReleaseBuild = updateInfo?.build_type === "release";
+  const isDockerDeployment = updateInfo?.deployment === "docker";
   const hasUpdate = Boolean(updateInfo?.has_update);
   const hasWarning = Boolean(updateInfo?.warning);
   const isBusy = operation !== "idle";
-  const updateRepo =
-    typeof config?.update_repo === "string"
-      ? config.update_repo
-      : "ZyphrZero/chatgpt2api";
-  const updateGitHubToken = String(config?.update_github_token || "");
-  const updateGitHubTokenConfigured = Boolean(
-    config?.update_github_token_configured,
-  );
 
   const refreshUpdates = useCallback(async (force = false) => {
     if (!canManageSystem) {
@@ -225,6 +211,10 @@ export function VersionUpdateCard({
               label="构建类型"
               value={isReleaseBuild ? "release" : updateInfo?.build_type || "source"}
             />
+            <VersionField
+              label="更新来源"
+              value={isDockerDeployment ? "DockerHub" : "GitHub Release"}
+            />
             <VersionField label="发布时间" value={releaseDate || "暂无"} />
           </div>
         </div>
@@ -236,6 +226,11 @@ export function VersionUpdateCard({
         {needsRestart ? (
           <StatusPanel tone="success">更新文件已替换，重启后生效。</StatusPanel>
         ) : null}
+        {isDockerDeployment ? (
+          <StatusPanel tone="warning">
+            Docker 部署默认从 DockerHub 拉取镜像，请执行 docker compose pull && docker compose up -d 完成升级。
+          </StatusPanel>
+        ) : null}
         {hasUpdate && !isReleaseBuild ? (
           <StatusPanel tone="warning">
             当前是源码构建，请使用 Git 或 Docker Compose 的部署流程更新。
@@ -245,69 +240,8 @@ export function VersionUpdateCard({
           <StatusPanel tone="warning">只有管理员可以检查和执行系统更新。</StatusPanel>
         ) : null}
 
-        <div className={settingsListItemClassName}>
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <p className="text-sm font-semibold text-foreground">
-                  GitHub Release 源
-                </p>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  检查该仓库的 latest release；公开 Release 不需要 Token，403
-                  通常是匿名 API 额度耗尽。
-                </p>
-              </div>
-              <Badge
-                variant={updateGitHubTokenConfigured ? "success" : "secondary"}
-              >
-                {updateGitHubTokenConfigured ? "Token 已配置" : "Token 可选"}
-              </Badge>
-            </div>
-            <div className="grid gap-2">
-              <Input
-                value={updateRepo}
-                onChange={(event) => setUpdateRepo(event.target.value)}
-                placeholder="owner/repo"
-                disabled={!canManageSystem || isSavingConfig}
-                className="font-mono text-sm"
-              />
-              <Input
-                type="password"
-                value={updateGitHubToken}
-                onChange={(event) => setUpdateGitHubToken(event.target.value)}
-                placeholder={
-                  updateGitHubTokenConfigured
-                    ? "已配置，留空则保留当前 Token"
-                    : "可选：GitHub API Token"
-                }
-                disabled={!canManageSystem || isSavingConfig}
-                className="font-mono text-sm"
-              />
-            </div>
-            <div>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={
-                  !canManageSystem ||
-                  isSavingConfig ||
-                  !updateRepo.trim()
-                }
-                onClick={() => void saveConfig()}
-              >
-                {isSavingConfig ? (
-                  <RefreshCw data-icon="inline-start" className="animate-spin" />
-                ) : (
-                  <Save data-icon="inline-start" />
-                )}
-                保存更新源
-              </Button>
-            </div>
-          </div>
-        </div>
-
         <div className="flex flex-wrap gap-2">
-          {canManageSystem && hasUpdate && isReleaseBuild && !needsRestart ? (
+          {canManageSystem && hasUpdate && isReleaseBuild && !isDockerDeployment && !needsRestart ? (
             <Button disabled={isBusy} onClick={() => void handleUpdate()}>
               <Download data-icon="inline-start" />
               {operation === "updating" ? "更新中..." : "立即更新"}
@@ -340,7 +274,7 @@ export function VersionUpdateCard({
                 rel="noreferrer"
               >
                 <CheckCircle2 data-icon="inline-start" />
-                Release
+                {isDockerDeployment ? "DockerHub" : "Release"}
               </a>
             </Button>
           ) : null}

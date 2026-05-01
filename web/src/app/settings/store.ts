@@ -67,9 +67,6 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     linuxdo_redirect_url: typeof config.linuxdo_redirect_url === "string" ? config.linuxdo_redirect_url : "",
     linuxdo_frontend_redirect_url:
       typeof config.linuxdo_frontend_redirect_url === "string" ? config.linuxdo_frontend_redirect_url : "/auth/linuxdo/callback",
-    update_repo: typeof config.update_repo === "string" ? config.update_repo : "ZyphrZero/chatgpt2api",
-    update_github_token: "",
-    update_github_token_configured: Boolean(config.update_github_token_configured),
     login_page_image_url: typeof config.login_page_image_url === "string" ? config.login_page_image_url : "",
     login_page_image_mode: normalizeLoginPageImageMode(config.login_page_image_mode),
     login_page_image_zoom: loginImageTransform.zoom,
@@ -150,8 +147,6 @@ type SettingsStore = {
   setLinuxDoClientSecret: (value: string) => void;
   setLinuxDoRedirectUrl: (value: string) => void;
   setLinuxDoFrontendRedirectUrl: (value: string) => void;
-  setUpdateRepo: (value: string) => void;
-  setUpdateGitHubToken: (value: string) => void;
   setLoginPageImageUrl: (value: string) => void;
   setLoginPageImageMode: (value: LoginPageImageMode) => void;
   setLoginPageImageTransform: (transform: { zoom: number; positionX: number; positionY: number }) => void;
@@ -260,7 +255,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ isSavingConfig: true });
     try {
       const linuxDoClientSecret = String(config.linuxdo_client_secret || "").trim();
-      const updateGitHubToken = String(config.update_github_token || "").trim();
       const payload: SettingsConfig = {
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
@@ -279,17 +273,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         linuxdo_client_secret: linuxDoClientSecret,
         linuxdo_redirect_url: String(config.linuxdo_redirect_url || "").trim(),
         linuxdo_frontend_redirect_url: String(config.linuxdo_frontend_redirect_url || "").trim(),
-        update_repo: String(config.update_repo ?? "ZyphrZero/chatgpt2api").trim(),
-        update_github_token: updateGitHubToken,
       };
       if (!linuxDoClientSecret) {
         delete payload.linuxdo_client_secret;
       }
-      if (!updateGitHubToken) {
-        delete payload.update_github_token;
-      }
       delete payload.linuxdo_client_secret_configured;
-      delete payload.update_github_token_configured;
 
       const data = await updateSettingsConfig(payload);
       set({
@@ -405,14 +393,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setLinuxDoFrontendRedirectUrl: (value) => {
     set((state) => state.config ? { config: { ...state.config, linuxdo_frontend_redirect_url: value } } : {});
-  },
-
-  setUpdateRepo: (value) => {
-    set((state) => state.config ? { config: { ...state.config, update_repo: value } } : {});
-  },
-
-  setUpdateGitHubToken: (value) => {
-    set((state) => state.config ? { config: { ...state.config, update_github_token: value } } : {});
   },
 
   setLoginPageImageUrl: (value) => {

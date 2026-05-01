@@ -388,14 +388,13 @@ func (s *Store) Get() map[string]any {
 	data["linuxdo_client_secret_configured"] = linuxdo.ClientSecret != ""
 	data["linuxdo_redirect_url"] = linuxdo.RedirectURL
 	data["linuxdo_frontend_redirect_url"] = linuxdo.FrontendRedirectURL
-	data["update_repo"] = s.UpdateRepo()
-	data["update_github_token_configured"] = s.UpdateGitHubToken() != ""
 	data["login_page_image_url"] = s.LoginPageImageURL()
 	data["login_page_image_mode"] = s.LoginPageImageMode()
 	data["login_page_image_zoom"] = s.LoginPageImageZoom()
 	data["login_page_image_position_x"] = s.LoginPageImagePositionX()
 	data["login_page_image_position_y"] = s.LoginPageImagePositionY()
 	delete(data, "linuxdo_client_secret")
+	delete(data, "update_repo")
 	delete(data, "update_github_token")
 	return data
 }
@@ -407,13 +406,10 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 		if key == "linuxdo_client_secret_configured" {
 			continue
 		}
-		if key == "update_github_token_configured" {
+		if key == "update_repo" || key == "update_github_token" || key == "update_github_token_configured" {
 			continue
 		}
 		if key == "linuxdo_client_secret" && strings.TrimSpace(fmt.Sprint(value)) == "" {
-			continue
-		}
-		if key == "update_github_token" && strings.TrimSpace(fmt.Sprint(value)) == "" {
 			continue
 		}
 		next[key] = value
@@ -421,7 +417,6 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 	if value, ok := next["login_page_image_mode"]; ok {
 		next["login_page_image_mode"] = normalizeLoginPageImageMode(value)
 	}
-	next["update_repo"] = normalizeUpdateRepo(util.ValueOr(next["update_repo"], "ZyphrZero/chatgpt2api"))
 	if err := s.validateSettingsUpdateLocked(next); err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -506,9 +501,6 @@ func (s *Store) settingValueFromData(data map[string]any, key string, fallback a
 }
 
 func (s *Store) validateSettingsUpdateLocked(data map[string]any) error {
-	if err := validateUpdateRepo(util.Clean(util.ValueOr(data["update_repo"], "ZyphrZero/chatgpt2api"))); err != nil {
-		return err
-	}
 	linuxdo := s.linuxDoOAuthFromData(data)
 	if !linuxdo.Enabled {
 		return nil
@@ -549,13 +541,6 @@ func normalizeUpdateRepo(value any) string {
 		return "ZyphrZero/chatgpt2api"
 	}
 	return repo
-}
-
-func validateUpdateRepo(value string) error {
-	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`).MatchString(value) {
-		return errors.New("Update repository must use owner/repo format")
-	}
-	return nil
 }
 
 func validateAbsoluteHTTPURL(value string) error {

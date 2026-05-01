@@ -41,6 +41,7 @@ FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS app
 
 WORKDIR /app
 ENV PORT=80
+ENV CHATGPT2API_DEPLOYMENT=docker
 
 # 运行时依赖：
 # - ca-certificates: HTTPS 上游请求需要

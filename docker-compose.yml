@@ -25,5 +25,5 @@ services:
       # 基础 URL (可选)
       # - CHATGPT2API_BASE_URL=https://your-domain.com
 
-      # 在线更新代理 (可选，未设置时复用 CHATGPT2API_PROXY)
+      # 检查更新代理 (可选，未设置时复用 CHATGPT2API_PROXY)
       - CHATGPT2API_UPDATE_PROXY_URL=${CHATGPT2API_UPDATE_PROXY_URL:-}

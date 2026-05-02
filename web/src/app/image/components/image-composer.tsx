@@ -170,6 +170,7 @@ export function ImageComposer({
     IMAGE_RESOLUTION_OPTIONS.find((option) => option.value === imageResolution)?.label || "Auto";
   const imageQualityLabel =
     imageQualityOptions.find((option) => option.value === imageQuality)?.label || imageQuality;
+  const supportsQuality = imageQualityOptions.length > 0;
   const submitLabel = composerMode === "chat" ? "发送对话" : referenceImages.length > 0 ? "编辑图片" : "生成图片";
 
   useEffect(() => {
@@ -181,6 +182,13 @@ export function ImageComposer({
       setIsOutputHintOpen(false);
     }
   }, [composerMode]);
+
+  useEffect(() => {
+    if (!supportsQuality) {
+      setIsQualityMenuOpen(false);
+      setIsOutputHintOpen(false);
+    }
+  }, [supportsQuality]);
 
   useEffect(() => {
     if (!isModelMenuOpen && !isAspectRatioMenuOpen && !isResolutionMenuOpen && !isQualityMenuOpen) {
@@ -635,7 +643,7 @@ export function ImageComposer({
                       className="z-[70] w-[min(calc(100vw-2rem),22rem)] overflow-visible rounded-[20px] border-[#e5e7eb] bg-white p-2.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] dark:border-border dark:bg-card dark:shadow-[0_24px_80px_-28px_rgba(0,0,0,0.72)]"
                       onOpenAutoFocus={(event) => event.preventDefault()}
                     >
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className={cn("grid gap-2", supportsQuality ? "grid-cols-2" : "grid-cols-1")}>
                       <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 dark:border-border dark:bg-background/70">
                         <span className="shrink-0 text-[11px] font-medium text-[#45515e] dark:text-muted-foreground">张数</span>
                         <Input
@@ -735,7 +743,8 @@ export function ImageComposer({
                           </div>
                         ) : null}
                       </div>
-                  <div
+                  {supportsQuality ? (
+                      <div
                     ref={qualityMenuRef}
                     className="relative flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70"
                   >
@@ -807,6 +816,7 @@ export function ImageComposer({
                       </div>
                     ) : null}
                       </div>
+                  ) : null}
                       </div>
                     </PopoverContent>
                   </Popover>

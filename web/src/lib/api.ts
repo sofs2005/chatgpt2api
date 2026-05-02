@@ -19,6 +19,7 @@ export const IMAGE_MODEL_OPTIONS = [
 export type ImageModel = (typeof IMAGE_MODEL_OPTIONS)[number]["value"];
 export const DEFAULT_IMAGE_MODEL: ImageModel = "auto";
 export const DEFAULT_CHAT_MODEL: ImageModel = "auto";
+export const CODEX_IMAGE_MODEL: ImageModel = "codex-gpt-image-2";
 const IMAGE_MODEL_VALUES = new Set<string>(IMAGE_MODEL_OPTIONS.map((option) => option.value));
 const IMAGE_TASK_MODEL_VALUES = new Set<ImageModel>(["auto", "gpt-image-2", "codex-gpt-image-2"]);
 const CHAT_MODEL_VALUES = new Set<ImageModel>([
@@ -45,6 +46,10 @@ export function isImageTaskModel(value: unknown): value is ImageModel {
 
 export function isChatModel(value: unknown): value is ImageModel {
   return isImageModel(value) && CHAT_MODEL_VALUES.has(value);
+}
+
+export function supportsImageQuality(model: ImageModel) {
+  return model !== CODEX_IMAGE_MODEL;
 }
 
 export type ImageQuality = "low" | "medium" | "high";

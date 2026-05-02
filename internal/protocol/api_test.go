@@ -134,6 +134,41 @@ func TestBuildImagePromptIncludesExactResolutionHint(t *testing.T) {
 	}
 }
 
+func TestCodexImageModelDropsQualityHint(t *testing.T) {
+	request := ConversationRequest{
+		Model:   "codex-gpt-image-2",
+		Prompt:  "画一张产品照片",
+		Size:    "3:2",
+		Quality: "high",
+	}.Normalized()
+	if request.Quality != "" {
+		t.Fatalf("Normalized() quality = %q, want empty for codex image model", request.Quality)
+	}
+	prompt := BuildImagePrompt(request.Prompt, request.Size, request.Quality)
+	if strings.Contains(prompt, "画质使用") {
+		t.Fatalf("codex image prompt included quality hint: %s", prompt)
+	}
+	if !strings.Contains(prompt, "3:2 横版构图") {
+		t.Fatalf("codex image prompt should still include size hint: %s", prompt)
+	}
+}
+
+func TestGPTImageModelKeepsQualityHint(t *testing.T) {
+	request := ConversationRequest{
+		Model:   "gpt-image-2",
+		Prompt:  "画一张产品照片",
+		Size:    "3:2",
+		Quality: " high ",
+	}.Normalized()
+	if request.Quality != "high" {
+		t.Fatalf("Normalized() quality = %q, want high", request.Quality)
+	}
+	prompt := BuildImagePrompt(request.Prompt, request.Size, request.Quality)
+	if !strings.Contains(prompt, "画质使用 High 档") {
+		t.Fatalf("gpt image prompt missing quality hint: %s", prompt)
+	}
+}
+
 func TestRequiresPaidImageSize(t *testing.T) {
 	tests := []struct {
 		name string

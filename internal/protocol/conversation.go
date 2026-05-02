@@ -56,6 +56,18 @@ type ConversationRequest struct {
 	RequirePaidAccount bool
 }
 
+func (r ConversationRequest) Normalized() ConversationRequest {
+	r.Quality = ImageQualityForModel(r.Model, r.Quality)
+	return r
+}
+
+func ImageQualityForModel(model, quality string) string {
+	if strings.TrimSpace(model) == util.ImageModelCodex {
+		return ""
+	}
+	return strings.TrimSpace(quality)
+}
+
 type ConversationState struct {
 	Text           string
 	ConversationID string
@@ -308,6 +320,7 @@ func IterConversationPayloads(ctx context.Context, payloads <-chan string, histo
 }
 
 func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request ConversationRequest) (<-chan ImageOutput, <-chan error) {
+	request = request.Normalized()
 	out := make(chan ImageOutput)
 	errCh := make(chan error, 1)
 	go func() {

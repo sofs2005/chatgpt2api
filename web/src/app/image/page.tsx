@@ -56,6 +56,7 @@ import {
   isImageModel,
   isImageQuality,
   isImageTaskModel,
+  supportsImageQuality,
   updateManagedImageVisibility,
   type ImageModel,
   type ImageQuality,
@@ -539,6 +540,10 @@ function getComposerConversationMode(composerMode: ComposerMode, referenceImages
   return referenceImages.some((image) => image.source === "conversation") ? "edit" : "image";
 }
 
+function imageQualityForModel(model: ImageModel, quality: ImageQuality) {
+  return supportsImageQuality(model) ? quality : undefined;
+}
+
 function buildCreationTaskMessages(conversation: ImageConversation, activeTurnId: string): CreationTaskMessage[] {
   const messages: CreationTaskMessage[] = [];
   for (const turn of conversation.turns) {
@@ -775,6 +780,7 @@ function ImagePageContent() {
     [imageAspectRatio, imageResolution],
   );
   const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_TASK_MODEL_OPTIONS;
+  const imageQualityOptions = supportsImageQuality(imageModel) ? IMAGE_QUALITY_OPTIONS : [];
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
@@ -1613,7 +1619,7 @@ function ImagePageContent() {
               activeTurn.prompt,
               activeTurn.model,
               activeTurn.size,
-              activeTurn.quality || DEFAULT_IMAGE_QUALITY,
+              imageQualityForModel(activeTurn.model, activeTurn.quality || DEFAULT_IMAGE_QUALITY),
               group.count,
               taskMessages,
               activeTurn.visibility || "private",
@@ -1624,7 +1630,7 @@ function ImagePageContent() {
             activeTurn.prompt,
             activeTurn.model,
             activeTurn.size,
-            activeTurn.quality || DEFAULT_IMAGE_QUALITY,
+            imageQualityForModel(activeTurn.model, activeTurn.quality || DEFAULT_IMAGE_QUALITY),
             group.count,
             taskMessages,
             activeTurn.visibility || "private",
@@ -2035,7 +2041,7 @@ function ImagePageContent() {
               referenceImages,
               count: imageCount,
               size: draftImageSize,
-              quality: mode === "chat" ? undefined : draft.quality,
+              quality: mode === "chat" ? undefined : imageQualityForModel(draft.model, draft.quality),
               visibility: mode === "chat" ? "private" : draft.visibility,
             };
             if (!regenerate) {
@@ -2116,7 +2122,7 @@ function ImagePageContent() {
         referenceImages: usesReferenceImages(effectiveImageMode) ? referenceImages : [],
         count: requestedCount,
         size: effectiveImageMode === "chat" ? "" : imageSize,
-        quality: effectiveImageMode === "chat" ? undefined : imageQuality,
+        quality: effectiveImageMode === "chat" ? undefined : imageQualityForModel(effectiveModel, imageQuality),
         visibility: effectiveImageMode === "chat" ? "private" : defaultImageVisibility,
         images: Array.from({ length: requestedCount }, (_, index) => {
           const imageId = `${turnId}-${index}`;
@@ -2414,6 +2420,7 @@ function ImagePageContent() {
                         </SelectContent>
                       </Select>
                     </label>
+                    {supportsImageQuality(editingTurnDraft.model) ? (
                     <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
                       质量
                       <Select
@@ -2438,6 +2445,7 @@ function ImagePageContent() {
                         </SelectContent>
                       </Select>
                     </label>
+                    ) : null}
                     </>
                     ) : null}
                   </div>
@@ -2529,7 +2537,7 @@ function ImagePageContent() {
                 imageAspectRatio={imageAspectRatio}
                 imageResolution={imageResolution}
                 imageQuality={imageQuality}
-                imageQualityOptions={IMAGE_QUALITY_OPTIONS}
+                imageQualityOptions={imageQualityOptions}
                 imageOutputHint={imageOutputHint}
                 referenceImages={referenceImages}
                 textareaRef={textareaRef}

@@ -668,8 +668,7 @@ func AssistantHistoryMessages(messages []map[string]any) []string {
 const maxFreeGeneratePixels = 1577536
 
 func RequiresPaidImageSize(size string) bool {
-	width, height, ok := imageSizeDimensions(size)
-	return ok && width*height > maxFreeGeneratePixels
+	return false
 }
 
 func imageSizeDimensions(size string) (int, int, bool) {

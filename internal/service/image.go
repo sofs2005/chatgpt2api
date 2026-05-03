@@ -52,11 +52,13 @@ type imageMetadata struct {
 	PublishedAt      string
 	ResolutionPreset string
 	RequestedSize    string
+	OutputFormat     string
 }
 
 type GeneratedImageMetadata struct {
 	ResolutionPreset string
 	RequestedSize    string
+	OutputFormat     string
 }
 
 type ImageService struct {
@@ -142,6 +144,9 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string, scope Imag
 		}
 		if meta.RequestedSize != "" {
 			item["requested_size"] = meta.RequestedSize
+		}
+		if meta.OutputFormat != "" {
+			item["output_format"] = meta.OutputFormat
 		}
 		if thumbRel, ok := thumb["thumbnail_rel"].(string); ok && thumbRel != "" {
 			item["thumbnail_url"] = thumbnailURL(baseURL, thumbRel, info.ModTime())
@@ -543,6 +548,7 @@ func normalizeImageMetadata(raw map[string]any) imageMetadata {
 		PublishedAt:      strings.TrimSpace(toString(raw["published_at"])),
 		ResolutionPreset: NormalizeImageResolutionPreset(toString(raw["resolution_preset"])),
 		RequestedSize:    strings.TrimSpace(toString(raw["requested_size"])),
+		OutputFormat:     NormalizeImageOutputFormat(strings.TrimSpace(toString(raw["output_format"]))),
 	}
 }
 
@@ -576,6 +582,9 @@ func (s *ImageService) writeImageMetadataForRef(ref imageFileRef, ownerID, owner
 		if requestedSize := strings.TrimSpace(metadata.RequestedSize); requestedSize != "" {
 			meta.RequestedSize = requestedSize
 		}
+		if outputFormat := NormalizeImageOutputFormat(metadata.OutputFormat); outputFormat != "" {
+			meta.OutputFormat = outputFormat
+		}
 	}
 	if meta.Visibility == "" {
 		meta.Visibility = ImageVisibilityPrivate
@@ -606,6 +615,9 @@ func (s *ImageService) writeImageMetadata(rel string, meta imageMetadata) error 
 	}
 	if meta.RequestedSize != "" {
 		value["requested_size"] = meta.RequestedSize
+	}
+	if meta.OutputFormat != "" {
+		value["output_format"] = meta.OutputFormat
 	}
 	if s.store != nil {
 		return s.store.SaveJSONDocument(imageOwnerDocumentName(rel), value)

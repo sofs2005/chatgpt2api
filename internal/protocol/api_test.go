@@ -10,6 +10,10 @@ import (
 	"chatgpt2api/internal/util"
 )
 
+func ptrInt(value int) *int {
+	return &value
+}
+
 func TestChatAndResponsesImageParsing(t *testing.T) {
 	imageData := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
 	body := map[string]any{
@@ -272,7 +276,7 @@ func TestResponseImageGenerationRequestUsesTextModelAndToolParams(t *testing.T) 
 		"model": "gpt-5.5",
 		"input": "生成封面",
 		"tools": []any{
-			map[string]any{"type": "image_generation", "size": "16:9", "quality": "high", "output_format": "png"},
+			map[string]any{"type": "image_generation", "size": "16:9", "quality": "high", "output_format": "webp", "output_compression": 37},
 		},
 	}
 	request, prompt, err := ResponseImageGenerationRequest(body, "linuxdo:1", nil)
@@ -297,8 +301,11 @@ func TestResponseImageGenerationRequestUsesTextModelAndToolParams(t *testing.T) 
 	if request.ResponseFormat != "b64_json" {
 		t.Fatalf("response format = %q, want b64_json", request.ResponseFormat)
 	}
-	if request.OutputFormat != "png" {
-		t.Fatalf("output format = %q, want png", request.OutputFormat)
+	if request.OutputFormat != "webp" {
+		t.Fatalf("output format = %q, want webp", request.OutputFormat)
+	}
+	if request.OutputCompression == nil || *request.OutputCompression != 37 {
+		t.Fatalf("output compression = %#v, want 37", request.OutputCompression)
 	}
 }
 
@@ -378,11 +385,12 @@ func TestCodexResponsesImageToolPayloadUsesGPT55ForImageOnlyModel(t *testing.T) 
 
 func TestCodexResponsesImageToolPayloadCarriesExactSize(t *testing.T) {
 	request := ConversationRequest{
-		Model:        "gpt-5.5",
-		Prompt:       "生成 4K 正方形封面",
-		Size:         "2880x2880",
-		Quality:      "high",
-		OutputFormat: "png",
+		Model:             "gpt-5.5",
+		Prompt:            "生成 4K 正方形封面",
+		Size:              "2880x2880",
+		Quality:           "high",
+		OutputFormat:      "jpeg",
+		OutputCompression: ptrInt(28),
 	}.Normalized()
 	payload := CodexResponsesImageToolPayload(request)
 	tools := payload["tools"].([]map[string]any)
@@ -395,6 +403,12 @@ func TestCodexResponsesImageToolPayloadCarriesExactSize(t *testing.T) {
 	}
 	if tool["quality"] != "high" {
 		t.Fatalf("tool quality = %#v, want high", tool["quality"])
+	}
+	if tool["output_format"] != "jpeg" {
+		t.Fatalf("tool output_format = %#v, want jpeg", tool["output_format"])
+	}
+	if tool["output_compression"] != 28 {
+		t.Fatalf("tool output_compression = %#v, want 28", tool["output_compression"])
 	}
 	if tool["model"] != nil {
 		t.Fatalf("text-model request should not set image tool model: %#v", tool["model"])
@@ -531,6 +545,22 @@ func TestHandleImageGenerationsValidatesPromptAndCount(t *testing.T) {
 				t.Fatalf("HTTPError = %#v, want status 400 message %q", httpErr, tc.want)
 			}
 		})
+	}
+}
+
+func TestApplyImageOutputOptionsToRequest(t *testing.T) {
+	jpegRequest := ConversationRequest{}
+	applyImageOutputOptionsToRequest(&jpegRequest, ImageOutputOptions{Format: "jpeg", Compression: ptrInt(25)})
+	jpegRequest = jpegRequest.Normalized()
+	if jpegRequest.OutputFormat != "jpeg" || jpegRequest.OutputCompression == nil || *jpegRequest.OutputCompression != 25 {
+		t.Fatalf("jpeg output options = %#v/%#v, want jpeg/25", jpegRequest.OutputFormat, jpegRequest.OutputCompression)
+	}
+
+	pngRequest := ConversationRequest{}
+	applyImageOutputOptionsToRequest(&pngRequest, ImageOutputOptions{Format: "png", Compression: ptrInt(25)})
+	pngRequest = pngRequest.Normalized()
+	if pngRequest.OutputFormat != "png" || pngRequest.OutputCompression != nil {
+		t.Fatalf("png output options = %#v/%#v, want png/nil", pngRequest.OutputFormat, pngRequest.OutputCompression)
 	}
 }
 

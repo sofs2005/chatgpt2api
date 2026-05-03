@@ -78,12 +78,24 @@ export function supportsImageQuality(model: ImageModel) {
 }
 
 export type ImageQuality = "low" | "medium" | "high";
+export type ImageOutputFormat = "png" | "jpeg" | "webp";
 export type ImageVisibility = "private" | "public";
 
 const IMAGE_QUALITY_VALUES = new Set<string>(["low", "medium", "high"]);
+const IMAGE_OUTPUT_FORMAT_VALUES = new Set<string>(["png", "jpeg", "webp"]);
+
+export const IMAGE_OUTPUT_FORMAT_OPTIONS = [
+  { value: "png", label: "PNG" },
+  { value: "jpeg", label: "JPEG" },
+  { value: "webp", label: "WebP" },
+] as const satisfies ReadonlyArray<{ value: ImageOutputFormat; label: string }>;
 
 export function isImageQuality(value: unknown): value is ImageQuality {
   return typeof value === "string" && IMAGE_QUALITY_VALUES.has(value);
+}
+
+export function isImageOutputFormat(value: unknown): value is ImageOutputFormat {
+  return typeof value === "string" && IMAGE_OUTPUT_FORMAT_VALUES.has(value);
 }
 
 export type AuthRole = "admin" | "user";
@@ -296,6 +308,7 @@ export type CreationTaskData = {
   width?: number;
   height?: number;
   resolution?: string;
+  output_format?: ImageOutputFormat;
 };
 
 export type CreationTask = {
@@ -305,6 +318,8 @@ export type CreationTask = {
   model?: ImageModel;
   size?: string;
   quality?: ImageQuality;
+  output_format?: ImageOutputFormat;
+  output_compression?: number;
   created_at: string;
   updated_at: string;
   data?: CreationTaskData[];
@@ -653,6 +668,8 @@ export async function createImageGenerationTask(
   messages?: CreationTaskMessage[],
   visibility: ImageVisibility = "private",
   imageResolution?: string,
+  outputFormat?: ImageOutputFormat,
+  outputCompression?: number,
 ) {
   return httpRequest<CreationTask>("/api/creation-tasks/image-generations", {
     method: "POST",
@@ -663,6 +680,8 @@ export async function createImageGenerationTask(
       ...(size ? { size } : {}),
       ...(imageResolution ? { image_resolution: imageResolution } : {}),
       ...(quality ? { quality } : {}),
+      ...(outputFormat ? { output_format: outputFormat } : {}),
+      ...(typeof outputCompression === "number" ? { output_compression: outputCompression } : {}),
       ...(messages?.length ? { messages } : {}),
       visibility,
       n: count,
@@ -681,6 +700,8 @@ export async function createResponseImageGenerationTask(
   images?: string[],
   visibility: ImageVisibility = "private",
   imageResolution?: string,
+  outputFormat?: ImageOutputFormat,
+  outputCompression?: number,
 ) {
   return httpRequest<CreationTask>("/api/creation-tasks/response-image-generations", {
     method: "POST",
@@ -691,6 +712,8 @@ export async function createResponseImageGenerationTask(
       ...(size ? { size } : {}),
       ...(imageResolution ? { image_resolution: imageResolution } : {}),
       ...(quality ? { quality } : {}),
+      ...(outputFormat ? { output_format: outputFormat } : {}),
+      ...(typeof outputCompression === "number" ? { output_compression: outputCompression } : {}),
       ...(messages?.length ? { messages } : {}),
       ...(images?.length ? { images } : {}),
       visibility,
@@ -710,6 +733,8 @@ export async function createImageEditTask(
   messages?: CreationTaskMessage[],
   visibility: ImageVisibility = "private",
   imageResolution?: string,
+  outputFormat?: ImageOutputFormat,
+  outputCompression?: number,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -730,6 +755,12 @@ export async function createImageEditTask(
   }
   if (quality) {
     formData.append("quality", quality);
+  }
+  if (outputFormat) {
+    formData.append("output_format", outputFormat);
+  }
+  if (typeof outputCompression === "number") {
+    formData.append("output_compression", String(outputCompression));
   }
   if (messages?.length) {
     formData.append("messages", JSON.stringify(messages));

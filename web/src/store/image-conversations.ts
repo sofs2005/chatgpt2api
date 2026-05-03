@@ -8,8 +8,10 @@ import {
   isChatModel,
   isImageCreationModel,
   isImageModel,
+  isImageOutputFormat,
   isImageQuality,
   type ImageModel,
+  type ImageOutputFormat,
   type ImageQuality,
   type ImageVisibility,
 } from "@/lib/api";
@@ -37,6 +39,7 @@ export type StoredImage = {
   width?: number;
   height?: number;
   resolution?: string;
+  outputFormat?: ImageOutputFormat;
   revised_prompt?: string;
   error?: string;
   text_response?: string;
@@ -63,6 +66,8 @@ export type ImageTurn = {
   size: string;
   sizeSelection?: StoredImageSizeSelection;
   quality?: ImageQuality;
+  outputFormat?: ImageOutputFormat;
+  outputCompression?: number;
   visibility?: ImageVisibility;
   images: StoredImage[];
   createdAt: string;
@@ -137,6 +142,7 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
     width: Number.isFinite(width) && width > 0 ? width : undefined,
     height: Number.isFinite(height) && height > 0 ? height : undefined,
     resolution,
+    outputFormat: isImageOutputFormat(image.outputFormat) ? image.outputFormat : undefined,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
     text_response: typeof image.text_response === "string" && image.text_response ? image.text_response : undefined,
   };
@@ -202,6 +208,17 @@ function normalizeSizeSelection(value: unknown): StoredImageSizeSelection | unde
     return undefined;
   }
   return selection;
+}
+
+function normalizeOutputCompression(value: unknown): number | undefined {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return undefined;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return undefined;
+  }
+  return Math.min(100, Math.round(numeric));
 }
 
 function dataUrlMimeType(dataUrl: string) {
@@ -277,6 +294,8 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     size: typeof turn.size === "string" ? turn.size : "",
     ...(sizeSelection ? { sizeSelection } : {}),
     quality: isImageQuality(turn.quality) ? turn.quality : undefined,
+    outputFormat: isImageOutputFormat(turn.outputFormat) ? turn.outputFormat : undefined,
+    outputCompression: normalizeOutputCompression(turn.outputCompression),
     visibility,
     images,
     createdAt: String(turn.createdAt || new Date().toISOString()),
@@ -312,6 +331,8 @@ function normalizeConversation(conversation: ImageConversation & Record<string, 
           count: Number(conversation.count || 1),
           size: typeof conversation.size === "string" ? conversation.size : "",
           quality: isImageQuality(conversation.quality) ? conversation.quality : undefined,
+          outputFormat: isImageOutputFormat(conversation.outputFormat) ? conversation.outputFormat : undefined,
+          outputCompression: normalizeOutputCompression(conversation.outputCompression),
           images: Array.isArray(conversation.images) ? (conversation.images as StoredImage[]) : [],
           createdAt: String(conversation.createdAt || new Date().toISOString()),
           status:

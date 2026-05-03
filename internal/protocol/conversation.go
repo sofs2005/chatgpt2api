@@ -1,12 +1,17 @@
 package protocol
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +23,8 @@ import (
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
+
+	"github.com/HugoSmits86/nativewebp"
 )
 
 type ImageConfig interface {
@@ -49,6 +56,7 @@ type ConversationRequest struct {
 	Size               string
 	Quality            string
 	OutputFormat       string
+	OutputCompression  *int
 	ResponseFormat     string
 	BaseURL            string
 	OwnerID            string
@@ -61,6 +69,18 @@ type ConversationRequest struct {
 func (r ConversationRequest) Normalized() ConversationRequest {
 	r.Size = NormalizeImageGenerationSize(r.Size)
 	r.Quality = ImageQualityForModel(r.Model, r.Quality)
+	r.OutputFormat = NormalizeImageOutputFormat(r.OutputFormat)
+	if r.OutputFormat == "png" {
+		r.OutputCompression = nil
+	} else if r.OutputCompression != nil {
+		compression := *r.OutputCompression
+		if compression < 0 {
+			compression = 0
+		} else if compression > 100 {
+			compression = 100
+		}
+		r.OutputCompression = &compression
+	}
 	r.RequirePaidAccount = r.RequirePaidAccount || RequiresPaidImageSize(r.Size)
 	return r
 }
@@ -70,6 +90,41 @@ func ImageQualityForModel(model, quality string) string {
 		return ""
 	}
 	return strings.TrimSpace(quality)
+}
+
+func NormalizeImageOutputFormat(format string) string {
+	return service.NormalizeImageOutputFormat(format)
+}
+
+type ImageOutputOptions struct {
+	Format      string
+	Compression *int
+}
+
+func ImageOutputOptionsFromPayload(payload map[string]any) ImageOutputOptions {
+	format := NormalizeImageOutputFormat(util.Clean(payload["output_format"]))
+	options := ImageOutputOptions{Format: format}
+	if format == "png" {
+		return options
+	}
+	if compression, ok := normalizedImageOutputCompression(payload["output_compression"]); ok {
+		options.Compression = &compression
+	}
+	return options
+}
+
+func normalizedImageOutputCompression(value any) (int, bool) {
+	if value == nil || strings.TrimSpace(util.Clean(value)) == "" {
+		return 0, false
+	}
+	compression := util.ToInt(value, -1)
+	if compression < 0 {
+		return 0, false
+	}
+	if compression > 100 {
+		compression = 100
+	}
+	return compression, true
 }
 
 func (r ConversationRequest) SupportsImageGenerationModel() bool {
@@ -474,10 +529,10 @@ func (e *Engine) StreamImageOutputs(ctx context.Context, client *backend.Client,
 			}
 			var imageItems []map[string]any
 			for _, data := range bytesItems {
-				imageItems = append(imageItems, map[string]any{"b64_json": base64.StdEncoding.EncodeToString(data)})
+				imageItems = append(imageItems, map[string]any{"b64_json": base64.StdEncoding.EncodeToString(data), "output_format": NormalizeImageOutputFormat(request.OutputFormat)})
 			}
 			created := time.Now().Unix()
-			result := e.FormatImageResult(imageItems, request.Prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, request.OwnerName, created, "")
+			result := e.FormatImageResultWithOptions(imageItems, request.Prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, request.OwnerName, created, "", ImageOutputOptions{Format: request.OutputFormat, Compression: request.OutputCompression})
 			data := util.AsMapSlice(result["data"])
 			if len(data) > 0 {
 				out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: created, Data: data}
@@ -558,7 +613,7 @@ func (e *Engine) StreamResponsesImageToolOutputs(ctx context.Context, client *ba
 			return
 		}
 		if len(imageItems) > 0 {
-			result := e.FormatImageResult(imageItems, request.Prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, request.OwnerName, created, "")
+			result := e.FormatImageResultWithOptions(imageItems, request.Prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, request.OwnerName, created, "", ImageOutputOptions{Format: request.OutputFormat, Compression: request.OutputCompression})
 			data := util.AsMapSlice(result["data"])
 			if len(data) > 0 {
 				out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: created, Data: data}
@@ -596,6 +651,9 @@ func CodexResponsesImageToolPayload(request ConversationRequest) map[string]any 
 	}
 	if quality := strings.TrimSpace(request.Quality); quality != "" && util.Clean(tool["model"]) != util.ImageModelCodex {
 		tool["quality"] = quality
+	}
+	if request.OutputCompression != nil && util.Clean(tool["output_format"]) != "png" {
+		tool["output_compression"] = *request.OutputCompression
 	}
 
 	return map[string]any{
@@ -827,6 +885,11 @@ func (e *Engine) CollectImageOutputs(outputs <-chan ImageOutput, errCh <-chan er
 }
 
 func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseFormat, baseURL, ownerID, ownerName string, created int64, message string) map[string]any {
+	return e.FormatImageResultWithOptions(items, prompt, responseFormat, baseURL, ownerID, ownerName, created, message, ImageOutputOptions{})
+}
+
+func (e *Engine) FormatImageResultWithOptions(items []map[string]any, prompt, responseFormat, baseURL, ownerID, ownerName string, created int64, message string, options ImageOutputOptions) map[string]any {
+	defaultFormat := NormalizeImageOutputFormat(options.Format)
 	var data []map[string]any
 	for _, item := range items {
 		b64 := util.Clean(item["b64_json"])
@@ -838,12 +901,27 @@ func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseForma
 		if err != nil {
 			continue
 		}
-		urlValue := e.SaveImageBytesForOwner(imageBytes, baseURL, ownerID, ownerName)
-		if responseFormat == "b64_json" {
-			data = append(data, map[string]any{"b64_json": b64, "url": urlValue, "revised_prompt": revised})
-		} else {
-			data = append(data, map[string]any{"url": urlValue, "revised_prompt": revised})
+		itemOptions := options
+		if itemFormat := strings.TrimSpace(util.Clean(item["output_format"])); itemFormat != "" {
+			itemOptions.Format = NormalizeImageOutputFormat(itemFormat)
 		}
+		if itemOptions.Format == "" {
+			itemOptions.Format = defaultFormat
+		}
+		if compression, ok := normalizedImageOutputCompression(item["output_compression"]); ok {
+			itemOptions.Compression = &compression
+		}
+		imageBytes, err = encodeImageBytes(imageBytes, itemOptions)
+		if err != nil {
+			continue
+		}
+		outputFormat := NormalizeImageOutputFormat(itemOptions.Format)
+		urlValue := e.SaveImageBytesForOwnerWithFormat(imageBytes, baseURL, ownerID, ownerName, outputFormat)
+		responseItem := map[string]any{"url": urlValue, "revised_prompt": revised, "output_format": outputFormat}
+		if responseFormat == "b64_json" {
+			responseItem["b64_json"] = base64.StdEncoding.EncodeToString(imageBytes)
+		}
+		data = append(data, responseItem)
 	}
 	if created == 0 {
 		created = time.Now().Unix()
@@ -860,9 +938,14 @@ func (e *Engine) SaveImageBytes(imageData []byte, baseURL string) string {
 }
 
 func (e *Engine) SaveImageBytesForOwner(imageData []byte, baseURL, ownerID, ownerName string) string {
+	return e.SaveImageBytesForOwnerWithFormat(imageData, baseURL, ownerID, ownerName, "png")
+}
+
+func (e *Engine) SaveImageBytesForOwnerWithFormat(imageData []byte, baseURL, ownerID, ownerName, outputFormat string) string {
+	outputFormat = NormalizeImageOutputFormat(outputFormat)
 	e.Config.CleanupOldImages()
 	sum := md5.Sum(imageData)
-	filename := fmt.Sprintf("%d_%s.png", time.Now().Unix(), hex.EncodeToString(sum[:]))
+	filename := fmt.Sprintf("%d_%s.%s", time.Now().Unix(), hex.EncodeToString(sum[:]), imageFileExtension(outputFormat))
 	relativeDir := filepath.Join(time.Now().Format("2006"), time.Now().Format("01"), time.Now().Format("02"))
 	rel := filepath.Join(relativeDir, filename)
 	filePath := filepath.Join(e.Config.ImagesDir(), rel)
@@ -873,6 +956,72 @@ func (e *Engine) SaveImageBytesForOwner(imageData []byte, baseURL, ownerID, owne
 		baseURL = e.Config.BaseURL()
 	}
 	return strings.TrimRight(baseURL, "/") + "/images/" + filepath.ToSlash(rel)
+}
+
+func imageFileExtension(outputFormat string) string {
+	if NormalizeImageOutputFormat(outputFormat) == "jpeg" {
+		return "jpg"
+	}
+	return NormalizeImageOutputFormat(outputFormat)
+}
+
+func encodeImageBytes(data []byte, options ImageOutputOptions) ([]byte, error) {
+	format := NormalizeImageOutputFormat(options.Format)
+	if format == "png" {
+		return data, nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	switch format {
+	case "jpeg":
+		quality := 90
+		if options.Compression != nil {
+			quality = 100 - *options.Compression
+			if quality < 1 {
+				quality = 1
+			} else if quality > 100 {
+				quality = 100
+			}
+		}
+		if err := jpeg.Encode(&buf, flattenAlpha(img), &jpeg.Options{Quality: quality}); err != nil {
+			return nil, err
+		}
+	case "webp":
+		if err := nativewebp.Encode(&buf, img, nil); err != nil {
+			return nil, err
+		}
+	default:
+		if err := png.Encode(&buf, img); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func flattenAlpha(img image.Image) image.Image {
+	bounds := img.Bounds()
+	out := image.NewRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			alpha := int(a)
+			out.Set(x, y, color.RGBA{
+				R: blendOverWhite(int(r), alpha),
+				G: blendOverWhite(int(g), alpha),
+				B: blendOverWhite(int(b), alpha),
+				A: 255,
+			})
+		}
+	}
+	return out
+}
+
+func blendOverWhite(channel, alpha int) uint8 {
+	value := (channel*alpha + 0xffff*(0xffff-alpha)) / 0xffff
+	return uint8(value >> 8)
 }
 
 func (e *Engine) writeImageOwnerMetadata(rel, ownerID, ownerName string) {

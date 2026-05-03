@@ -471,7 +471,7 @@ func TestResponsesImageTaskRouteBuildsTaskPayload(t *testing.T) {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
 
-	body := `{"client_task_id":"response-image-route","prompt":"生成封面","model":"gpt-5.5","size":"2048x2048","image_resolution":"2k","quality":"high","n":2,"images":["data:image/png;base64,cG5n"],"messages":[{"role":"user","content":"生成封面"}],"visibility":"public"}`
+	body := `{"client_task_id":"response-image-route","prompt":"生成封面","model":"gpt-5.5","size":"2048x2048","image_resolution":"2k","quality":"high","output_format":"jpeg","output_compression":42,"n":2,"images":["data:image/png;base64,cG5n"],"messages":[{"role":"user","content":"生成封面"}],"visibility":"public"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/creation-tasks/response-image-generations", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 	res := httptest.NewRecorder()
@@ -486,10 +486,16 @@ func TestResponsesImageTaskRouteBuildsTaskPayload(t *testing.T) {
 	if task["mode"] != "response-image" || task["model"] != "gpt-5.5" || task["quality"] != "high" || task["visibility"] != "public" {
 		t.Fatalf("unexpected submitted task = %#v", task)
 	}
+	if task["output_format"] != "jpeg" || util.ToInt(task["output_compression"], -1) != 42 {
+		t.Fatalf("unexpected task output options = %#v", task)
+	}
 	select {
 	case payload := <-called:
 		if payload["model"] != "gpt-5.5" || payload["quality"] != "high" {
 			t.Fatalf("unexpected response image payload = %#v", payload)
+		}
+		if payload["output_format"] != "jpeg" || util.ToInt(payload["output_compression"], -1) != 42 {
+			t.Fatalf("unexpected response image output options = %#v", payload)
 		}
 		if images, ok := payload["images"].([]any); !ok || len(images) != 1 {
 			t.Fatalf("payload images = %#v", payload["images"])
@@ -590,10 +596,12 @@ func TestResponsesImageTaskTextOutputError(t *testing.T) {
 
 func TestResponseImageTaskBodyPassesSizeToImageTool(t *testing.T) {
 	body := responseImageTaskBody(map[string]any{
-		"prompt":  "生成 4K 正方形封面",
-		"model":   "gpt-5.5",
-		"size":    "2880x2880",
-		"quality": "high",
+		"prompt":             "生成 4K 正方形封面",
+		"model":              "gpt-5.5",
+		"size":               "2880x2880",
+		"quality":            "high",
+		"output_format":      "webp",
+		"output_compression": 35,
 	})
 	tools := body["tools"].([]map[string]any)
 	if len(tools) != 1 {
@@ -606,8 +614,28 @@ func TestResponseImageTaskBodyPassesSizeToImageTool(t *testing.T) {
 	if tool["quality"] != "high" {
 		t.Fatalf("tool quality = %#v, want high", tool["quality"])
 	}
+	if tool["output_format"] != "webp" {
+		t.Fatalf("tool output_format = %#v, want webp", tool["output_format"])
+	}
+	if tool["output_compression"] != 35 {
+		t.Fatalf("tool output_compression = %#v, want 35", tool["output_compression"])
+	}
+}
+
+func TestResponseImageTaskBodyOmitsPngCompression(t *testing.T) {
+	body := responseImageTaskBody(map[string]any{
+		"prompt":             "生成封面",
+		"model":              "gpt-5.5",
+		"output_format":      "png",
+		"output_compression": 35,
+	})
+	tools := body["tools"].([]map[string]any)
+	tool := tools[0]
 	if tool["output_format"] != "png" {
 		t.Fatalf("tool output_format = %#v, want png", tool["output_format"])
+	}
+	if _, ok := tool["output_compression"]; ok {
+		t.Fatalf("png tool should omit output_compression: %#v", tool)
 	}
 }
 

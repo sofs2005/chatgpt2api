@@ -27,6 +27,11 @@ const (
 
 type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
 
+type ImageOutputOptions struct {
+	Format      string
+	Compression *int
+}
+
 type ImageTaskService struct {
 	mu                  sync.RWMutex
 	path                string
@@ -119,6 +124,10 @@ func (s *ImageTaskService) SubmitGenerationWithMetadata(ctx context.Context, ide
 	return s.submitImageWithMetadata(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, "generate", nil, visibilityValues...)
 }
 
+func (s *ImageTaskService) SubmitGenerationWithOptions(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, n int, messages any, metadata map[string]any, options ImageOutputOptions, visibilityValues ...string) (map[string]any, error) {
+	return s.submitImageWithMetadataAndOptions(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, "generate", nil, options, visibilityValues...)
+}
+
 func (s *ImageTaskService) SubmitResponseImageGeneration(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, images any, n int, messages any, visibilityValues ...string) (map[string]any, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -137,6 +146,10 @@ func (s *ImageTaskService) SubmitResponseImageGeneration(ctx context.Context, id
 
 func (s *ImageTaskService) SubmitResponseImageGenerationWithMetadata(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, images any, n int, messages any, metadata map[string]any, visibilityValues ...string) (map[string]any, error) {
 	return s.submitImageWithMetadata(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, "response-image", images, visibilityValues...)
+}
+
+func (s *ImageTaskService) SubmitResponseImageGenerationWithOptions(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, images any, n int, messages any, metadata map[string]any, options ImageOutputOptions, visibilityValues ...string) (map[string]any, error) {
+	return s.submitImageWithMetadataAndOptions(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, "response-image", images, options, visibilityValues...)
 }
 
 func (s *ImageTaskService) SubmitEdit(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, images any, n int, messages any, visibilityValues ...string) (map[string]any, error) {
@@ -159,6 +172,10 @@ func (s *ImageTaskService) SubmitEditWithMetadata(ctx context.Context, identity 
 	return s.submitImageWithMetadata(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, "edit", images, visibilityValues...)
 }
 
+func (s *ImageTaskService) SubmitEditWithOptions(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, images any, n int, messages any, metadata map[string]any, options ImageOutputOptions, visibilityValues ...string) (map[string]any, error) {
+	return s.submitImageWithMetadataAndOptions(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, "edit", images, options, visibilityValues...)
+}
+
 func (s *ImageTaskService) SubmitChat(ctx context.Context, identity Identity, clientTaskID, prompt, model string, messages any) (map[string]any, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -172,6 +189,10 @@ func (s *ImageTaskService) SubmitChat(ctx context.Context, identity Identity, cl
 }
 
 func (s *ImageTaskService) submitImageWithMetadata(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, n int, messages any, metadata map[string]any, mode string, images any, visibilityValues ...string) (map[string]any, error) {
+	return s.submitImageWithMetadataAndOptions(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, mode, images, ImageOutputOptions{}, visibilityValues...)
+}
+
+func (s *ImageTaskService) submitImageWithMetadataAndOptions(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, n int, messages any, metadata map[string]any, mode string, images any, options ImageOutputOptions, visibilityValues ...string) (map[string]any, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
@@ -188,6 +209,7 @@ func (s *ImageTaskService) submitImageWithMetadata(ctx context.Context, identity
 		payload["messages"] = messages
 	}
 	mergeImageTaskMetadata(payload, metadata)
+	mergeImageOutputOptions(payload, options)
 	return s.submit(ctx, identity, clientTaskID, mode, payload)
 }
 
@@ -286,7 +308,10 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 		return nil, err
 	}
 	taskCtx, cancel := context.WithCancel(context.Background())
-	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
+	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": NormalizeImageOutputFormat(util.Clean(payload["output_format"])), "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
+	if compression, ok := normalizedImageOutputCompressionValue(payload["output_compression"]); ok {
+		task["output_compression"] = compression
+	}
 	s.tasks[key] = task
 	s.cancels[key] = cancel
 	_ = s.saveLocked()
@@ -536,7 +561,10 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 		}
 		count := taskCount(mode, task)
 		visibility, _ := NormalizeImageVisibility(util.Clean(task["visibility"]))
-		normalized := map[string]any{"id": id, "owner_id": owner, "status": status, "mode": mode, "model": firstNonEmpty(util.Clean(task["model"]), util.ImageModelAuto), "size": util.Clean(task["size"]), "quality": util.Clean(task["quality"]), "visibility": visibility, "count": count, "created_at": firstNonEmpty(util.Clean(task["created_at"]), util.NowLocal()), "updated_at": firstNonEmpty(util.Clean(task["updated_at"]), util.Clean(task["created_at"]), util.NowLocal())}
+		normalized := map[string]any{"id": id, "owner_id": owner, "status": status, "mode": mode, "model": firstNonEmpty(util.Clean(task["model"]), util.ImageModelAuto), "size": util.Clean(task["size"]), "quality": util.Clean(task["quality"]), "output_format": NormalizeImageOutputFormat(util.Clean(task["output_format"])), "visibility": visibility, "count": count, "created_at": firstNonEmpty(util.Clean(task["created_at"]), util.NowLocal()), "updated_at": firstNonEmpty(util.Clean(task["updated_at"]), util.Clean(task["created_at"]), util.NowLocal())}
+		if compression, ok := normalizedImageOutputCompressionValue(task["output_compression"]); ok {
+			normalized["output_compression"] = compression
+		}
 		if data := util.AsMapSlice(task["data"]); data != nil {
 			normalized["data"] = data
 		}
@@ -613,6 +641,12 @@ func publicTask(task map[string]any) map[string]any {
 	if quality := util.Clean(task["quality"]); quality != "" {
 		item["quality"] = quality
 	}
+	if format := NormalizeImageOutputFormat(util.Clean(task["output_format"])); format != "" {
+		item["output_format"] = format
+	}
+	if compression, ok := normalizedImageOutputCompressionValue(task["output_compression"]); ok {
+		item["output_compression"] = compression
+	}
 	if task["data"] != nil {
 		item["data"] = task["data"]
 	}
@@ -683,6 +717,52 @@ func mergeImageTaskMetadata(payload map[string]any, metadata map[string]any) {
 	if requestedSize := strings.TrimSpace(util.Clean(metadata["requested_size"])); requestedSize != "" {
 		payload["requested_size"] = requestedSize
 	}
+}
+
+func mergeImageOutputOptions(payload map[string]any, options ImageOutputOptions) {
+	format := NormalizeImageOutputFormat(options.Format)
+	if format == "" {
+		return
+	}
+	payload["output_format"] = format
+	if format == "png" || options.Compression == nil {
+		delete(payload, "output_compression")
+		return
+	}
+	compression := *options.Compression
+	if compression < 0 {
+		compression = 0
+	} else if compression > 100 {
+		compression = 100
+	}
+	payload["output_compression"] = compression
+}
+
+func NormalizeImageOutputFormat(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "png":
+		return "png"
+	case "jpg", "jpeg":
+		return "jpeg"
+	case "webp":
+		return "webp"
+	default:
+		return "png"
+	}
+}
+
+func normalizedImageOutputCompressionValue(value any) (int, bool) {
+	if value == nil || strings.TrimSpace(util.Clean(value)) == "" {
+		return 0, false
+	}
+	compression := util.ToInt(value, -1)
+	if compression < 0 {
+		return 0, false
+	}
+	if compression > 100 {
+		compression = 100
+	}
+	return compression, true
 }
 
 func storedTaskCount(task map[string]any) int {

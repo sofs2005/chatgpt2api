@@ -50,7 +50,7 @@ type ImageResultsProps = {
 
 function getStoredImageSrc(image: StoredImage) {
   if (image.b64_json) {
-    return `data:image/png;base64,${image.b64_json}`;
+    return `data:image/${image.outputFormat || "png"};base64,${image.b64_json}`;
   }
   return image.url || "";
 }
@@ -126,11 +126,16 @@ function blurFocusedElementInContainer(container: HTMLElement) {
   }
 }
 
-function buildDownloadName(createdAt: string, turnId: string, index: number) {
+function imageExtension(outputFormat?: string) {
+  return outputFormat === "jpeg" ? "jpg" : outputFormat || "png";
+}
+
+function buildDownloadName(createdAt: string, turnId: string, index: number, outputFormat?: string) {
   const date = new Date(createdAt);
   const safeIndex = String(index + 1).padStart(2, "0");
+  const extension = imageExtension(outputFormat);
   if (Number.isNaN(date.getTime())) {
-    return `chatgpt-image-${turnId.slice(0, 8)}-${safeIndex}.png`;
+    return `chatgpt-image-${turnId.slice(0, 8)}-${safeIndex}.${extension}`;
   }
 
   const yyyy = String(date.getFullYear());
@@ -139,7 +144,7 @@ function buildDownloadName(createdAt: string, turnId: string, index: number) {
   const hh = String(date.getHours()).padStart(2, "0");
   const min = String(date.getMinutes()).padStart(2, "0");
   const sec = String(date.getSeconds()).padStart(2, "0");
-  return `chatgpt-image-${yyyy}${mm}${dd}-${hh}${min}${sec}-${safeIndex}.png`;
+  return `chatgpt-image-${yyyy}${mm}${dd}-${hh}${min}${sec}-${safeIndex}.${extension}`;
 }
 
 async function downloadImage(image: DownloadableImage) {
@@ -344,7 +349,7 @@ export function ImageResults({
                   id: image.id,
                   selectionKey: imageSelectionKey(selectedConversation.id, turn.id, image.id),
                   src,
-                  fileName: buildDownloadName(turn.createdAt, turn.id, index),
+                  fileName: buildDownloadName(turn.createdAt, turn.id, index, image.outputFormat || turn.outputFormat),
                   imageIndex: index,
                 },
               ]
@@ -526,6 +531,12 @@ export function ImageResults({
                       {resultSizeLabel ? <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{resultSizeLabel}</span> : null}
                       {turn.quality ? (
                         <span className="rounded-full bg-[#f0f0f0] px-3 py-1">Quality {turn.quality}</span>
+                      ) : null}
+                      {turn.outputFormat ? (
+                        <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{turn.outputFormat.toUpperCase()}</span>
+                      ) : null}
+                      {turn.outputCompression != null && turn.outputFormat && turn.outputFormat !== "png" ? (
+                        <span className="rounded-full bg-[#f0f0f0] px-3 py-1">压缩 {turn.outputCompression}</span>
                       ) : null}
                       {outcomeLabel ? <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{outcomeLabel}</span> : null}
                       <span className={cn("rounded-full px-3 py-1", getStatusChipClass(turn.status))}>

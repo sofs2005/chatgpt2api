@@ -940,15 +940,17 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 		return nil, nil, err
 	}
 	body := map[string]any{
-		"client_task_id":  firstForm(r.MultipartForm, "client_task_id"),
-		"prompt":          firstForm(r.MultipartForm, "prompt"),
-		"model":           firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
-		"n":               util.ToInt(firstForm(r.MultipartForm, "n"), 1),
-		"size":            firstForm(r.MultipartForm, "size"),
-		"quality":         firstForm(r.MultipartForm, "quality"),
-		"visibility":      firstForm(r.MultipartForm, "visibility"),
-		"response_format": firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
-		"stream":          util.ToBool(firstForm(r.MultipartForm, "stream")),
+		"client_task_id":     firstForm(r.MultipartForm, "client_task_id"),
+		"prompt":             firstForm(r.MultipartForm, "prompt"),
+		"model":              firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
+		"n":                  util.ToInt(firstForm(r.MultipartForm, "n"), 1),
+		"size":               firstForm(r.MultipartForm, "size"),
+		"quality":            firstForm(r.MultipartForm, "quality"),
+		"output_format":      firstForm(r.MultipartForm, "output_format"),
+		"output_compression": firstForm(r.MultipartForm, "output_compression"),
+		"visibility":         firstForm(r.MultipartForm, "visibility"),
+		"response_format":    firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
+		"stream":             util.ToBool(firstForm(r.MultipartForm, "stream")),
 	}
 	if rawMessages := strings.TrimSpace(firstForm(r.MultipartForm, "messages")); rawMessages != "" {
 		var messages any
@@ -1130,6 +1132,7 @@ func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility, service.GeneratedImageMetadata{
 		ResolutionPreset: util.Clean(payload["image_resolution"]),
 		RequestedSize:    util.Clean(payload["size"]),
+		OutputFormat:     service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
 	})
 }
 
@@ -1243,7 +1246,12 @@ func responseImageTaskBody(payload map[string]any) map[string]any {
 		"type":          "image_generation",
 		"action":        responseImageTaskAction(images),
 		"size":          firstNonEmpty(util.Clean(payload["size"]), "auto"),
-		"output_format": "png",
+		"output_format": service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
+	}
+	if util.Clean(tool["output_format"]) != "png" {
+		if compression, ok := imageOutputCompressionFromBody(payload["output_compression"]); ok {
+			tool["output_compression"] = compression
+		}
 	}
 	if quality := util.Clean(payload["quality"]); quality != "" && util.Clean(payload["model"]) != util.ImageModelCodex {
 		tool["quality"] = quality
@@ -1301,7 +1309,7 @@ func responseImageTaskInstructions(messages []map[string]any, prompt string) str
 func responsesImageTaskResult(engine *protocol.Engine, completed map[string]any, payload map[string]any) map[string]any {
 	created := int64(util.ToInt(completed["created_at"], int(time.Now().Unix())))
 	items := responseImageOutputItems(completed["output"])
-	return engine.FormatImageResult(items, util.Clean(payload["prompt"]), util.Clean(payload["response_format"]), util.Clean(payload["base_url"]), util.Clean(payload["owner_id"]), util.Clean(payload["owner_name"]), created, "")
+	return engine.FormatImageResultWithOptions(items, util.Clean(payload["prompt"]), util.Clean(payload["response_format"]), util.Clean(payload["base_url"]), util.Clean(payload["owner_id"]), util.Clean(payload["owner_name"]), created, "", protocol.ImageOutputOptionsFromPayload(payload))
 }
 
 func responseImageOutputItems(output any) []map[string]any {

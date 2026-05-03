@@ -43,7 +43,7 @@ import {
   type ImageResolution,
   type ImageSizeMode,
 } from "@/app/image/image-options";
-import type { ImageModel, ImageQuality } from "@/lib/api";
+import { IMAGE_OUTPUT_FORMAT_OPTIONS, type ImageModel, type ImageOutputFormat, type ImageQuality } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ImageComposerProps = {
@@ -60,6 +60,8 @@ type ImageComposerProps = {
   imageCustomHeight: string;
   imageQuality: ImageQuality;
   imageQualityOptions: ReadonlyArray<{ value: ImageQuality; label: string; description: string }>;
+  imageOutputFormat: ImageOutputFormat;
+  imageOutputCompression: string;
   imageOutputHint: ReactNode;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
@@ -75,6 +77,8 @@ type ImageComposerProps = {
   onImageCustomWidthChange: (value: string) => void;
   onImageCustomHeightChange: (value: string) => void;
   onImageQualityChange: (value: ImageQuality) => void;
+  onImageOutputFormatChange: (value: ImageOutputFormat) => void;
+  onImageOutputCompressionChange: (value: string) => void;
   onSubmit: () => void | Promise<void>;
   onOpenPromptMarket: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
@@ -143,6 +147,8 @@ export function ImageComposer({
   imageCustomHeight,
   imageQuality,
   imageQualityOptions,
+  imageOutputFormat,
+  imageOutputCompression,
   imageOutputHint,
   referenceImages,
   textareaRef,
@@ -158,6 +164,8 @@ export function ImageComposer({
   onImageCustomWidthChange,
   onImageCustomHeightChange,
   onImageQualityChange,
+  onImageOutputFormatChange,
+  onImageOutputCompressionChange,
   onSubmit,
   onOpenPromptMarket,
   onReferenceImageChange,
@@ -195,6 +203,9 @@ export function ImageComposer({
     IMAGE_RESOLUTION_OPTIONS.find((option) => option.value === imageResolution)?.label || "Auto";
   const imageQualityLabel =
     imageQualityOptions.find((option) => option.value === imageQuality)?.label || imageQuality;
+  const imageOutputFormatLabel =
+    IMAGE_OUTPUT_FORMAT_OPTIONS.find((option) => option.value === imageOutputFormat)?.label || imageOutputFormat.toUpperCase();
+  const compressionDisabled = imageOutputFormat === "png";
   const supportsQuality = imageQualityOptions.length > 0;
   const submitLabel = composerMode === "chat" ? "发送对话" : referenceImages.length > 0 ? "编辑图片" : "生成图片";
   const computedImageSize = useMemo(
@@ -707,7 +718,7 @@ export function ImageComposer({
                       className="z-[70] max-h-[min(calc(100dvh-2rem),34rem)] w-[min(calc(100vw-1rem),28rem)] overflow-y-auto overflow-x-hidden rounded-[20px] border-[#e5e7eb] bg-white p-2.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] dark:border-border dark:bg-card dark:shadow-[0_24px_80px_-28px_rgba(0,0,0,0.72)] sm:w-[min(calc(100vw-2rem),28rem)] sm:overflow-visible"
                       onOpenAutoFocus={(event) => event.preventDefault()}
                     >
-                      <div className={cn("grid gap-2", supportsQuality ? "grid-cols-2 sm:grid-cols-3" : "grid-cols-2")}>
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                         <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 dark:border-border dark:bg-background/70">
                           <span className="shrink-0 text-[11px] font-medium text-[#45515e] dark:text-muted-foreground">张数</span>
                           <Input
@@ -1081,6 +1092,56 @@ export function ImageComposer({
                             ) : null}
                           </>
                         ) : null}
+                        <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70">
+                          <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">格式</span>
+                          <select
+                            value={imageOutputFormat}
+                            onChange={(event) => {
+                              const nextFormat = event.target.value as ImageOutputFormat;
+                              onImageOutputFormatChange(nextFormat);
+                              if (nextFormat === "png") {
+                                onImageOutputCompressionChange("");
+                              }
+                            }}
+                            className="h-7 min-w-0 flex-1 bg-transparent text-right text-xs font-semibold text-[#18181b] outline-none dark:text-foreground"
+                            aria-label="图片输出格式"
+                          >
+                            {IMAGE_OUTPUT_FORMAT_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <label
+                          className={cn(
+                            "flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70",
+                            compressionDisabled && "opacity-55",
+                          )}
+                          title={compressionDisabled ? "PNG 不支持压缩率参数" : "JPEG / WebP 压缩率，0-100"}
+                        >
+                          <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">压缩率</span>
+                          <Input
+                            type="number"
+                            inputMode="numeric"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={imageOutputCompression}
+                            onChange={(event) => onImageOutputCompressionChange(event.target.value)}
+                            disabled={compressionDisabled}
+                            placeholder={compressionDisabled ? "N/A" : "0-100"}
+                            className="h-7 w-[4.25rem] border-0 bg-transparent px-0 text-right text-xs font-semibold text-[#18181b] shadow-none focus-visible:ring-0 disabled:cursor-not-allowed dark:text-foreground"
+                          />
+                        </label>
+                        <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70">
+                          <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">输出</span>
+                          <span className="min-w-0 truncate text-right text-xs font-semibold text-[#18181b] dark:text-foreground">
+                            {compressionDisabled || !imageOutputCompression.trim()
+                              ? imageOutputFormatLabel
+                              : `${imageOutputFormatLabel} / ${imageOutputCompression.trim()}`}
+                          </span>
+                        </div>
                       </div>
                     </PopoverContent>
                   </Popover>

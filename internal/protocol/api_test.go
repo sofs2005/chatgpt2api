@@ -220,6 +220,55 @@ func TestResponsesInputKeepsAssistantAndGeneratedImageContext(t *testing.T) {
 	}
 }
 
+func TestResponseImageGenerationRequestUsesTextModelAndToolParams(t *testing.T) {
+	body := map[string]any{
+		"model": "gpt-5.5",
+		"input": "生成封面",
+		"tools": []any{
+			map[string]any{"type": "image_generation", "size": "16:9", "quality": "high", "output_format": "png"},
+		},
+	}
+	request, prompt, err := ResponseImageGenerationRequest(body, "linuxdo:1", nil)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
+	}
+	if prompt != "生成封面" {
+		t.Fatalf("prompt = %q, want 生成封面", prompt)
+	}
+	if request.Model != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5", request.Model)
+	}
+	if !request.ResponsesImageTool {
+		t.Fatal("ResponsesImageTool = false, want true")
+	}
+	if !request.SupportsImageGenerationModel() {
+		t.Fatal("request should support image generation with gpt-5.5 responses image tool")
+	}
+	if request.Size != "16:9" || request.Quality != "high" {
+		t.Fatalf("request size/quality = %q/%q, want 16:9/high", request.Size, request.Quality)
+	}
+	if request.ResponseFormat != "b64_json" {
+		t.Fatalf("response format = %q, want b64_json", request.ResponseFormat)
+	}
+}
+
+func TestResponseImageGenerationRequestDefaultsImageModelForAuto(t *testing.T) {
+	body := map[string]any{
+		"model": "auto",
+		"input": "生成封面",
+		"tools": []any{
+			map[string]any{"type": "image_generation"},
+		},
+	}
+	request, _, err := ResponseImageGenerationRequest(body, "", nil)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
+	}
+	if request.Model != "auto" {
+		t.Fatalf("model = %q, want auto", request.Model)
+	}
+}
+
 func TestToolCallParsing(t *testing.T) {
 	text := `先处理
 <tool_calls><tool_call><tool_name>read_file</tool_name><parameters><path><![CDATA[internal/app.go]]></path><limit>5</limit></parameters></tool_call></tool_calls>`

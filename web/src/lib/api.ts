@@ -22,6 +22,19 @@ export const DEFAULT_CHAT_MODEL: ImageModel = "auto";
 export const CODEX_IMAGE_MODEL: ImageModel = "codex-gpt-image-2";
 const IMAGE_MODEL_VALUES = new Set<string>(IMAGE_MODEL_OPTIONS.map((option) => option.value));
 const IMAGE_TASK_MODEL_VALUES = new Set<ImageModel>(["auto", "gpt-image-2", "codex-gpt-image-2"]);
+const RESPONSE_IMAGE_TOOL_MODEL_VALUES = new Set<ImageModel>([
+  "auto",
+  "gpt-image-2",
+  "codex-gpt-image-2",
+  "gpt-5-mini",
+  "gpt-5-3-mini",
+  "gpt-5",
+  "gpt-5-1",
+  "gpt-5-2",
+  "gpt-5-3",
+  "gpt-5.4",
+  "gpt-5.5",
+]);
 const CHAT_MODEL_VALUES = new Set<ImageModel>([
   "auto",
   "gpt-5-mini",
@@ -34,6 +47,10 @@ const CHAT_MODEL_VALUES = new Set<ImageModel>([
   "gpt-5.5",
 ]);
 export const IMAGE_TASK_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => IMAGE_TASK_MODEL_VALUES.has(option.value));
+export const RESPONSE_IMAGE_TOOL_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => RESPONSE_IMAGE_TOOL_MODEL_VALUES.has(option.value));
+export const IMAGE_CREATION_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter(
+  (option) => IMAGE_TASK_MODEL_VALUES.has(option.value) || RESPONSE_IMAGE_TOOL_MODEL_VALUES.has(option.value),
+);
 export const CHAT_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => CHAT_MODEL_VALUES.has(option.value));
 
 export function isImageModel(value: unknown): value is ImageModel {
@@ -42,6 +59,14 @@ export function isImageModel(value: unknown): value is ImageModel {
 
 export function isImageTaskModel(value: unknown): value is ImageModel {
   return isImageModel(value) && IMAGE_TASK_MODEL_VALUES.has(value);
+}
+
+export function isResponseImageToolModel(value: unknown): value is ImageModel {
+  return isImageModel(value) && RESPONSE_IMAGE_TOOL_MODEL_VALUES.has(value);
+}
+
+export function isImageCreationModel(value: unknown): value is ImageModel {
+  return isImageTaskModel(value) || isResponseImageToolModel(value);
 }
 
 export function isChatModel(value: unknown): value is ImageModel {
@@ -259,7 +284,7 @@ export type ImageResponse = {
 export type CreationTask = {
   id: string;
   status: "queued" | "running" | "success" | "error" | "cancelled";
-  mode: "generate" | "edit" | "chat";
+  mode: "generate" | "edit" | "chat" | "response-image";
   model?: ImageModel;
   size?: string;
   quality?: ImageQuality;
@@ -620,6 +645,33 @@ export async function createImageGenerationTask(
       ...(size ? { size } : {}),
       ...(quality ? { quality } : {}),
       ...(messages?.length ? { messages } : {}),
+      visibility,
+      n: count,
+    },
+  });
+}
+
+export async function createResponseImageGenerationTask(
+  clientTaskId: string,
+  prompt: string,
+  model: ImageModel,
+  size?: string,
+  quality?: ImageQuality,
+  count = 1,
+  messages?: CreationTaskMessage[],
+  images?: string[],
+  visibility: ImageVisibility = "private",
+) {
+  return httpRequest<CreationTask>("/api/creation-tasks/response-image-generations", {
+    method: "POST",
+    body: {
+      client_task_id: clientTaskId,
+      prompt,
+      model,
+      ...(size ? { size } : {}),
+      ...(quality ? { quality } : {}),
+      ...(messages?.length ? { messages } : {}),
+      ...(images?.length ? { images } : {}),
       visibility,
       n: count,
     },

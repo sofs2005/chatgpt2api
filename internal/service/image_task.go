@@ -33,6 +33,7 @@ type ImageTaskService struct {
 	generation          ImageTaskHandler
 	edit                ImageTaskHandler
 	chat                ImageTaskHandler
+	responseImage       ImageTaskHandler
 	retentionGetter     func() int
 	concurrentLimit     func() int
 	userConcurrentLimit func() int
@@ -60,7 +61,7 @@ func NewStoredImageTaskService(path string, backend storage.Backend, generation 
 }
 
 func newImageTaskService(path string, store storage.JSONDocumentBackend, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
-	s := &ImageTaskService{path: path, store: store, docName: "image_tasks.json", generation: generation, edit: edit, chat: chat, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}, ownerSubmitTimes: map[string][]time.Time{}}
+	s := &ImageTaskService{path: path, store: store, docName: "image_tasks.json", generation: generation, edit: edit, chat: chat, responseImage: generation, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}, ownerSubmitTimes: map[string][]time.Time{}}
 	if len(limitGetters) > 0 {
 		s.concurrentLimit = limitGetters[0]
 	}
@@ -81,6 +82,13 @@ func newImageTaskService(path string, store storage.JSONDocumentBackend, generat
 	return s
 }
 
+func (s *ImageTaskService) SetResponseImageHandler(handler ImageTaskHandler) {
+	if handler == nil {
+		return
+	}
+	s.responseImage = handler
+}
+
 func (s *ImageTaskService) SubmitGeneration(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, n int, messages any, visibilityValues ...string) (map[string]any, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -95,6 +103,22 @@ func (s *ImageTaskService) SubmitGeneration(ctx context.Context, identity Identi
 		payload["messages"] = messages
 	}
 	return s.submit(ctx, identity, clientTaskID, "generate", payload)
+}
+
+func (s *ImageTaskService) SubmitResponseImageGeneration(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, images any, n int, messages any, visibilityValues ...string) (map[string]any, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	visibility, err := imageTaskVisibility(visibilityValues...)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"prompt": prompt, "images": images, "model": model, "n": normalizedImageTaskCount(n), "size": size, "quality": quality, "response_format": "url", "base_url": baseURL, "visibility": visibility}
+	if messages != nil {
+		payload["messages"] = messages
+	}
+	return s.submit(ctx, identity, clientTaskID, "response-image", payload)
 }
 
 func (s *ImageTaskService) SubmitEdit(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, images any, n int, messages any, visibilityValues ...string) (map[string]any, error) {
@@ -248,6 +272,8 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		handler = s.edit
 	} else if mode == "chat" {
 		handler = s.chat
+	} else if mode == "response-image" {
+		handler = s.responseImage
 	}
 	result, err := handler(ctx, identity, payload)
 	if err != nil {
@@ -445,6 +471,8 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 		mode := "generate"
 		if task["mode"] == "edit" {
 			mode = "edit"
+		} else if task["mode"] == "response-image" {
+			mode = "response-image"
 		} else if task["mode"] == "chat" {
 			mode = "chat"
 		}
@@ -592,7 +620,7 @@ func storedTaskCount(task map[string]any) int {
 }
 
 func isImageTaskMode(mode string) bool {
-	return mode == "generate" || mode == "edit"
+	return mode == "generate" || mode == "edit" || mode == "response-image"
 }
 
 func taskResultData(result map[string]any) []map[string]any {

@@ -48,14 +48,17 @@ import {
   createChatCompletionTask,
   createImageEditTask,
   createImageGenerationTask,
+  createResponseImageGenerationTask,
   DEFAULT_CHAT_MODEL,
   DEFAULT_IMAGE_MODEL,
   fetchCreationTasks,
-  IMAGE_TASK_MODEL_OPTIONS,
+  IMAGE_CREATION_MODEL_OPTIONS,
   isChatModel,
+  isImageCreationModel,
   isImageModel,
   isImageQuality,
   isImageTaskModel,
+  isResponseImageToolModel,
   supportsImageQuality,
   updateManagedImageVisibility,
   type ImageModel,
@@ -522,6 +525,10 @@ function usesReferenceImages(mode: ImageConversationMode) {
   return mode === "image" || mode === "edit";
 }
 
+function usesResponseImageTaskModel(model: ImageModel) {
+  return isResponseImageToolModel(model) && !isImageTaskModel(model);
+}
+
 function isMissingBatchImageDataError(error?: string) {
   return typeof error === "string" && error.startsWith("未返回第 ") && error.endsWith(" 张图片数据");
 }
@@ -779,7 +786,7 @@ function ImagePageContent() {
     () => buildImageSize(imageAspectRatio, imageResolution),
     [imageAspectRatio, imageResolution],
   );
-  const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_TASK_MODEL_OPTIONS;
+  const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_CREATION_MODEL_OPTIONS;
   const imageQualityOptions = supportsImageQuality(imageModel) ? IMAGE_QUALITY_OPTIONS : [];
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
@@ -995,7 +1002,7 @@ function ImagePageContent() {
       return;
     }
 
-    if (!isImageTaskModel(imageModel)) {
+    if (!isImageCreationModel(imageModel)) {
       setImageModel(DEFAULT_IMAGE_MODEL);
     }
   }, [composerMode, imageModel, referenceImages.length]);
@@ -1432,7 +1439,7 @@ function ImagePageContent() {
           ? isChatModel(targetTurn.model)
             ? targetTurn.model
             : DEFAULT_CHAT_MODEL
-          : isImageTaskModel(targetTurn.model)
+          : isImageCreationModel(targetTurn.model)
             ? targetTurn.model
             : DEFAULT_IMAGE_MODEL,
       mode: targetTurn.mode,
@@ -1611,6 +1618,19 @@ function ImagePageContent() {
         const submitTaskGroup = (group: { taskId: string; count: number }) => {
           if (activeTurn.mode === "chat") {
             return createChatCompletionTask(group.taskId, activeTurn.prompt, activeTurn.model, taskMessages);
+          }
+          if (usesResponseImageTaskModel(activeTurn.model)) {
+            return createResponseImageGenerationTask(
+              group.taskId,
+              activeTurn.prompt,
+              activeTurn.model,
+              activeTurn.size,
+              imageQualityForModel(activeTurn.model, activeTurn.quality || DEFAULT_IMAGE_QUALITY),
+              group.count,
+              taskMessages,
+              activeTurn.referenceImages.map((image) => image.dataUrl),
+              activeTurn.visibility || "private",
+            );
           }
           if (usesReferenceImages(activeTurn.mode)) {
             return createImageEditTask(
@@ -2103,7 +2123,7 @@ function ImagePageContent() {
           ? isChatModel(imageModel)
             ? imageModel
             : DEFAULT_CHAT_MODEL
-          : isImageTaskModel(imageModel)
+          : isImageCreationModel(imageModel)
             ? imageModel
             : DEFAULT_IMAGE_MODEL;
       const requestedCount = effectiveImageMode === "chat" ? 1 : parsedCount;
@@ -2348,7 +2368,7 @@ function ImagePageContent() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>
-                            {(editingTurnDraft.mode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_TASK_MODEL_OPTIONS).map((option) => (
+                            {(editingTurnDraft.mode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_CREATION_MODEL_OPTIONS).map((option) => (
                               <SelectItem key={option.value} value={option.value}>
                                 {option.label}
                               </SelectItem>

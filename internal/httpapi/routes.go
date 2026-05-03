@@ -954,6 +954,16 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 		util.WriteJSON(w, http.StatusOK, task)
 		return
 	}
+	if r.URL.Path == "/api/creation-tasks/response-image-generations" && r.Method == http.MethodPost {
+		body, _ := readJSONMap(r)
+		task, err := a.tasks.SubmitResponseImageGeneration(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), body["images"], util.ToInt(body["n"], 1), body["messages"], util.Clean(body["visibility"]))
+		if err != nil {
+			writeCreationTaskSubmitError(w, err)
+			return
+		}
+		util.WriteJSON(w, http.StatusOK, task)
+		return
+	}
 	if r.URL.Path == "/api/creation-tasks/chat-completions" && r.Method == http.MethodPost {
 		body, _ := readJSONMap(r)
 		task, err := a.tasks.SubmitChat(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), body["messages"])

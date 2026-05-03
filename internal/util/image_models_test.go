@@ -25,6 +25,17 @@ func TestImageGenerationModelSetExcludesTextModels(t *testing.T) {
 	}
 }
 
+func TestResponsesImageToolModelsIncludeTextModels(t *testing.T) {
+	for _, model := range []string{ImageModelAuto, ImageModelGPT, ImageModelCodex, ImageModelGPT5, ImageModelGPT54, ImageModelGPT55} {
+		if !IsResponsesImageToolModel(model) {
+			t.Fatalf("IsResponsesImageToolModel(%q) = false, want true", model)
+		}
+	}
+	if IsImageGenerationModel(ImageModelGPT55) {
+		t.Fatalf("IsImageGenerationModel(%q) = true, want false for /v1/images routes", ImageModelGPT55)
+	}
+}
+
 func TestModelListIncludesTextAndImageModels(t *testing.T) {
 	wantOrder := []string{
 		ImageModelGPT,

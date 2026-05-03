@@ -6,9 +6,9 @@ import {
   DEFAULT_CHAT_MODEL,
   DEFAULT_IMAGE_MODEL,
   isChatModel,
+  isImageCreationModel,
   isImageModel,
   isImageQuality,
-  isImageTaskModel,
   type ImageModel,
   type ImageQuality,
   type ImageVisibility,
@@ -207,7 +207,7 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
       ? isChatModel(turn.model)
         ? turn.model
         : DEFAULT_CHAT_MODEL
-      : isImageTaskModel(turn.model)
+      : isImageCreationModel(turn.model)
         ? turn.model
         : DEFAULT_IMAGE_MODEL;
   const derivedStatus: ImageTurnStatus =

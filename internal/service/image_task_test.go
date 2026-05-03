@@ -222,6 +222,47 @@ func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
 	}
 }
 
+func TestImageTaskServiceSubmitsResponseImageTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handlerCalls := make(chan map[string]any, 1)
+	imageHandler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
+	}
+	responseImageHandler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		handlerCalls <- payload
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/response.png"}}}, nil
+	}
+	svc := NewImageTaskService(path, imageHandler, imageHandler, imageHandler, func() int { return 30 }, func() int { return 0 })
+	svc.SetResponseImageHandler(responseImageHandler)
+	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
+	messages := []map[string]any{{"role": "user", "content": "生成封面"}}
+	images := []any{"data:image/png;base64,cG5n"}
+
+	if _, err := svc.SubmitResponseImageGeneration(context.Background(), identity, "response-1", "生成封面", "gpt-5.5", "16:9", "high", "https://base.test", images, 1, messages); err != nil {
+		t.Fatalf("SubmitResponseImageGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "response-1", TaskStatusSuccess)
+	got := svc.ListTasks(identity, []string{"response-1"})
+	item := got["items"].([]map[string]any)[0]
+	if item["mode"] != "response-image" {
+		t.Fatalf("mode = %#v, want response-image in %#v", item["mode"], item)
+	}
+	if item["model"] != "gpt-5.5" || item["quality"] != "high" {
+		t.Fatalf("model/quality = %#v/%#v in %#v", item["model"], item["quality"], item)
+	}
+	select {
+	case payload := <-handlerCalls:
+		if got := payload["images"]; got == nil {
+			t.Fatalf("response image payload missing images: %#v", payload)
+		}
+		if got := payload["messages"]; got == nil {
+			t.Fatalf("response image payload missing messages: %#v", payload)
+		}
+	default:
+		t.Fatal("response image handler was not called")
+	}
+}
+
 func TestImageTaskServiceLimitsConcurrentImageSlots(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	started := make(chan string, 2)

@@ -153,11 +153,13 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 	go func() {
 		defer close(out)
 		defer close(errCh)
-		if contains(systemHints, "picture_v2") {
+		if contains(systemHints, "picture_v2") && (model == util.ImageModelAuto || util.IsImageModel(model)) {
 			errCh <- c.streamPictureConversation(ctx, out, prompt, model, images)
 			return
 		}
-		if len(messages) == 0 {
+		if contains(systemHints, "picture_v2") && strings.TrimSpace(prompt) != "" {
+			messages = []map[string]any{{"role": "user", "content": prompt}}
+		} else if len(messages) == 0 {
 			messages = []map[string]any{{"role": "user", "content": prompt}}
 		}
 		if err := c.bootstrap(ctx); err != nil {
@@ -170,7 +172,7 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 			return
 		}
 		path, timezoneName := c.chatTarget()
-		payload := c.conversationPayload(messages, model, timezoneName)
+		payload := c.conversationPayload(messages, model, timezoneName, systemHints)
 		resp, err := c.postJSON(ctx, path, payload, c.conversationHeaders(path, reqs), true)
 		if err != nil {
 			errCh <- err
@@ -572,15 +574,23 @@ func (c *Client) chatTarget() (string, string) {
 	return "/backend-anon/conversation", "America/Los_Angeles"
 }
 
-func (c *Client) conversationPayload(messages []map[string]any, model, timezoneName string) map[string]any {
+func (c *Client) conversationPayload(messages []map[string]any, model, timezoneName string, systemHintsValues ...[]string) map[string]any {
 	conversationMessages := []map[string]any{conversationUserMessage(conversationPrompt(messages))}
+	var systemHints []any
+	if len(systemHintsValues) > 0 {
+		for _, hint := range systemHintsValues[0] {
+			if strings.TrimSpace(hint) != "" {
+				systemHints = append(systemHints, strings.TrimSpace(hint))
+			}
+		}
+	}
 	return map[string]any{
 		"action": "next", "messages": conversationMessages, "model": model, "parent_message_id": "client-created-root",
 		"conversation_mode": map[string]any{"kind": "primary_assistant"}, "conversation_origin": nil,
 		"force_paragen": false, "force_paragen_model_slug": "", "force_rate_limit": false, "force_use_sse": true,
 		"history_and_training_disabled": true, "reset_rate_limits": false, "suggestions": []any{}, "supported_encodings": []any{"v1"},
 		"enable_message_followups": true, "supports_buffering": true,
-		"system_hints": []any{}, "timezone": timezoneName, "timezone_offset_min": -480,
+		"system_hints": systemHints, "timezone": timezoneName, "timezone_offset_min": -480,
 		"variant_purpose": "comparison_implicit", "websocket_request_id": util.NewUUID(),
 		"client_contextual_info": map[string]any{"is_dark_mode": false, "time_since_loaded": 120, "page_height": 900, "page_width": 1400, "pixel_ratio": 2, "screen_height": 1440, "screen_width": 2560},
 	}

@@ -54,6 +54,7 @@ type ConversationRequest struct {
 	OwnerName          string
 	MessageAsError     bool
 	RequirePaidAccount bool
+	ResponsesImageTool bool
 }
 
 func (r ConversationRequest) Normalized() ConversationRequest {
@@ -66,6 +67,10 @@ func ImageQualityForModel(model, quality string) string {
 		return ""
 	}
 	return strings.TrimSpace(quality)
+}
+
+func (r ConversationRequest) SupportsImageGenerationModel() bool {
+	return util.IsImageGenerationModel(r.Model) || (r.ResponsesImageTool && util.IsResponsesImageToolModel(r.Model))
 }
 
 type ConversationState struct {
@@ -225,7 +230,7 @@ func (e *Engine) CollectText(ctx context.Context, client *backend.Client, reques
 	return strings.Join(parts, ""), <-errCh
 }
 
-func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client, messages []map[string]any, model, prompt string, images []string, size, quality string) (<-chan ConversationEvent, <-chan error) {
+func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client, messages []map[string]any, model, prompt string, images []string, size, quality string, forceImageToolValues ...bool) (<-chan ConversationEvent, <-chan error) {
 	out := make(chan ConversationEvent)
 	errCh := make(chan error, 1)
 	go func() {
@@ -235,7 +240,8 @@ func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client,
 		if len(normalized) == 0 && prompt != "" {
 			normalized = []map[string]any{{"role": "user", "content": prompt}}
 		}
-		imageModel := util.IsImageModel(model) || (prompt != "" && util.IsImageGenerationModel(model))
+		forceImageTool := len(forceImageToolValues) > 0 && forceImageToolValues[0]
+		imageModel := forceImageTool || util.IsImageModel(model) || (prompt != "" && util.IsImageGenerationModel(model))
 		historyText := ""
 		historyMessages := []string{}
 		finalPrompt := prompt
@@ -326,7 +332,7 @@ func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request Convers
 	go func() {
 		defer close(out)
 		defer close(errCh)
-		if !util.IsImageGenerationModel(request.Model) {
+		if !request.SupportsImageGenerationModel() {
 			errCh <- &ImageGenerationError{Message: "unsupported image model,supported models: " + util.ImageGenerationModelNames(), StatusCode: 502, Type: "server_error", Code: "upstream_error"}
 			return
 		}
@@ -422,7 +428,7 @@ func (e *Engine) StreamImageOutputs(ctx context.Context, client *backend.Client,
 		defer close(out)
 		defer close(errCh)
 		var last ConversationEvent
-		events, convErr := e.ConversationEvents(ctx, client, request.Messages, request.Model, request.Prompt, request.Images, request.Size, request.Quality)
+		events, convErr := e.ConversationEvents(ctx, client, request.Messages, request.Model, request.Prompt, request.Images, request.Size, request.Quality, request.ResponsesImageTool)
 		for event := range events {
 			last = event
 			if event["type"] == "conversation.delta" {

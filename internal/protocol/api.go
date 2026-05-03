@@ -482,36 +482,64 @@ func (e *Engine) ResponseEventsScoped(ctx context.Context, body map[string]any, 
 		events = e.rememberResponseContextEventsScoped(scope, events, baseContext)
 		return events, errCh, nil
 	}
-	prompt := LatestUserPrompt(baseContext.Messages)
-	if prompt == "" {
-		return nil, nil, HTTPError{Status: 400, Message: "input text is required"}
-	}
-	n, err := ParseImageCount(body["n"])
+	request, prompt, err := ResponseImageGenerationRequest(body, scope, &previous)
 	if err != nil {
 		return nil, nil, err
 	}
-	imageModel := util.ImageModelAuto
-	if util.IsImageGenerationModel(responseModel) {
-		imageModel = responseModel
-	}
-	images := append([]string(nil), previous.Images...)
 	var currentImages []string
-	size := firstNonEmpty(util.Clean(body["size"]), "1:1")
 	if inputImages := ExtractResponseImages(body["input"]); len(inputImages) > 0 {
 		currentImages = EncodeImages(inputImages)
-		images = append(images, currentImages...)
-		if util.Clean(body["size"]) == "" {
-			size = ""
-		}
-	}
-	if len(images) > maxContextImages {
-		images = images[len(images)-maxContextImages:]
 	}
 	baseContext = MergeResponseContext(previous, currentMessages, currentImages)
-	outputs, errCh := e.StreamImageOutputsWithPool(ctx, ConversationRequest{Prompt: prompt, Model: imageModel, Messages: baseContext.Messages, N: n, Size: size, Quality: util.Clean(body["quality"]), ResponseFormat: "b64_json", OwnerID: scope, OwnerName: util.Clean(body["owner_name"]), Images: images, RequirePaidAccount: RequiresPaidImageSize(size)}.Normalized())
+	request.Messages = baseContext.Messages
+	outputs, errCh := e.StreamImageOutputsWithPool(ctx, request)
 	events, responseErr := StreamImageResponse(outputs, prompt, responseModel)
 	events = e.rememberResponseContextEventsScoped(scope, events, baseContext)
 	return events, combineErrorChannels(errCh, responseErr), nil
+}
+
+func ResponseImageGenerationRequest(body map[string]any, scope string, previous *ResponseContext) (ConversationRequest, string, error) {
+	responseModel := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+	if !util.IsResponsesImageToolModel(responseModel) {
+		return ConversationRequest{}, "", HTTPError{Status: 400, Message: "unsupported image_generation model: " + responseModel}
+	}
+	messages := MessagesFromInput(body["input"], body["instructions"])
+	prompt := LatestUserPrompt(messages)
+	if prompt == "" {
+		return ConversationRequest{}, "", HTTPError{Status: 400, Message: "input text is required"}
+	}
+	n, err := ParseImageCount(body["n"])
+	if err != nil {
+		return ConversationRequest{}, "", err
+	}
+	tool := ResponseImageGenerationTool(body)
+	size := firstNonEmpty(util.Clean(tool["size"]), util.Clean(body["size"]), "1:1")
+	inputImages := ExtractResponseImages(body["input"])
+	if len(inputImages) > 0 && util.Clean(tool["size"]) == "" && util.Clean(body["size"]) == "" {
+		size = ""
+	}
+	images := []string(nil)
+	if previous != nil {
+		images = append(images, previous.Images...)
+	}
+	images = append(images, EncodeImages(inputImages)...)
+	if len(images) > maxContextImages {
+		images = images[len(images)-maxContextImages:]
+	}
+	return ConversationRequest{
+		Prompt:             prompt,
+		Model:              responseModel,
+		Messages:           messages,
+		N:                  n,
+		Size:               size,
+		Quality:            firstNonEmpty(util.Clean(tool["quality"]), util.Clean(body["quality"])),
+		ResponseFormat:     firstNonEmpty(util.Clean(tool["response_format"]), util.Clean(body["response_format"]), "b64_json"),
+		OwnerID:            scope,
+		OwnerName:          util.Clean(body["owner_name"]),
+		Images:             images,
+		RequirePaidAccount: RequiresPaidImageSize(size),
+		ResponsesImageTool: true,
+	}.Normalized(), prompt, nil
 }
 
 func (e *Engine) StreamTextResponse(ctx context.Context, body map[string]any) (<-chan map[string]any, <-chan error) {
@@ -666,15 +694,19 @@ func ImageOutputItems(prompt string, data []map[string]any, itemID string) []map
 }
 
 func HasResponseImageGenerationTool(body map[string]any) bool {
+	return len(ResponseImageGenerationTool(body)) > 0
+}
+
+func ResponseImageGenerationTool(body map[string]any) map[string]any {
 	for _, raw := range anyList(body["tools"]) {
 		if tool, ok := raw.(map[string]any); ok && util.Clean(tool["type"]) == "image_generation" {
-			return true
+			return tool
 		}
 	}
 	if choice := util.StringMap(body["tool_choice"]); choice != nil && util.Clean(choice["type"]) == "image_generation" {
-		return true
+		return choice
 	}
-	return false
+	return nil
 }
 
 func ExtractResponsePrompt(input any) string {

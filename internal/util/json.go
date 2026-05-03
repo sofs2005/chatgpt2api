@@ -63,6 +63,20 @@ func init() {
 	}
 }
 
+var ResponsesImageToolModels = map[string]struct{}{
+	ImageModelAuto:      {},
+	ImageModelGPT:       {},
+	ImageModelCodex:     {},
+	ImageModelGPTMini:   {},
+	ImageModelGPT53Mini: {},
+	ImageModelGPT5:      {},
+	ImageModelGPT51:     {},
+	ImageModelGPT52:     {},
+	ImageModelGPT53:     {},
+	ImageModelGPT54:     {},
+	ImageModelGPT55:     {},
+}
+
 func Clean(v any) string {
 	return strings.TrimSpace(fmt.Sprint(ValueOr(v, "")))
 }
@@ -279,6 +293,11 @@ func IsImageModel(model string) bool {
 
 func IsImageGenerationModel(model string) bool {
 	_, ok := ImageGenerationModels[strings.TrimSpace(model)]
+	return ok
+}
+
+func IsResponsesImageToolModel(model string) bool {
+	_, ok := ResponsesImageToolModels[strings.TrimSpace(model)]
 	return ok
 }
 

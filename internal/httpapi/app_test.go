@@ -455,6 +455,82 @@ func TestCreationTaskFailureWritesCallLog(t *testing.T) {
 	}
 }
 
+func TestResponsesImageTaskRouteBuildsTaskPayload(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	called := make(chan map[string]any, 1)
+	app.tasks.SetResponseImageHandler(func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
+		called <- payload
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/generated.png"}}}, nil
+	})
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "frontend", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+
+	body := `{"client_task_id":"response-image-route","prompt":"生成封面","model":"gpt-5.5","size":"16:9","quality":"high","n":2,"images":["data:image/png;base64,cG5n"],"messages":[{"role":"user","content":"生成封面"}],"visibility":"public"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/creation-tasks/response-image-generations", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("submit response image task status = %d body = %s", res.Code, res.Body.String())
+	}
+	var task map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &task); err != nil {
+		t.Fatalf("task json: %v", err)
+	}
+	if task["mode"] != "response-image" || task["model"] != "gpt-5.5" || task["quality"] != "high" || task["visibility"] != "public" {
+		t.Fatalf("unexpected submitted task = %#v", task)
+	}
+	select {
+	case payload := <-called:
+		if payload["model"] != "gpt-5.5" || payload["quality"] != "high" {
+			t.Fatalf("unexpected response image payload = %#v", payload)
+		}
+		if images, ok := payload["images"].([]any); !ok || len(images) != 1 {
+			t.Fatalf("payload images = %#v", payload["images"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for response image handler")
+	}
+}
+
+func TestResponsesImageTaskResultExtractsImagesAndText(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	imageData := "cG5n"
+	completed := map[string]any{
+		"created_at": float64(1700000000),
+		"output": []map[string]any{
+			{"type": "image_generation_call", "result": imageData, "revised_prompt": "封面"},
+		},
+	}
+	result := responsesImageTaskResult(app.engine, completed, map[string]any{
+		"prompt":          "生成封面",
+		"response_format": "b64_json",
+		"base_url":        "https://example.test",
+		"owner_id":        "owner-1",
+		"owner_name":      "Alice",
+	})
+	data := util.AsMapSlice(result["data"])
+	if len(data) != 1 || data[0]["b64_json"] != imageData || data[0]["revised_prompt"] != "封面" {
+		t.Fatalf("response image result data = %#v", result)
+	}
+	if urlValue := util.Clean(data[0]["url"]); !strings.HasPrefix(urlValue, "https://example.test/images/") {
+		t.Fatalf("stored image url = %#v in %#v", urlValue, result)
+	}
+
+	text := responseOutputText([]map[string]any{
+		{"type": "message", "content": []map[string]any{{"type": "output_text", "text": "模型返回文本"}}},
+	})
+	if text != "模型返回文本" {
+		t.Fatalf("responseOutputText() = %q", text)
+	}
+}
+
 func TestEmptyCollectionEndpointsReturnArrays(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()

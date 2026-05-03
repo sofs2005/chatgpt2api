@@ -34,6 +34,9 @@ export type StoredImage = {
   visibility?: ImageVisibility;
   b64_json?: string;
   url?: string;
+  width?: number;
+  height?: number;
+  resolution?: string;
   revised_prompt?: string;
   error?: string;
   text_response?: string;
@@ -45,6 +48,7 @@ export type StoredImageSizeSelection = {
   mode: string;
   aspectRatio: string;
   resolution: string;
+  customRatio?: string;
   customWidth: string;
   customHeight: string;
 };
@@ -115,6 +119,9 @@ async function imageConversationsStorageKey() {
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
   const url = typeof image.url === "string" && image.url ? image.url : undefined;
+  const width = Number(image.width);
+  const height = Number(image.height);
+  const resolution = typeof image.resolution === "string" && image.resolution ? image.resolution : undefined;
   const normalized = {
     ...image,
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
@@ -127,6 +134,9 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
     visibility:
       image.visibility === "public" || image.visibility === "private" ? image.visibility : undefined,
     url,
+    width: Number.isFinite(width) && width > 0 ? width : undefined,
+    height: Number.isFinite(height) && height > 0 ? height : undefined,
+    resolution,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
     text_response: typeof image.text_response === "string" && image.text_response ? image.text_response : undefined,
   };
@@ -177,10 +187,18 @@ function normalizeSizeSelection(value: unknown): StoredImageSizeSelection | unde
     mode: typeof source.mode === "string" ? source.mode : "",
     aspectRatio: typeof source.aspectRatio === "string" ? source.aspectRatio : "",
     resolution: typeof source.resolution === "string" ? source.resolution : "",
+    customRatio: typeof source.customRatio === "string" ? source.customRatio : "",
     customWidth: typeof source.customWidth === "string" ? source.customWidth : "",
     customHeight: typeof source.customHeight === "string" ? source.customHeight : "",
   };
-  if (!selection.mode && !selection.aspectRatio && !selection.resolution && !selection.customWidth && !selection.customHeight) {
+  if (
+    !selection.mode &&
+    !selection.aspectRatio &&
+    !selection.resolution &&
+    !selection.customRatio &&
+    !selection.customWidth &&
+    !selection.customHeight
+  ) {
     return undefined;
   }
   return selection;

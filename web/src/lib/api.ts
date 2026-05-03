@@ -288,6 +288,16 @@ export type ImageResponse = {
   data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
 };
 
+export type CreationTaskData = {
+  b64_json?: string;
+  url?: string;
+  revised_prompt?: string;
+  text_response?: string;
+  width?: number;
+  height?: number;
+  resolution?: string;
+};
+
 export type CreationTask = {
   id: string;
   status: "queued" | "running" | "success" | "error" | "cancelled";
@@ -297,7 +307,7 @@ export type CreationTask = {
   quality?: ImageQuality;
   created_at: string;
   updated_at: string;
-  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string; text_response?: string }>;
+  data?: CreationTaskData[];
   error?: string;
   output_type?: "text";
   visibility?: ImageVisibility;

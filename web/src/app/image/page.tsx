@@ -9,17 +9,21 @@ import { ImagePromptMarket } from "@/app/image/components/image-prompt-market";
 import { ImageResults, type ImageLightboxItem } from "@/app/image/components/image-results";
 import type { BananaPrompt } from "@/app/image/banana-prompts";
 import {
+  CUSTOM_IMAGE_ASPECT_RATIO,
   DEFAULT_IMAGE_CUSTOM_HEIGHT,
+  DEFAULT_IMAGE_CUSTOM_RATIO,
   DEFAULT_IMAGE_CUSTOM_WIDTH,
   IMAGE_ASPECT_RATIO_OPTIONS,
   IMAGE_QUALITY_OPTIONS,
   IMAGE_RESOLUTION_OPTIONS,
   IMAGE_SIZE_MODE_OPTIONS,
   buildImageSize,
+  formatImageSizeDisplay,
   getImageSizeSelectionFromSize,
   isImageAspectRatio,
   isImageResolution,
   isImageSizeMode,
+  parseImageRatio,
   type ImageAspectRatio,
   type ImageResolution,
   type ImageSizeMode,
@@ -109,6 +113,7 @@ const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_SIZE_MODE_STORAGE_KEY = "chatgpt2api:image_last_size_mode";
 const IMAGE_ASPECT_RATIO_STORAGE_KEY = "chatgpt2api:image_last_aspect_ratio";
 const IMAGE_RESOLUTION_STORAGE_KEY = "chatgpt2api:image_last_resolution";
+const IMAGE_CUSTOM_RATIO_STORAGE_KEY = "chatgpt2api:image_last_custom_ratio";
 const IMAGE_CUSTOM_WIDTH_STORAGE_KEY = "chatgpt2api:image_last_custom_width";
 const IMAGE_CUSTOM_HEIGHT_STORAGE_KEY = "chatgpt2api:image_last_custom_height";
 const IMAGE_QUALITY_STORAGE_KEY = "chatgpt2api:image_last_quality";
@@ -130,6 +135,7 @@ type EditingTurnDraft = {
   sizeMode: ImageSizeMode;
   aspectRatio: ImageAspectRatio;
   resolution: ImageResolution;
+  customRatio: string;
   customWidth: string;
   customHeight: string;
   quality: ImageQuality;
@@ -271,6 +277,15 @@ function normalizeRequestedImageCount(value: string | number) {
   return Math.max(1, Math.min(10, Number(value) || 1));
 }
 
+function isInvalidCustomRatioSelection(sizeMode: ImageSizeMode, aspectRatio: ImageAspectRatio, customRatio: string) {
+  return sizeMode === "ratio" && aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO && !parseImageRatio(customRatio);
+}
+
+function positiveDimension(value: unknown) {
+  const dimension = Number(value);
+  return Number.isFinite(dimension) && dimension > 0 ? Math.round(dimension) : undefined;
+}
+
 function imageTaskBatchId(turnId: string, imageIndex: number) {
   return `${turnId}-task-${Math.floor(imageIndex / IMAGE_TASK_IMAGE_COUNT)}`;
 }
@@ -295,6 +310,9 @@ const STORED_IMAGE_FIELDS: Array<keyof StoredImage> = [
   "visibility",
   "b64_json",
   "url",
+  "width",
+  "height",
+  "resolution",
   "revised_prompt",
   "error",
   "text_response",
@@ -307,17 +325,24 @@ function updateStoredImage(image: StoredImage, updates: Partial<StoredImage>): S
 
 function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex = 0, fallbackVisibility?: ImageVisibility): StoredImage {
   const taskVisibility = task.visibility || fallbackVisibility || image.visibility || "private";
-  const successUpdates = (item: CreationTaskDataItem) => ({
-    taskId: task.id,
-    status: "success" as const,
-    b64_json: item.b64_json,
-    url: item.url,
-    path: item.url ? getManagedImagePathFromUrl(item.url) || image.path : image.path,
-    visibility: taskVisibility,
-    revised_prompt: item.revised_prompt,
-    text_response: undefined,
-    error: undefined,
-  });
+  const successUpdates = (item: CreationTaskDataItem) => {
+    const width = positiveDimension(item.width);
+    const height = positiveDimension(item.height);
+    return {
+      taskId: task.id,
+      status: "success" as const,
+      b64_json: item.b64_json,
+      url: item.url,
+      path: item.url ? getManagedImagePathFromUrl(item.url) || image.path : image.path,
+      visibility: taskVisibility,
+      width,
+      height,
+      resolution: item.resolution || (width && height ? `${width}x${height}` : image.resolution),
+      revised_prompt: item.revised_prompt,
+      text_response: undefined,
+      error: undefined,
+    };
+  };
   if (task.status === "success") {
     if (task.output_type === "text") {
       return updateStoredImage(image, {
@@ -442,6 +467,7 @@ function getStoredImageSizeSelection(): ImageSizeSelection {
   const storedSizeMode = window.localStorage.getItem(IMAGE_SIZE_MODE_STORAGE_KEY);
   const storedAspectRatio = window.localStorage.getItem(IMAGE_ASPECT_RATIO_STORAGE_KEY) || "";
   const storedResolution = window.localStorage.getItem(IMAGE_RESOLUTION_STORAGE_KEY);
+  const customRatio = window.localStorage.getItem(IMAGE_CUSTOM_RATIO_STORAGE_KEY) || fallbackSelection.customRatio;
   const customWidth = window.localStorage.getItem(IMAGE_CUSTOM_WIDTH_STORAGE_KEY) || fallbackSelection.customWidth;
   const customHeight = window.localStorage.getItem(IMAGE_CUSTOM_HEIGHT_STORAGE_KEY) || fallbackSelection.customHeight;
   if (isImageSizeMode(storedSizeMode) && isImageAspectRatio(storedAspectRatio) && isImageResolution(storedResolution)) {
@@ -449,6 +475,7 @@ function getStoredImageSizeSelection(): ImageSizeSelection {
       mode: storedSizeMode,
       aspectRatio: storedAspectRatio,
       resolution: storedResolution,
+      customRatio,
       customWidth,
       customHeight,
     };
@@ -461,6 +488,7 @@ function serializeImageSizeSelection(selection: ImageSizeSelection): StoredImage
     mode: selection.mode,
     aspectRatio: selection.aspectRatio,
     resolution: selection.resolution,
+    customRatio: selection.customRatio,
     customWidth: selection.customWidth,
     customHeight: selection.customHeight,
   };
@@ -475,6 +503,7 @@ function restoreImageSizeSelection(stored: StoredImageSizeSelection | undefined,
     mode: isImageSizeMode(stored.mode) ? stored.mode : fallbackSelection.mode,
     aspectRatio: isImageAspectRatio(stored.aspectRatio) ? stored.aspectRatio : fallbackSelection.aspectRatio,
     resolution: isImageResolution(stored.resolution) ? stored.resolution : fallbackSelection.resolution,
+    customRatio: stored.customRatio || fallbackSelection.customRatio,
     customWidth: stored.customWidth || fallbackSelection.customWidth,
     customHeight: stored.customHeight || fallbackSelection.customHeight,
   };
@@ -798,6 +827,7 @@ function ImagePageContent() {
   const [imageSizeMode, setImageSizeMode] = useState<ImageSizeMode>(() => getStoredImageSizeSelection().mode);
   const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>(() => getStoredImageSizeSelection().aspectRatio);
   const [imageResolution, setImageResolution] = useState<ImageResolution>(() => getStoredImageSizeSelection().resolution);
+  const [imageCustomRatio, setImageCustomRatio] = useState(() => getStoredImageSizeSelection().customRatio);
   const [imageCustomWidth, setImageCustomWidth] = useState(() => getStoredImageSizeSelection().customWidth);
   const [imageCustomHeight, setImageCustomHeight] = useState(() => getStoredImageSizeSelection().customHeight);
   const [imageQuality, setImageQuality] = useState<ImageQuality>(getStoredImageQuality);
@@ -827,11 +857,55 @@ function ImagePageContent() {
         mode: imageSizeMode,
         aspectRatio: imageAspectRatio,
         resolution: imageResolution,
+        customRatio: imageCustomRatio,
         customWidth: imageCustomWidth,
         customHeight: imageCustomHeight,
       }),
-    [imageAspectRatio, imageCustomHeight, imageCustomWidth, imageResolution, imageSizeMode],
+    [imageAspectRatio, imageCustomHeight, imageCustomRatio, imageCustomWidth, imageResolution, imageSizeMode],
   );
+  const editingDraftImageSize = useMemo(() => {
+    if (!editingTurnDraft || editingTurnDraft.mode === "chat") {
+      return "";
+    }
+    return buildImageSize({
+      mode: editingTurnDraft.sizeMode,
+      aspectRatio: editingTurnDraft.aspectRatio,
+      resolution: editingTurnDraft.resolution,
+      customRatio: editingTurnDraft.customRatio,
+      customWidth: editingTurnDraft.customWidth,
+      customHeight: editingTurnDraft.customHeight,
+    });
+  }, [editingTurnDraft]);
+  const editingDraftCustomRatioInvalid = editingTurnDraft
+    ? isInvalidCustomRatioSelection(editingTurnDraft.sizeMode, editingTurnDraft.aspectRatio, editingTurnDraft.customRatio)
+    : false;
+  const editingDraftSizePreviewLabel =
+    editingTurnDraft && editingTurnDraft.mode !== "chat"
+      ? editingDraftImageSize
+        ? formatImageSizeDisplay(editingDraftImageSize)
+        : editingTurnDraft.sizeMode === "auto" ||
+            (editingTurnDraft.sizeMode === "ratio" &&
+              editingTurnDraft.resolution === "auto" &&
+              !editingDraftCustomRatioInvalid)
+          ? "Auto"
+          : "尺寸无效"
+      : "";
+  const editingDraftSizePreviewDetail =
+    editingTurnDraft?.sizeMode === "ratio"
+      ? editingDraftCustomRatioInvalid
+        ? "比例需要填写为宽:高"
+        : editingTurnDraft.resolution === "auto"
+          ? editingDraftImageSize
+            ? `将按 ${editingDraftImageSize} 比例下发`
+            : "Auto 比例将交给模型决定"
+          : editingDraftImageSize
+            ? `将下发计算后的 ${formatImageSizeDisplay(editingDraftImageSize)}`
+            : "比例需要填写为宽:高"
+      : editingTurnDraft?.sizeMode === "custom"
+        ? editingDraftImageSize
+          ? `已按链路限制校准为 ${formatImageSizeDisplay(editingDraftImageSize)}`
+          : "宽高需要填写正整数"
+        : "不会强制指定尺寸";
   const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_CREATION_MODEL_OPTIONS;
   const imageQualityOptions = supportsImageQuality(imageModel) ? IMAGE_QUALITY_OPTIONS : [];
   const selectedConversation = useMemo(
@@ -962,6 +1036,7 @@ function ImagePageContent() {
         setImageSizeMode(storedSelection.mode);
         setImageAspectRatio(storedSelection.aspectRatio);
         setImageResolution(storedSelection.resolution);
+        setImageCustomRatio(storedSelection.customRatio);
         setImageCustomWidth(storedSelection.customWidth);
         setImageCustomHeight(storedSelection.customHeight);
 
@@ -1080,6 +1155,7 @@ function ImagePageContent() {
       window.localStorage.removeItem(IMAGE_ASPECT_RATIO_STORAGE_KEY);
     }
     window.localStorage.setItem(IMAGE_RESOLUTION_STORAGE_KEY, imageResolution);
+    window.localStorage.setItem(IMAGE_CUSTOM_RATIO_STORAGE_KEY, imageCustomRatio);
     window.localStorage.setItem(IMAGE_CUSTOM_WIDTH_STORAGE_KEY, imageCustomWidth);
     window.localStorage.setItem(IMAGE_CUSTOM_HEIGHT_STORAGE_KEY, imageCustomHeight);
     if (imageSize) {
@@ -1087,7 +1163,7 @@ function ImagePageContent() {
       return;
     }
     window.localStorage.removeItem(IMAGE_SIZE_STORAGE_KEY);
-  }, [imageAspectRatio, imageCustomHeight, imageCustomWidth, imageResolution, imageSize, imageSizeMode]);
+  }, [imageAspectRatio, imageCustomHeight, imageCustomRatio, imageCustomWidth, imageResolution, imageSize, imageSizeMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1189,6 +1265,7 @@ function ImagePageContent() {
     setImageSizeMode(presetSizeSelection.mode);
     setImageAspectRatio(presetSizeSelection.aspectRatio);
     setImageResolution(presetSizeSelection.resolution);
+    setImageCustomRatio(presetSizeSelection.customRatio);
     setImageCustomWidth(presetSizeSelection.customWidth);
     setImageCustomHeight(presetSizeSelection.customHeight);
     setDefaultImageVisibility("private");
@@ -1230,6 +1307,7 @@ function ImagePageContent() {
     setImageSizeMode("auto");
     setImageAspectRatio("");
     setImageResolution("auto");
+    setImageCustomRatio(DEFAULT_IMAGE_CUSTOM_RATIO);
     setImageCustomWidth(DEFAULT_IMAGE_CUSTOM_WIDTH);
     setImageCustomHeight(DEFAULT_IMAGE_CUSTOM_HEIGHT);
     setDefaultImageVisibility("private");
@@ -1509,6 +1587,7 @@ function ImagePageContent() {
       sizeMode: targetTurn.mode === "chat" ? "auto" : sizeSelection.mode,
       aspectRatio: targetTurn.mode === "chat" ? "" : sizeSelection.aspectRatio,
       resolution: targetTurn.mode === "chat" ? "auto" : sizeSelection.resolution,
+      customRatio: targetTurn.mode === "chat" ? DEFAULT_IMAGE_CUSTOM_RATIO : sizeSelection.customRatio,
       customWidth: targetTurn.mode === "chat" ? DEFAULT_IMAGE_CUSTOM_WIDTH : sizeSelection.customWidth,
       customHeight: targetTurn.mode === "chat" ? DEFAULT_IMAGE_CUSTOM_HEIGHT : sizeSelection.customHeight,
       quality: targetTurn.quality || DEFAULT_IMAGE_QUALITY,
@@ -1988,6 +2067,9 @@ function ImagePageContent() {
                       b64_json: undefined,
                       url: undefined,
                       path: undefined,
+                      width: undefined,
+                      height: undefined,
+                      resolution: undefined,
                       visibility: targetTurn.mode === "chat" ? undefined : targetTurn.visibility || "private",
                       revised_prompt: undefined,
                       text_response: undefined,
@@ -2102,6 +2184,10 @@ function ImagePageContent() {
       const imageCount = draft.mode === "chat" ? 1 : normalizeRequestedImageCount(draft.count);
       const mode = draft.mode === "chat" ? "chat" : getComposerConversationMode("image", draft.referenceImages);
       const referenceImages = usesReferenceImages(mode) ? draft.referenceImages : [];
+      if (mode !== "chat" && isInvalidCustomRatioSelection(draft.sizeMode, draft.aspectRatio, draft.customRatio)) {
+        toast.error("请输入有效的自定义比例，例如 5:4 或 2.39:1");
+        return;
+      }
       const draftImageSize =
         mode === "chat"
           ? ""
@@ -2109,6 +2195,7 @@ function ImagePageContent() {
               mode: draft.sizeMode,
               aspectRatio: draft.aspectRatio,
               resolution: draft.resolution,
+              customRatio: draft.customRatio,
               customWidth: draft.customWidth,
               customHeight: draft.customHeight,
             });
@@ -2116,6 +2203,7 @@ function ImagePageContent() {
         mode: draft.sizeMode,
         aspectRatio: draft.aspectRatio,
         resolution: draft.resolution,
+        customRatio: draft.customRatio,
         customWidth: draft.customWidth,
         customHeight: draft.customHeight,
       });
@@ -2198,6 +2286,10 @@ function ImagePageContent() {
       toast.error("请填写有效的宽度和高度");
       return;
     }
+    if (composerMode === "image" && isInvalidCustomRatioSelection(imageSizeMode, imageAspectRatio, imageCustomRatio)) {
+      toast.error("请输入有效的自定义比例，例如 5:4 或 2.39:1");
+      return;
+    }
     isSubmitDispatchingRef.current = true;
     let draftProgressTarget: { conversationId: string; turnId: string } | null = null;
 
@@ -2216,6 +2308,7 @@ function ImagePageContent() {
         mode: imageSizeMode,
         aspectRatio: imageAspectRatio,
         resolution: imageResolution,
+        customRatio: imageCustomRatio,
         customWidth: imageCustomWidth,
         customHeight: imageCustomHeight,
       });
@@ -2594,7 +2687,34 @@ function ImagePageContent() {
                         </SelectContent>
                       </Select>
                     </label>
+                    {editingTurnDraft.aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO ? (
+                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700 sm:col-span-2">
+                      自定义比例
+                      <Input
+                        value={editingTurnDraft.customRatio}
+                        onChange={(event) =>
+                          setEditingTurnDraft((current) =>
+                            current ? { ...current, customRatio: event.target.value } : current,
+                          )
+                        }
+                        placeholder="例如 5:4 / 2.39:1"
+                        aria-invalid={editingDraftCustomRatioInvalid}
+                        className={cn(editingDraftCustomRatioInvalid && "border-red-300 focus-visible:ring-red-500/20")}
+                      />
+                    </label>
+                    ) : null}
                     </>
+                    ) : null}
+                    {editingTurnDraft.sizeMode !== "auto" ? (
+                    <div className="rounded-2xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm sm:col-span-2 lg:col-span-4">
+                      <div className="flex min-w-0 items-center justify-between gap-3">
+                        <span className="shrink-0 font-medium text-stone-600">计算后分辨率</span>
+                        <span className="min-w-0 truncate text-right font-mono font-semibold text-stone-900">
+                          {editingDraftSizePreviewLabel}
+                        </span>
+                      </div>
+                      <div className="mt-1 truncate text-xs text-stone-500">{editingDraftSizePreviewDetail}</div>
+                    </div>
                     ) : null}
                     {supportsImageQuality(editingTurnDraft.model) ? (
                     <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
@@ -2713,6 +2833,7 @@ function ImagePageContent() {
                 imageSizeMode={imageSizeMode}
                 imageAspectRatio={imageAspectRatio}
                 imageResolution={imageResolution}
+                imageCustomRatio={imageCustomRatio}
                 imageCustomWidth={imageCustomWidth}
                 imageCustomHeight={imageCustomHeight}
                 imageQuality={imageQuality}
@@ -2728,6 +2849,7 @@ function ImagePageContent() {
                 onImageSizeModeChange={setImageSizeMode}
                 onImageAspectRatioChange={setImageAspectRatio}
                 onImageResolutionChange={setImageResolution}
+                onImageCustomRatioChange={setImageCustomRatio}
                 onImageCustomWidthChange={setImageCustomWidth}
                 onImageCustomHeightChange={setImageCustomHeight}
                 onImageQualityChange={setImageQuality}

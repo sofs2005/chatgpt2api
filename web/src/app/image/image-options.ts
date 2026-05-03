@@ -1,3 +1,6 @@
+export const CUSTOM_IMAGE_ASPECT_RATIO = "custom";
+export const DEFAULT_IMAGE_CUSTOM_RATIO = "16:9";
+
 export const IMAGE_ASPECT_RATIO_OPTIONS = [
   { value: "", label: "Auto" },
   { value: "1:1", label: "1:1 (正方形)" },
@@ -8,6 +11,7 @@ export const IMAGE_ASPECT_RATIO_OPTIONS = [
   { value: "4:3", label: "4:3 (横版)" },
   { value: "3:4", label: "3:4 (竖版)" },
   { value: "9:16", label: "9:16 (竖版)" },
+  { value: CUSTOM_IMAGE_ASPECT_RATIO, label: "自定义比例" },
 ] as const;
 
 export type ImageAspectRatio = (typeof IMAGE_ASPECT_RATIO_OPTIONS)[number]["value"];
@@ -33,6 +37,7 @@ export type ImageSizeSelection = {
   mode: ImageSizeMode;
   aspectRatio: ImageAspectRatio;
   resolution: ImageResolution;
+  customRatio: string;
   customWidth: string;
   customHeight: string;
 };
@@ -49,12 +54,6 @@ const MIN_PIXELS = 655_360;
 const MAX_PIXELS = 8_294_400;
 export const DEFAULT_IMAGE_CUSTOM_WIDTH = "1024";
 export const DEFAULT_IMAGE_CUSTOM_HEIGHT = "1024";
-
-const IMAGE_RESOLUTION_AUTO_RATIO_SIZE_PRESETS: Record<Exclude<ImageResolution, "auto">, string> = {
-  "1080p": "1080x1080",
-  "2k": "2048x2048",
-  "4k": "2880x2880",
-};
 
 export const IMAGE_QUALITY_OPTIONS = [
   { value: "low", label: "Low", description: "低质量，速度更快，适合草稿测试" },
@@ -135,7 +134,7 @@ export function parseImageSizeDimensions(size: string) {
   return { width: match[1], height: match[2] };
 }
 
-function parseImageRatio(ratio: string) {
+export function parseImageRatio(ratio: string) {
   const match = ratio.match(RATIO_PATTERN);
   if (!match) {
     return null;
@@ -148,7 +147,17 @@ function parseImageRatio(ratio: string) {
   return { width, height };
 }
 
-export function calculateImageSize(resolution: Exclude<ImageResolution, "auto">, ratio: Exclude<ImageAspectRatio, "">) {
+export function getActiveImageAspectRatio({
+  aspectRatio,
+  customRatio,
+}: Pick<ImageSizeSelection, "aspectRatio" | "customRatio">) {
+  if (aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO) {
+    return parseImageRatio(customRatio) ? customRatio.trim() : "";
+  }
+  return aspectRatio;
+}
+
+export function calculateImageSize(resolution: Exclude<ImageResolution, "auto">, ratio: string) {
   const parsed = parseImageRatio(ratio);
   if (!parsed) {
     return "";
@@ -194,6 +203,10 @@ export function buildCustomImageSize(width: string, height: string) {
   return normalizeImageSize(`${parsedWidth}x${parsedHeight}`);
 }
 
+export function formatImageSizeDisplay(size: string) {
+  return size.replace(/x/g, "×");
+}
+
 export function isImageAspectRatio(value: unknown): value is ImageAspectRatio {
   return typeof value === "string" && IMAGE_ASPECT_RATIO_VALUES.has(value);
 }
@@ -206,29 +219,41 @@ export function isImageResolution(value: unknown): value is ImageResolution {
   return typeof value === "string" && IMAGE_RESOLUTION_VALUES.has(value);
 }
 
-export function buildImageSize({ mode, aspectRatio, resolution, customWidth, customHeight }: ImageSizeSelection) {
+export function buildImageSize({
+  mode,
+  aspectRatio,
+  resolution,
+  customRatio,
+  customWidth,
+  customHeight,
+}: ImageSizeSelection) {
   if (mode === "auto") {
     return "";
   }
   if (mode === "custom") {
     return buildCustomImageSize(customWidth, customHeight);
   }
+  const activeAspectRatio = getActiveImageAspectRatio({ aspectRatio, customRatio });
+  if (aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO && !activeAspectRatio) {
+    return "";
+  }
   if (resolution === "auto") {
-    return aspectRatio;
+    return activeAspectRatio;
   }
-  if (!aspectRatio) {
-    return IMAGE_RESOLUTION_AUTO_RATIO_SIZE_PRESETS[resolution] ?? "";
+  if (!activeAspectRatio) {
+    return calculateImageSize(resolution, "1:1");
   }
-  return calculateImageSize(resolution, aspectRatio) || aspectRatio;
+  return calculateImageSize(resolution, activeAspectRatio) || activeAspectRatio;
 }
 
 export function getImageAspectRatioFromSize(size: string): ImageAspectRatio {
   const normalized = normalizeImageSize(size);
-  if (isImageAspectRatio(normalized)) {
+  if (isImageAspectRatio(normalized) && normalized !== CUSTOM_IMAGE_ASPECT_RATIO) {
     return normalized;
   }
+  const isDimensionSize = SIZE_PATTERN.test(normalized);
   for (const aspectRatio of IMAGE_ASPECT_RATIO_OPTIONS.map((option) => option.value)) {
-    if (!aspectRatio) {
+    if (!aspectRatio || aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO) {
       continue;
     }
     for (const resolution of IMAGE_RESOLUTION_OPTIONS.map((option) => option.value)) {
@@ -240,6 +265,9 @@ export function getImageAspectRatioFromSize(size: string): ImageAspectRatio {
       }
     }
   }
+  if (!isDimensionSize && parseImageRatio(normalized)) {
+    return CUSTOM_IMAGE_ASPECT_RATIO;
+  }
   return "";
 }
 
@@ -249,7 +277,7 @@ export function getImageResolutionFromSize(size: string): ImageResolution {
     return normalized;
   }
   for (const aspectRatio of IMAGE_ASPECT_RATIO_OPTIONS.map((option) => option.value)) {
-    if (!aspectRatio) {
+    if (!aspectRatio || aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO) {
       continue;
     }
     for (const resolution of IMAGE_RESOLUTION_OPTIONS.map((option) => option.value)) {
@@ -269,9 +297,11 @@ export function getImageSizeSelectionFromSize(size: string): ImageSizeSelection 
   const customSize = parseImageSizeDimensions(normalized);
   const aspectRatio = getImageAspectRatioFromSize(normalized);
   const resolution = getImageResolutionFromSize(normalized);
+  const customRatio = aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO ? normalized : DEFAULT_IMAGE_CUSTOM_RATIO;
   const baseSelection = {
     aspectRatio,
     resolution,
+    customRatio,
     customWidth: customSize?.width ?? DEFAULT_IMAGE_CUSTOM_WIDTH,
     customHeight: customSize?.height ?? DEFAULT_IMAGE_CUSTOM_HEIGHT,
   };
@@ -281,6 +311,7 @@ export function getImageSizeSelectionFromSize(size: string): ImageSizeSelection 
       mode: "auto",
       aspectRatio: "",
       resolution: "auto",
+      customRatio: baseSelection.customRatio,
       customWidth: baseSelection.customWidth,
       customHeight: baseSelection.customHeight,
     };

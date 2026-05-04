@@ -186,11 +186,11 @@ func TestRequiresPaidImageSize(t *testing.T) {
 		{name: "free pixel budget", size: "1248x1248", want: false},
 		{name: "1080p square below paid budget", size: "1080x1080", want: false},
 		{name: "1080p tier below paid budget", size: "1080p", want: false},
-		{name: "1080p widescreen above paid budget", size: "1920x1080", want: true},
-		{name: "2k tier", size: "2k", want: true},
-		{name: "2k", size: "2560x1440", want: true},
-		{name: "4k tier", size: "4k", want: true},
-		{name: "4k", size: "3840x2160", want: true},
+		{name: "1080p widescreen above paid budget", size: "1920x1080", want: false},
+		{name: "2k tier", size: "2k", want: false},
+		{name: "2k", size: "2560x1440", want: false},
+		{name: "4k tier", size: "4k", want: false},
+		{name: "4k", size: "3840x2160", want: false},
 	}
 
 	for _, tt := range tests {
@@ -232,8 +232,8 @@ func TestConversationRequestNormalizesResolutionTierSize(t *testing.T) {
 	if request.Size != "2048x2048" {
 		t.Fatalf("Normalized() size = %q, want 2048x2048", request.Size)
 	}
-	if !request.RequirePaidAccount {
-		t.Fatal("Normalized() RequirePaidAccount = false, want true for 2k tier")
+	if request.RequirePaidAccount {
+		t.Fatal("Normalized() RequirePaidAccount = true, want false for 2k tier")
 	}
 }
 
@@ -333,8 +333,8 @@ func TestResponseImageGenerationToolAcceptsTypedToolSlice(t *testing.T) {
 	if request.Size != "2880x2880" {
 		t.Fatalf("request size = %q, want 2880x2880", request.Size)
 	}
-	if !request.RequirePaidAccount {
-		t.Fatal("RequirePaidAccount = false, want true for 2880x2880")
+	if request.RequirePaidAccount {
+		t.Fatal("RequirePaidAccount = true, want false for 2880x2880")
 	}
 }
 

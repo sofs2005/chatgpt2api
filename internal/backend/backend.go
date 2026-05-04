@@ -28,6 +28,7 @@ const (
 	DefaultClientVersion     = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 	DefaultClientBuildNumber = "5955942"
 	CodexImageModel          = "codex-gpt-image-2"
+	CodexResponsesPath       = "/backend-api/codex/responses"
 
 	browserUserAgent              = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 	browserSecCHUA                = `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`
@@ -174,6 +175,32 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 		path, timezoneName := c.chatTarget()
 		payload := c.conversationPayload(messages, model, timezoneName, systemHints)
 		resp, err := c.postJSON(ctx, path, payload, c.conversationHeaders(path, reqs), true)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer resp.Body.Close()
+		if err := ensureOK(resp, path); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- iterSSEPayloads(ctx, resp.Body, out)
+	}()
+	return out, errCh
+}
+
+func (c *Client) StreamCodexResponses(ctx context.Context, payload map[string]any) (<-chan string, <-chan error) {
+	out := make(chan string)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errCh)
+		if c.AccessToken == "" {
+			errCh <- fmt.Errorf("access_token is required for responses endpoint")
+			return
+		}
+		path := CodexResponsesPath
+		resp, err := c.postJSON(ctx, path, payload, c.codexResponsesHeaders(path), true)
 		if err != nil {
 			errCh <- err
 			return
@@ -695,6 +722,15 @@ func (c *Client) conversationHeaders(path string, reqs ChatRequirements) map[str
 		extra["OpenAI-Sentinel-SO-Token"] = reqs.SOToken
 	}
 	return c.headers(path, extra)
+}
+
+func (c *Client) codexResponsesHeaders(path string) map[string]string {
+	return c.headers(path, map[string]string{
+		"Accept":       "text/event-stream",
+		"Content-Type": "application/json",
+		"OpenAI-Beta":  "responses=experimental",
+		"originator":   "opencode",
+	})
 }
 
 func (c *Client) imageHeaders(path string, reqs ChatRequirements, conduitToken, accept string) map[string]string {

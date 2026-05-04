@@ -22,6 +22,7 @@ var settingEnvKeys = map[string]string{
 	"proxy":                             "CHATGPT2API_PROXY",
 	"refresh_account_interval_minute":   "CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE",
 	"image_concurrent_limit":            "CHATGPT2API_IMAGE_CONCURRENT_LIMIT",
+	"image_task_timeout_seconds":        "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS",
 	"user_default_concurrent_limit":     "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT",
 	"user_default_rpm_limit":            "CHATGPT2API_USER_DEFAULT_RPM_LIMIT",
 	"image_retention_days":              "CHATGPT2API_IMAGE_RETENTION_DAYS",
@@ -45,6 +46,12 @@ var settingEnvKeys = map[string]string{
 }
 
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+const (
+	defaultImageTaskTimeoutSeconds = 300
+	minImageTaskTimeoutSeconds     = 30
+	maxImageTaskTimeoutSeconds     = 3600
+)
 
 type Store struct {
 	mu              sync.RWMutex
@@ -201,6 +208,10 @@ func (s *Store) ImageConcurrentLimit() int {
 		return 1
 	}
 	return value
+}
+
+func (s *Store) ImageTaskTimeoutSeconds() int {
+	return normalizeImageTaskTimeoutSeconds(s.settingValue("image_task_timeout_seconds", defaultImageTaskTimeoutSeconds))
 }
 
 func (s *Store) UserDefaultConcurrentLimit() int {
@@ -372,6 +383,7 @@ func (s *Store) Get() map[string]any {
 	s.mu.RUnlock()
 	data["refresh_account_interval_minute"] = s.RefreshAccountIntervalMinute()
 	data["image_concurrent_limit"] = s.ImageConcurrentLimit()
+	data["image_task_timeout_seconds"] = s.ImageTaskTimeoutSeconds()
 	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
 	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
 	data["image_retention_days"] = s.ImageRetentionDays()
@@ -420,6 +432,9 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 	}
 	if value, ok := next["login_page_image_mode"]; ok {
 		next["login_page_image_mode"] = normalizeLoginPageImageMode(value)
+	}
+	if value, ok := next["image_task_timeout_seconds"]; ok {
+		next["image_task_timeout_seconds"] = normalizeImageTaskTimeoutSeconds(value)
 	}
 	next["update_repo"] = normalizeUpdateRepo(util.ValueOr(next["update_repo"], "ZyphrZero/chatgpt2api"))
 	if err := s.validateSettingsUpdateLocked(next); err != nil {
@@ -677,6 +692,17 @@ func normalizeLoginPageImageMode(value any) string {
 	default:
 		return "contain"
 	}
+}
+
+func normalizeImageTaskTimeoutSeconds(value any) int {
+	seconds := intSetting(value, defaultImageTaskTimeoutSeconds)
+	if seconds < minImageTaskTimeoutSeconds {
+		return minImageTaskTimeoutSeconds
+	}
+	if seconds > maxImageTaskTimeoutSeconds {
+		return maxImageTaskTimeoutSeconds
+	}
+	return seconds
 }
 
 func clampFloat(value, min, max float64) float64 {

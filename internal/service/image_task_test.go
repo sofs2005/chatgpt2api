@@ -182,6 +182,33 @@ func TestImageTaskServicePassesMessagesToHandler(t *testing.T) {
 	}
 }
 
+func TestImageTaskServicePassesImageRequestMetadataToHandler(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handlerCalls := make(chan map[string]any, 1)
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		handlerCalls <- payload
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
+	}
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
+
+	if _, err := svc.SubmitGenerationWithMetadata(context.Background(), identity, "task-1", "draw", "gpt-image-2", "2048x2048", "high", "https://base.test", 1, nil, map[string]any{"image_resolution": "2k", "requested_size": "2048x2048"}); err != nil {
+		t.Fatalf("SubmitGenerationWithMetadata() error = %v", err)
+	}
+
+	select {
+	case payload := <-handlerCalls:
+		if got := payload["image_resolution"]; got != "2k" {
+			t.Fatalf("payload image_resolution = %#v, want 2k in %#v", got, payload)
+		}
+		if got := payload["requested_size"]; got != "2048x2048" {
+			t.Fatalf("payload requested_size = %#v, want 2048x2048 in %#v", got, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for handler payload")
+	}
+}
+
 func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 1)
@@ -468,6 +495,27 @@ func TestImageTaskServicePreservesPartialDataOnFailure(t *testing.T) {
 	}
 	if item["error"] != "second image failed" {
 		t.Fatalf("partial failure error = %#v", item)
+	}
+}
+
+func TestImageTaskServiceMarksTimedOutTaskAsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc.SetTaskTimeoutGetter(func() time.Duration { return 20 * time.Millisecond })
+	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
+
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
+	got := svc.ListTasks(identity, []string{"task-1"})
+	item := got["items"].([]map[string]any)[0]
+	if item["error"] != "图片生成超时，请稍后重试或降低分辨率" {
+		t.Fatalf("timeout error = %#v", item)
 	}
 }
 

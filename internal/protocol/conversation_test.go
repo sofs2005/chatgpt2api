@@ -1,8 +1,12 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,6 +75,60 @@ func TestFormatImageResultStoresOwnerName(t *testing.T) {
 	}
 }
 
+func TestFormatImageResultEncodesRequestedOutputFormat(t *testing.T) {
+	config := testProtocolImageConfig{root: t.TempDir()}
+	engine := &Engine{Config: config}
+	src := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	src.Set(0, 0, color.NRGBA{R: 255, A: 255})
+	src.Set(1, 0, color.NRGBA{G: 255, A: 255})
+	src.Set(0, 1, color.NRGBA{B: 255, A: 255})
+	src.Set(1, 1, color.NRGBA{R: 255, G: 255, B: 255, A: 128})
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, src); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+	compression := 25
+
+	result := engine.FormatImageResultWithOptions(
+		[]map[string]any{{"b64_json": base64.StdEncoding.EncodeToString(encoded.Bytes())}},
+		"draw",
+		"b64_json",
+		"https://example.test",
+		"owner-1",
+		"Alice",
+		123,
+		"",
+		ImageOutputOptions{Format: "jpeg", Compression: &compression},
+	)
+	items, _ := result["data"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("FormatImageResultWithOptions() data = %#v", result["data"])
+	}
+	if items[0]["output_format"] != "jpeg" {
+		t.Fatalf("output_format = %#v, want jpeg", items[0]["output_format"])
+	}
+	imageURL, _ := items[0]["url"].(string)
+	if !strings.HasSuffix(imageURL, ".jpg") {
+		t.Fatalf("image url = %q, want .jpg suffix", imageURL)
+	}
+	b64, _ := items[0]["b64_json"].(string)
+	converted, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("DecodeString() error = %v", err)
+	}
+	_, format, err := image.DecodeConfig(bytes.NewReader(converted))
+	if err != nil {
+		t.Fatalf("DecodeConfig() error = %v", err)
+	}
+	if format != "jpeg" {
+		t.Fatalf("decoded format = %q, want jpeg", format)
+	}
+	rel := strings.TrimPrefix(imageURL, "https://example.test/images/")
+	if _, err := os.Stat(filepath.Join(config.ImagesDir(), filepath.FromSlash(rel))); err != nil {
+		t.Fatalf("stored jpeg missing: %v", err)
+	}
+}
+
 func TestImageStreamErrorMessage(t *testing.T) {
 	cloudflare := `bootstrap failed: status=403, body=<html><script>window._cf_chl_opt={}</script>Enable JavaScript and cookies to continue</html>`
 	if got := imageStreamErrorMessage(cloudflare); got != "upstream returned Cloudflare challenge page; refresh browser fingerprint/session or change proxy" {
@@ -93,5 +151,42 @@ func TestImageStreamErrorMessage(t *testing.T) {
 	}
 	if got := imageStreamErrorMessage(""); got != "image generation failed" {
 		t.Fatalf("empty error = %q", got)
+	}
+}
+
+func TestResponsesImageToolEventErrorMessage(t *testing.T) {
+	tests := []struct {
+		name  string
+		event map[string]any
+		want  string
+	}{
+		{
+			name:  "top level error",
+			event: map[string]any{"type": "response.failed", "error": map[string]any{"message": "upstream rejected request"}},
+			want:  "upstream rejected request",
+		},
+		{
+			name:  "response error",
+			event: map[string]any{"type": "response.failed", "response": map[string]any{"error": map[string]any{"message": "safety blocked"}}},
+			want:  "safety blocked",
+		},
+		{
+			name:  "incomplete details",
+			event: map[string]any{"type": "response.incomplete", "response": map[string]any{"incomplete_details": map[string]any{"reason": "max_output_tokens"}}},
+			want:  "max_output_tokens",
+		},
+		{
+			name:  "ignored progress",
+			event: map[string]any{"type": "response.output_item.done", "error": map[string]any{"message": "not terminal"}},
+			want:  "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := responsesImageToolEventErrorMessage(test.event); got != test.want {
+				t.Fatalf("responsesImageToolEventErrorMessage() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

@@ -21,7 +21,7 @@ import {
 } from "@/store/auth";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { fetchAccounts, type Account } from "@/lib/api";
+import { fetchAccounts, logout, type Account } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   applyColorTheme,
@@ -106,7 +106,6 @@ function NavPill({ item, pathname }: { item: NavItem; pathname: string }) {
       className={() =>
         cn(
           "relative isolate shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors sm:text-sm",
-          "snap-start lg:snap-none",
           active
             ? "text-[#18181b] dark:text-accent-foreground"
             : "text-[#45515e] hover:bg-black/[0.05] hover:text-[#18181b] dark:text-muted-foreground dark:hover:bg-accent dark:hover:text-accent-foreground",
@@ -334,6 +333,11 @@ export function TopNav() {
   }, [session]);
 
   const handleLogout = async () => {
+    try {
+      await logout();
+    } catch {
+      // Local logout should still complete if the server session cookie is already gone.
+    }
     await clearVerifiedAuthSession();
     navigate("/login", { replace: true });
   };
@@ -407,8 +411,8 @@ export function TopNav() {
           id={PRIMARY_NAV_ID}
           aria-label="主导航"
           className={cn(
-            "hide-scrollbar -mx-1 min-w-0 gap-1 overflow-x-auto overscroll-x-contain px-1 pb-0.5 scroll-px-1 lg:mx-0 lg:flex-1 lg:justify-center lg:gap-1.5 lg:px-0 lg:pb-0",
-            navCollapsed ? "hidden" : "flex snap-x",
+            "hide-scrollbar -mx-1 min-w-0 gap-1 overflow-x-auto overscroll-x-contain px-1 pb-0.5 scroll-px-1 touch-pan-x [-webkit-overflow-scrolling:touch] lg:mx-0 lg:flex-1 lg:justify-center lg:gap-1.5 lg:px-0 lg:pb-0",
+            navCollapsed ? "hidden" : "flex",
           )}
         >
           {visibleNavItems.map((item) => (

@@ -8,8 +8,10 @@ import {
   isChatModel,
   isImageCreationModel,
   isImageModel,
+  isImageOutputFormat,
   isImageQuality,
   type ImageModel,
+  type ImageOutputFormat,
   type ImageQuality,
   type ImageVisibility,
 } from "@/lib/api";
@@ -34,12 +36,25 @@ export type StoredImage = {
   visibility?: ImageVisibility;
   b64_json?: string;
   url?: string;
+  width?: number;
+  height?: number;
+  resolution?: string;
+  outputFormat?: ImageOutputFormat;
   revised_prompt?: string;
   error?: string;
   text_response?: string;
 };
 
 export type ImageTurnStatus = "queued" | "generating" | "success" | "error" | "cancelled" | "message";
+
+export type StoredImageSizeSelection = {
+  mode: string;
+  aspectRatio: string;
+  resolution: string;
+  customRatio?: string;
+  customWidth: string;
+  customHeight: string;
+};
 
 export type ImageTurn = {
   id: string;
@@ -49,7 +64,10 @@ export type ImageTurn = {
   referenceImages: StoredReferenceImage[];
   count: number;
   size: string;
+  sizeSelection?: StoredImageSizeSelection;
   quality?: ImageQuality;
+  outputFormat?: ImageOutputFormat;
+  outputCompression?: number;
   visibility?: ImageVisibility;
   images: StoredImage[];
   createdAt: string;
@@ -106,6 +124,9 @@ async function imageConversationsStorageKey() {
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
   const url = typeof image.url === "string" && image.url ? image.url : undefined;
+  const width = Number(image.width);
+  const height = Number(image.height);
+  const resolution = typeof image.resolution === "string" && image.resolution ? image.resolution : undefined;
   const normalized = {
     ...image,
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
@@ -118,6 +139,10 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
     visibility:
       image.visibility === "public" || image.visibility === "private" ? image.visibility : undefined,
     url,
+    width: Number.isFinite(width) && width > 0 ? width : undefined,
+    height: Number.isFinite(height) && height > 0 ? height : undefined,
+    resolution,
+    outputFormat: isImageOutputFormat(image.outputFormat) ? image.outputFormat : undefined,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
     text_response: typeof image.text_response === "string" && image.text_response ? image.text_response : undefined,
   };
@@ -159,6 +184,43 @@ function normalizeImageMode(value: unknown, referenceImages: StoredReferenceImag
   return referenceImages.length > 0 ? "image" : "generate";
 }
 
+function normalizeSizeSelection(value: unknown): StoredImageSizeSelection | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const source = value as Record<string, unknown>;
+  const selection = {
+    mode: typeof source.mode === "string" ? source.mode : "",
+    aspectRatio: typeof source.aspectRatio === "string" ? source.aspectRatio : "",
+    resolution: typeof source.resolution === "string" ? source.resolution : "",
+    customRatio: typeof source.customRatio === "string" ? source.customRatio : "",
+    customWidth: typeof source.customWidth === "string" ? source.customWidth : "",
+    customHeight: typeof source.customHeight === "string" ? source.customHeight : "",
+  };
+  if (
+    !selection.mode &&
+    !selection.aspectRatio &&
+    !selection.resolution &&
+    !selection.customRatio &&
+    !selection.customWidth &&
+    !selection.customHeight
+  ) {
+    return undefined;
+  }
+  return selection;
+}
+
+function normalizeOutputCompression(value: unknown): number | undefined {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return undefined;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return undefined;
+  }
+  return Math.min(100, Math.round(numeric));
+}
+
 function dataUrlMimeType(dataUrl: string) {
   const match = dataUrl.match(/^data:(.*?);base64,/);
   return match?.[1] || "image/png";
@@ -198,6 +260,7 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
   const normalizedImages = Array.isArray(turn.images) ? turn.images.map(normalizeStoredImage) : [];
   const referenceImages = getLegacyReferenceImages(turn);
   const mode = normalizeImageMode(turn.mode, referenceImages);
+  const sizeSelection = normalizeSizeSelection(turn.sizeSelection);
   const visibility: ImageVisibility = turn.visibility === "public" ? "public" : "private";
   const images = normalizedImages.map((image) =>
     image.visibility ? image : { ...image, visibility },
@@ -229,7 +292,10 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     referenceImages,
     count: Math.max(1, Number(turn.count || images.length || 1)),
     size: typeof turn.size === "string" ? turn.size : "",
+    ...(sizeSelection ? { sizeSelection } : {}),
     quality: isImageQuality(turn.quality) ? turn.quality : undefined,
+    outputFormat: isImageOutputFormat(turn.outputFormat) ? turn.outputFormat : undefined,
+    outputCompression: normalizeOutputCompression(turn.outputCompression),
     visibility,
     images,
     createdAt: String(turn.createdAt || new Date().toISOString()),
@@ -265,6 +331,8 @@ function normalizeConversation(conversation: ImageConversation & Record<string, 
           count: Number(conversation.count || 1),
           size: typeof conversation.size === "string" ? conversation.size : "",
           quality: isImageQuality(conversation.quality) ? conversation.quality : undefined,
+          outputFormat: isImageOutputFormat(conversation.outputFormat) ? conversation.outputFormat : undefined,
+          outputCompression: normalizeOutputCompression(conversation.outputCompression),
           images: Array.isArray(conversation.images) ? (conversation.images as StoredImage[]) : [],
           createdAt: String(conversation.createdAt || new Date().toISOString()),
           status:

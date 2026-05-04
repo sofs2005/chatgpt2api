@@ -101,6 +101,28 @@ type DeleteImageTarget = {
 type ImageVisibilityFilter = "all" | ImageVisibility;
 type ImageFormatFilter = "all" | "png" | "jpg" | "webp" | "gif" | "other";
 type ImageOrientationFilter = "all" | "landscape" | "portrait" | "square" | "unknown";
+type ImageResolutionFilter = "all" | "1080p" | "2k" | "4k" | "unknown";
+type ImageAspectRatioFilter = "all" | "1:1" | "4:3" | "3:4" | "16:9" | "9:16" | "other" | "unknown";
+type AutoRefreshMenuScope = "mobile" | "desktop";
+
+const IMAGE_RESOLUTION_FILTERS: Array<{ value: ImageResolutionFilter; label: string }> = [
+  { value: "all", label: "全部分辨率" },
+  { value: "1080p", label: "1080P" },
+  { value: "2k", label: "2K" },
+  { value: "4k", label: "4K" },
+  { value: "unknown", label: "未知尺寸" },
+];
+
+const IMAGE_ASPECT_RATIO_FILTERS: Array<{ value: ImageAspectRatioFilter; label: string }> = [
+  { value: "all", label: "全部比例" },
+  { value: "1:1", label: "1:1" },
+  { value: "4:3", label: "4:3" },
+  { value: "3:4", label: "3:4" },
+  { value: "16:9", label: "16:9" },
+  { value: "9:16", label: "9:16" },
+  { value: "other", label: "其他比例" },
+  { value: "unknown", label: "未知尺寸" },
+];
 
 function imageManagerCacheScope(session: StoredAuthSession) {
   return [session.provider || "local", session.role, session.subjectId || session.key].join(":");
@@ -129,6 +151,122 @@ function getManagedImageOrientation(item: ManagedImage): ImageOrientationFilter 
     return "square";
   }
   return item.width > item.height ? "landscape" : "portrait";
+}
+
+function managedImageDimensions(item: ManagedImage) {
+  const width = Number(item.width);
+  const height = Number(item.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null;
+  }
+  return { width, height };
+}
+
+function getManagedImageResolution(item: ManagedImage) {
+  const dimensions = managedImageDimensions(item);
+  return dimensions ? `${dimensions.width} x ${dimensions.height}` : "";
+}
+
+function getManagedImageMegapixels(item: ManagedImage) {
+  const dimensions = managedImageDimensions(item);
+  if (!dimensions) {
+    return 0;
+  }
+  return (dimensions.width * dimensions.height) / 1_000_000;
+}
+
+function getManagedImageResolutionFilter(item: ManagedImage): ImageResolutionFilter {
+  const preset = normalizeManagedImageResolutionPreset(item.resolution_preset);
+  if (preset) {
+    return preset;
+  }
+  const dimensions = managedImageDimensions(item);
+  if (!dimensions) {
+    return "unknown";
+  }
+  const longSide = Math.max(dimensions.width, dimensions.height);
+  const shortSide = Math.min(dimensions.width, dimensions.height);
+  if (longSide >= 3200 || shortSide >= 2400) {
+    return "4k";
+  }
+  if (longSide >= 1600 || shortSide >= 1400) {
+    return "2k";
+  }
+  return "1080p";
+}
+
+function normalizeManagedImageResolutionPreset(value: unknown): Exclude<ImageResolutionFilter, "all" | "unknown"> | "" {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "1080p" || normalized === "2k" || normalized === "4k") {
+    return normalized;
+  }
+  return "";
+}
+
+function imageResolutionPresetLabel(item: ManagedImage) {
+  const preset = getManagedImageResolutionFilter(item);
+  if (preset === "all" || preset === "unknown") {
+    return "";
+  }
+  return imageResolutionFilterLabel(preset);
+}
+
+function getManagedImageAspectRatio(item: ManagedImage) {
+  const dimensions = managedImageDimensions(item);
+  if (!dimensions) {
+    return "";
+  }
+  return item.aspect_ratio || simplifyAspectRatio(dimensions.width, dimensions.height);
+}
+
+function getManagedImageAspectRatioFilter(item: ManagedImage): ImageAspectRatioFilter {
+  const ratio = getManagedImageAspectRatio(item);
+  if (!ratio) {
+    return "unknown";
+  }
+  if (["1:1", "4:3", "3:4", "16:9", "9:16"].includes(ratio)) {
+    return ratio as ImageAspectRatioFilter;
+  }
+  return "other";
+}
+
+function simplifyAspectRatio(width: number, height: number) {
+  const divisor = greatestCommonDivisor(Math.round(width), Math.round(height));
+  if (divisor <= 0) {
+    return "";
+  }
+  return `${Math.round(width) / divisor}:${Math.round(height) / divisor}`;
+}
+
+function greatestCommonDivisor(a: number, b: number): number {
+  let left = Math.abs(a);
+  let right = Math.abs(b);
+  while (right !== 0) {
+    const next = left % right;
+    left = right;
+    right = next;
+  }
+  return left;
+}
+
+function imageResolutionFilterLabel(value: ImageResolutionFilter) {
+  return IMAGE_RESOLUTION_FILTERS.find((item) => item.value === value)?.label ?? "全部分辨率";
+}
+
+function imageAspectRatioFilterLabel(value: ImageAspectRatioFilter) {
+  return IMAGE_ASPECT_RATIO_FILTERS.find((item) => item.value === value)?.label ?? "全部比例";
+}
+
+function formatManagedImageMegapixels(item: ManagedImage) {
+  const megapixels = getManagedImageMegapixels(item);
+  if (megapixels <= 0) {
+    return "";
+  }
+  return megapixels >= 10 ? `${megapixels.toFixed(1)}MP` : `${megapixels.toFixed(2)}MP`;
+}
+
+function getManagedImageResolutionSummary(item: ManagedImage) {
+  return [getManagedImageResolution(item), getManagedImageAspectRatio(item), formatManagedImageMegapixels(item)].filter(Boolean).join(" · ");
 }
 
 function imageFormatFilterLabel(format: ImageFormatFilter) {
@@ -174,6 +312,12 @@ function matchesManagedImageKeyword(item: ManagedImage, keyword: string) {
     item.owner_id,
     item.created_at,
     item.date,
+    getManagedImageResolution(item),
+    imageResolutionPresetLabel(item),
+    item.requested_size,
+    getManagedImageAspectRatio(item),
+    formatManagedImageMegapixels(item),
+    formatImageFileSize(item.size),
   ].some((value) => String(value || "").toLowerCase().includes(normalizedKeyword));
 }
 
@@ -275,7 +419,7 @@ function ImageManagerContent({
   const [loadError, setLoadError] = useState("");
   const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
   const [isImageActionsOpen, setIsImageActionsOpen] = useState(false);
-  const [isAutoRefreshMenuOpen, setIsAutoRefreshMenuOpen] = useState(false);
+  const [autoRefreshMenuScope, setAutoRefreshMenuScope] = useState<AutoRefreshMenuScope | null>(null);
   const [isAutoRefreshEnabled, setIsAutoRefreshEnabled] = useState(true);
   const [autoRefreshInterval, setAutoRefreshInterval] = useState<ImageAutoRefreshInterval>(30);
   const [autoRefreshSecondsRemaining, setAutoRefreshSecondsRemaining] = useState(autoRefreshInterval);
@@ -286,6 +430,8 @@ function ImageManagerContent({
   const [visibilityFilter, setVisibilityFilter] = useState<ImageVisibilityFilter>("all");
   const [formatFilter, setFormatFilter] = useState<ImageFormatFilter>("all");
   const [orientationFilter, setOrientationFilter] = useState<ImageOrientationFilter>("all");
+  const [resolutionFilter, setResolutionFilter] = useState<ImageResolutionFilter>("all");
+  const [aspectRatioFilter, setAspectRatioFilter] = useState<ImageAspectRatioFilter>("all");
   const filteredItems = useMemo(
     () =>
       items.filter((item) => {
@@ -301,17 +447,31 @@ function ImageManagerContent({
         if (orientationFilter !== "all" && getManagedImageOrientation(item) !== orientationFilter) {
           return false;
         }
+        if (resolutionFilter !== "all" && getManagedImageResolutionFilter(item) !== resolutionFilter) {
+          return false;
+        }
+        if (aspectRatioFilter !== "all" && getManagedImageAspectRatioFilter(item) !== aspectRatioFilter) {
+          return false;
+        }
         return true;
       }),
-    [formatFilter, items, orientationFilter, searchKeyword, visibilityFilter],
+    [aspectRatioFilter, formatFilter, items, orientationFilter, resolutionFilter, searchKeyword, visibilityFilter],
   );
-  const hasLocalFilters = searchKeyword.trim() !== "" || visibilityFilter !== "all" || formatFilter !== "all" || orientationFilter !== "all";
+  const hasLocalFilters =
+    searchKeyword.trim() !== "" ||
+    visibilityFilter !== "all" ||
+    formatFilter !== "all" ||
+    orientationFilter !== "all" ||
+    resolutionFilter !== "all" ||
+    aspectRatioFilter !== "all";
   const hasActiveFilters = hasLocalFilters || startDate !== "" || endDate !== "";
   const activeFilterLabels = [
     startDate && endDate ? `${startDate} 至 ${endDate}` : startDate ? startDate : "",
     visibilityFilter !== "all" ? imageVisibilityFilterLabel(visibilityFilter) : "",
     formatFilter !== "all" ? imageFormatFilterLabel(formatFilter) : "",
     orientationFilter !== "all" ? imageOrientationFilterLabel(orientationFilter) : "",
+    resolutionFilter !== "all" ? imageResolutionFilterLabel(resolutionFilter) : "",
+    aspectRatioFilter !== "all" ? imageAspectRatioFilterLabel(aspectRatioFilter) : "",
   ].filter(Boolean);
   const activeFilterCount = activeFilterLabels.length;
   const visibleItems = useMemo(
@@ -325,7 +485,7 @@ function ImageManagerContent({
         id: item.name,
         src: item.url,
         sizeLabel: formatImageFileSize(item.size),
-        dimensions: item.width && item.height ? `${item.width} x ${item.height}` : undefined,
+        dimensions: getManagedImageResolutionSummary(item) || undefined,
       })),
     [filteredItems],
   );
@@ -507,6 +667,18 @@ function ImageManagerContent({
     setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
   };
 
+  const updateResolutionFilter = (value: ImageResolutionFilter) => {
+    setResolutionFilter(value);
+    setSelectedImageIds({});
+    setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
+  };
+
+  const updateAspectRatioFilter = (value: ImageAspectRatioFilter) => {
+    setAspectRatioFilter(value);
+    setSelectedImageIds({});
+    setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
+  };
+
   const clearImageFilters = () => {
     setStartDate("");
     setEndDate("");
@@ -514,6 +686,8 @@ function ImageManagerContent({
     setVisibilityFilter("all");
     setFormatFilter("all");
     setOrientationFilter("all");
+    setResolutionFilter("all");
+    setAspectRatioFilter("all");
     setSelectedImageIds({});
     setVisibleItemLimit(IMAGE_MANAGER_BATCH_SIZE);
   };
@@ -532,7 +706,7 @@ function ImageManagerContent({
     setAutoRefreshInterval(interval);
     setAutoRefreshSecondsRemaining(interval);
     setIsAutoRefreshEnabled(true);
-    setIsAutoRefreshMenuOpen(false);
+    setAutoRefreshMenuScope(null);
   };
 
   const toggleImageSelection = (item: ManagedImage) => {
@@ -783,7 +957,7 @@ function ImageManagerContent({
     />
   );
 
-  const renderSearchFilter = (placeholder = "搜索文件、路径、作者、日期") => (
+  const renderSearchFilter = (placeholder = "搜索文件、路径、作者、日期、尺寸") => (
     <div className="relative min-w-0">
       <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
       <Input
@@ -849,12 +1023,46 @@ function ImageManagerContent({
           </SelectGroup>
         </SelectContent>
       </Select>
+      <Select value={resolutionFilter} onValueChange={(value) => updateResolutionFilter(value as ImageResolutionFilter)}>
+        <SelectTrigger className="h-10 min-w-0 rounded-lg">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {IMAGE_RESOLUTION_FILTERS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      <Select value={aspectRatioFilter} onValueChange={(value) => updateAspectRatioFilter(value as ImageAspectRatioFilter)}>
+        <SelectTrigger className="h-10 min-w-0 rounded-lg">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {IMAGE_ASPECT_RATIO_FILTERS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
     </>
   );
 
-  const renderAutoRefreshControls = (className = "flex min-w-0 items-center gap-2") => (
+  const renderAutoRefreshControls = (
+    menuScope: AutoRefreshMenuScope,
+    className = "flex min-w-0 items-center gap-2",
+  ) => (
     <div className={className}>
-      <Popover open={isAutoRefreshMenuOpen} onOpenChange={setIsAutoRefreshMenuOpen}>
+      <Popover
+        open={autoRefreshMenuScope === menuScope}
+        onOpenChange={(open) => setAutoRefreshMenuScope(open ? menuScope : null)}
+      >
         <PopoverTrigger asChild>
           <Button
             type="button"
@@ -1037,7 +1245,7 @@ function ImageManagerContent({
                   </Button>
                 </div>
               ) : null}
-              {renderAutoRefreshControls("mt-2 flex min-w-0 items-center gap-2")}
+              {renderAutoRefreshControls("mobile", "mt-2 flex min-w-0 items-center gap-2")}
             </div>
 
             <div className="hidden flex-col gap-2 md:flex">
@@ -1045,9 +1253,9 @@ function ImageManagerContent({
                 {renderDateRangeFilter("w-full sm:w-full")}
                 {renderSearchFilter()}
               </div>
-              <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 lg:grid-cols-6">
                 {renderFilterControls()}
-                {renderAutoRefreshControls("col-span-2 flex min-w-0 items-center gap-2 lg:col-span-1")}
+                {renderAutoRefreshControls("desktop", "col-span-2 flex min-w-0 items-center gap-2")}
               </div>
             </div>
           </div>
@@ -1223,16 +1431,18 @@ function ImageManagerContent({
                 const imageKey = managedImageKey(item);
                 const selected = Boolean(selectedImageIds[imageKey]);
                 const focused = focusedImagePath === imageKey;
-                const dimensions = item.width && item.height ? `${item.width} x ${item.height}` : "";
+                const dimensions = getManagedImageResolution(item);
+                const ratioLabel = getManagedImageAspectRatio(item);
+                const megapixelsLabel = formatManagedImageMegapixels(item);
                 const sizeLabel = formatImageFileSize(item.size);
-                const imageMeta = [dimensions, sizeLabel].filter(Boolean).join(" | ");
+                const imageMeta = [dimensions, ratioLabel, megapixelsLabel, sizeLabel].filter(Boolean).join(" | ");
                 const ownerLabel = imageOwnerLabel(item);
                 const canUpdateVisibility = galleryView === "mine";
                 const showVisibilityStatus = canUpdateVisibility || (isAdmin && galleryView === "public");
                 return (
                   <figure
                     key={item.url}
-                    className={`group relative w-full overflow-hidden rounded-[22px] bg-muted shadow-[0_0_15px_rgba(44,30,116,0.16)] ${selected ? "ring-2 ring-[#1456f0]/80 ring-offset-2" : ""}`}
+                    className={`group relative w-full overflow-hidden rounded-[22px] bg-background shadow-[0_0_15px_rgba(44,30,116,0.16)] ${selected ? "ring-2 ring-[#1456f0]/80 ring-offset-2" : ""}`}
                     style={{
                       contentVisibility: "auto",
                       containIntrinsicSize: item.width && item.height ? `${Math.min(360, item.width)}px ${Math.min(480, item.height)}px` : "320px 320px",
@@ -1311,19 +1521,21 @@ function ImageManagerContent({
                         <Eye className="size-3" />
                         View Original
                       </button>
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.currentTarget.blur();
-                          void navigator.clipboard.writeText(item.url);
-                          toast.success("图片地址已复制");
-                        }}
-                        className="inline-flex size-7 items-center justify-center rounded-full bg-white/95 text-stone-800 shadow-sm transition hover:bg-white hover:text-stone-950"
-                        aria-label="复制图片地址"
-                        title="复制图片地址"
-                      >
-                        <Copy className="size-3.5" />
-                      </button>
+                      {galleryView !== "mine" ? (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.currentTarget.blur();
+                            void navigator.clipboard.writeText(item.url);
+                            toast.success("图片地址已复制");
+                          }}
+                          className="inline-flex size-7 items-center justify-center rounded-full bg-white/95 text-stone-800 shadow-sm transition hover:bg-white hover:text-stone-950"
+                          aria-label="复制图片地址"
+                          title="复制图片地址"
+                        >
+                          <Copy className="size-3.5" />
+                        </button>
+                      ) : null}
                       {canDeleteImages ? (
                         <button
                           type="button"
@@ -1344,9 +1556,12 @@ function ImageManagerContent({
                         </button>
                       ) : null}
                     </div>
-                    <div className="absolute right-2 bottom-2 left-2 z-10 flex items-center justify-between gap-2">
-                      <div className="min-w-0 rounded-full bg-black/45 px-2 py-1 text-[11px] font-medium text-white shadow-sm backdrop-blur-sm">
-                        <span className="block max-w-[12rem] truncate">{ownerLabel}</span>
+                    <div className="absolute right-2 bottom-2 left-2 z-20 flex items-center justify-between gap-2">
+                      <div
+                        className="pointer-events-none inline-flex h-7 min-w-0 max-w-[min(58%,13rem)] items-center rounded-full bg-white/15 px-2.5 text-[11px] font-medium text-white shadow-sm ring-1 ring-white/25 backdrop-blur-md"
+                        title={`作者：${ownerLabel}`}
+                      >
+                        <span className="min-w-0 truncate">{ownerLabel}</span>
                       </div>
                       {showVisibilityStatus ? (
                         <div className="flex shrink-0 items-center gap-1">
@@ -1381,14 +1596,13 @@ function ImageManagerContent({
                       ) : null}
                     </div>
                     <div
-                      className={`pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/55 via-black/20 to-transparent px-2.5 pt-8 pb-10 transition duration-150 ${
+                      className={`pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 via-black/25 to-transparent px-2.5 pt-8 pb-11 transition duration-150 ${
                         focused ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
                       }`}
                     >
                       <div className="text-left text-white drop-shadow-sm">
                         <div className="text-[10px] font-bold tracking-wide">{getManagedImageFormatLabel(item)}</div>
                         <div className="mt-0.5 truncate text-[11px] text-white/90">{item.created_at}</div>
-                        <div className="mt-0.5 truncate text-[11px] text-white/90">作者：{ownerLabel}</div>
                         {imageMeta ? (
                           <div className="mt-0.5 truncate text-[11px] text-white/90">{imageMeta}</div>
                         ) : null}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 	"chatgpt2api/internal/version"
@@ -469,7 +471,7 @@ func TestResponsesImageTaskRouteBuildsTaskPayload(t *testing.T) {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
 
-	body := `{"client_task_id":"response-image-route","prompt":"生成封面","model":"gpt-5.5","size":"16:9","quality":"high","n":2,"images":["data:image/png;base64,cG5n"],"messages":[{"role":"user","content":"生成封面"}],"visibility":"public"}`
+	body := `{"client_task_id":"response-image-route","prompt":"生成封面","model":"gpt-5.5","size":"2048x2048","image_resolution":"2k","quality":"high","output_format":"jpeg","output_compression":42,"n":2,"images":["data:image/png;base64,cG5n"],"messages":[{"role":"user","content":"生成封面"}],"visibility":"public"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/creation-tasks/response-image-generations", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 	res := httptest.NewRecorder()
@@ -484,13 +486,22 @@ func TestResponsesImageTaskRouteBuildsTaskPayload(t *testing.T) {
 	if task["mode"] != "response-image" || task["model"] != "gpt-5.5" || task["quality"] != "high" || task["visibility"] != "public" {
 		t.Fatalf("unexpected submitted task = %#v", task)
 	}
+	if task["output_format"] != "jpeg" || util.ToInt(task["output_compression"], -1) != 42 {
+		t.Fatalf("unexpected task output options = %#v", task)
+	}
 	select {
 	case payload := <-called:
 		if payload["model"] != "gpt-5.5" || payload["quality"] != "high" {
 			t.Fatalf("unexpected response image payload = %#v", payload)
 		}
+		if payload["output_format"] != "jpeg" || util.ToInt(payload["output_compression"], -1) != 42 {
+			t.Fatalf("unexpected response image output options = %#v", payload)
+		}
 		if images, ok := payload["images"].([]any); !ok || len(images) != 1 {
 			t.Fatalf("payload images = %#v", payload["images"])
+		}
+		if payload["image_resolution"] != "2k" || payload["requested_size"] != "2048x2048" {
+			t.Fatalf("payload request metadata = %#v", payload)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for response image handler")
@@ -528,6 +539,119 @@ func TestResponsesImageTaskResultExtractsImagesAndText(t *testing.T) {
 	})
 	if text != "模型返回文本" {
 		t.Fatalf("responseOutputText() = %q", text)
+	}
+}
+
+func TestRunLoggedImageTaskLogsTextOutputAsFailure(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	identity := service.Identity{ID: "admin", Role: service.AuthRoleAdmin, Name: "Admin"}
+	result, err := app.runLoggedImageTask(
+		context.Background(),
+		identity,
+		map[string]any{"model": "gpt-image-2"},
+		"/api/creation-tasks/response-image-generations",
+		"Responses 作画",
+		func(context.Context, map[string]any) (map[string]any, error) {
+			return map[string]any{"output_type": "text", "message": "模型返回文本", "data": []map[string]any{}}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("runLoggedImageTask() error = %v", err)
+	}
+	if result["output_type"] != "text" || result["message"] != "模型返回文本" {
+		t.Fatalf("runLoggedImageTask() result = %#v", result)
+	}
+	logs := app.logs.Search(service.LogQuery{Limit: 10})
+	item := findLogBySummary(logs, "Responses 作画调用失败")
+	if item == nil {
+		t.Fatalf("expected text-only image result to write failure log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if detail["outcome"] != "failed" || util.ToInt(detail["status"], 0) != http.StatusBadGateway {
+		t.Fatalf("failure log detail = %#v", detail)
+	}
+}
+
+func TestResponsesImageTaskTextOutputError(t *testing.T) {
+	result := map[string]any{"data": []map[string]any{}}
+	completed := map[string]any{
+		"output": []map[string]any{
+			{"type": "message", "content": []map[string]any{{"type": "output_text", "text": "Got it! What image would you like me to generate?"}}},
+		},
+	}
+	err := responsesImageTaskTextOutputError(result, completed)
+	if err == nil {
+		t.Fatalf("responsesImageTaskTextOutputError() err = nil, result = %#v", result)
+	}
+	var imageErr *protocol.ImageGenerationError
+	if !errors.As(err, &imageErr) || imageErr.Code != "image_generation_text_response" {
+		t.Fatalf("err = %T %v, want image_generation_text_response", err, err)
+	}
+	if result["output_type"] != "text" {
+		t.Fatalf("result output_type = %#v, want text in %#v", result["output_type"], result)
+	}
+}
+
+func TestResponseImageTaskBodyPassesSizeToImageTool(t *testing.T) {
+	body := responseImageTaskBody(map[string]any{
+		"prompt":             "生成 4K 正方形封面",
+		"model":              "gpt-5.5",
+		"size":               "2880x2880",
+		"quality":            "high",
+		"output_format":      "webp",
+		"output_compression": 35,
+	})
+	tools := body["tools"].([]map[string]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %#v", body["tools"])
+	}
+	tool := tools[0]
+	if tool["size"] != "2880x2880" {
+		t.Fatalf("tool size = %#v, want 2880x2880", tool["size"])
+	}
+	if tool["quality"] != "high" {
+		t.Fatalf("tool quality = %#v, want high", tool["quality"])
+	}
+	if tool["output_format"] != "webp" {
+		t.Fatalf("tool output_format = %#v, want webp", tool["output_format"])
+	}
+	if tool["output_compression"] != 35 {
+		t.Fatalf("tool output_compression = %#v, want 35", tool["output_compression"])
+	}
+}
+
+func TestResponseImageTaskBodyOmitsPngCompression(t *testing.T) {
+	body := responseImageTaskBody(map[string]any{
+		"prompt":             "生成封面",
+		"model":              "gpt-5.5",
+		"output_format":      "png",
+		"output_compression": 35,
+	})
+	tools := body["tools"].([]map[string]any)
+	tool := tools[0]
+	if tool["output_format"] != "png" {
+		t.Fatalf("tool output_format = %#v, want png", tool["output_format"])
+	}
+	if _, ok := tool["output_compression"]; ok {
+		t.Fatalf("png tool should omit output_compression: %#v", tool)
+	}
+}
+
+func TestResponseImageTaskBodyDefaultsAutoAndOmitsCodexQuality(t *testing.T) {
+	body := responseImageTaskBody(map[string]any{
+		"prompt":  "生成封面",
+		"model":   "codex-gpt-image-2",
+		"quality": "high",
+	})
+	tools := body["tools"].([]map[string]any)
+	tool := tools[0]
+	if tool["size"] != "auto" {
+		t.Fatalf("tool size = %#v, want auto", tool["size"])
+	}
+	if _, ok := tool["quality"]; ok {
+		t.Fatalf("codex tool should not include quality: %#v", tool)
 	}
 }
 
@@ -1022,6 +1146,93 @@ func TestImageManagementIsScopedByOwner(t *testing.T) {
 	}
 }
 
+func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	owner := service.AuthOwner{ID: "linuxdo:123", Name: "alice", Provider: service.AuthProviderLinuxDo}
+	_, aliceKey, err := app.auth.UpsertLinuxDoSession(owner)
+	if err != nil {
+		t.Fatalf("UpsertLinuxDoSession(alice) error = %v", err)
+	}
+	_, bobKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "bob", service.AuthOwner{ID: "linuxdo:456", Name: "bob", Provider: service.AuthProviderLinuxDo})
+	if err != nil {
+		t.Fatalf("CreateAPIKey(bob) error = %v", err)
+	}
+
+	rel := "2026/05/01/1777664437_f5b9d1d2cd2a380307ca9fb32c1a84d1.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("mkdir image dir: %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate)
+
+	req := httptest.NewRequest(http.MethodGet, "/images/2026/05/01", nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("image directory listing status = %d body = %q, want 404", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private image status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
+	req.Header.Set("Authorization", "Bearer "+bobKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("other user private image status = %d body = %q, want 404", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("owner private image status = %d body = %q", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); !strings.Contains(got, "image/png") {
+		t.Fatalf("owner private image Content-Type = %q, want image/png", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
+	req.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: aliceKey})
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("owner private image cookie status = %d body = %q", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodHead, "/images/"+rel, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("owner private image HEAD status = %d body = %q", res.Code, res.Body.String())
+	}
+	if res.Body.Len() != 0 {
+		t.Fatalf("owner private image HEAD body length = %d, want 0", res.Body.Len())
+	}
+
+	if _, err := app.images.UpdateImageVisibility(rel, service.ImageVisibilityPublic, service.ImageAccessScope{OwnerID: owner.ID}); err != nil {
+		t.Fatalf("publish image: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("anonymous public image status = %d body = %q", res.Code, res.Body.String())
+	}
+}
+
 func TestImageThumbnailsAreGeneratedOnDemand(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
@@ -1070,6 +1281,7 @@ func TestImageThumbnailsAreGeneratedOnDemand(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodGet, parsedThumbnailURL.Path, nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
 	res = httptest.NewRecorder()
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
@@ -1086,6 +1298,155 @@ func TestImageThumbnailsAreGeneratedOnDemand(t *testing.T) {
 	}
 	if _, err := os.Stat(thumbPath); err != nil {
 		t.Fatalf("thumbnail was not created on demand: %v", err)
+	}
+}
+
+func TestManagedImageThumbnailsRequireOwnerOrPublicAccess(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	owner := service.AuthOwner{ID: "linuxdo:123", Name: "alice", Provider: service.AuthProviderLinuxDo}
+	_, aliceKey, err := app.auth.UpsertLinuxDoSession(owner)
+	if err != nil {
+		t.Fatalf("UpsertLinuxDoSession(alice) error = %v", err)
+	}
+	_, bobKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "bob", service.AuthOwner{ID: "linuxdo:456", Name: "bob", Provider: service.AuthProviderLinuxDo})
+	if err != nil {
+		t.Fatalf("CreateAPIKey(bob) error = %v", err)
+	}
+
+	rel := "2026/05/01/private.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("mkdir image dir: %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate)
+	thumbnailPath := "/image-thumbnails/" + rel + ".jpg"
+
+	req := httptest.NewRequest(http.MethodGet, thumbnailPath, nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private thumbnail status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, thumbnailPath, nil)
+	req.Header.Set("Authorization", "Bearer "+bobKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("other user private thumbnail status = %d body = %q, want 404", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, thumbnailPath, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("owner private thumbnail status = %d body = %q", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); !strings.Contains(got, "image/jpeg") {
+		t.Fatalf("owner private thumbnail Content-Type = %q, want image/jpeg", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, thumbnailPath, nil)
+	req.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: aliceKey})
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("owner private thumbnail cookie status = %d body = %q", res.Code, res.Body.String())
+	}
+
+	if _, err := app.images.UpdateImageVisibility(rel, service.ImageVisibilityPublic, service.ImageAccessScope{OwnerID: owner.ID}); err != nil {
+		t.Fatalf("publish image: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, thumbnailPath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("anonymous public thumbnail status = %d body = %q", res.Code, res.Body.String())
+	}
+}
+
+func TestAuthSessionCookieLifecycle(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+testAdminUsername+`","password":"`+testAdminPassword+`"}`))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("login status = %d body = %s", res.Code, res.Body.String())
+	}
+	cookie := findResponseCookie(res.Result(), authSessionCookieName)
+	if cookie == nil || cookie.Value == "" || cookie.Path != "/" || !cookie.HttpOnly {
+		t.Fatalf("login cookie = %#v", cookie)
+	}
+	if got := cookie.SameSite; got != http.SameSiteLaxMode {
+		t.Fatalf("login cookie SameSite = %v, want Lax", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.AddCookie(cookie)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("logout status = %d body = %s", res.Code, res.Body.String())
+	}
+	cleared := findResponseCookie(res.Result(), authSessionCookieName)
+	if cleared == nil || cleared.MaxAge >= 0 || cleared.Value != "" {
+		t.Fatalf("logout cookie = %#v", cleared)
+	}
+}
+
+func TestLoginAllowsCredentialedLoopbackFrontend(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"`+testAdminUsername+`","password":"`+testAdminPassword+`"}`))
+	req.Host = "127.0.0.1:8000"
+	req.Header.Set("Origin", "http://localhost:5173")
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("login status = %d body = %s", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want frontend origin", got)
+	}
+	if got := res.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want true", got)
+	}
+	if cookie := findResponseCookie(res.Result(), authSessionCookieName); cookie == nil || cookie.Value == "" {
+		t.Fatalf("login cookie = %#v", cookie)
+	}
+}
+
+func TestCredentialedLoginPreflightAllowsContentType(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodOptions, "/auth/login", nil)
+	req.Host = "127.0.0.1:8000"
+	req.Header.Set("Origin", "http://127.0.0.1:5173")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d body = %s", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Access-Control-Allow-Origin"); got != "http://127.0.0.1:5173" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want request origin", got)
+	}
+	if got := res.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want true", got)
+	}
+	if got := res.Header().Get("Access-Control-Allow-Headers"); got != "content-type" {
+		t.Fatalf("Access-Control-Allow-Headers = %q, want content-type", got)
 	}
 }
 
@@ -1979,6 +2340,15 @@ func findHTTPItem(items []map[string]any, id string) map[string]any {
 	for _, item := range items {
 		if item["id"] == id {
 			return item
+		}
+	}
+	return nil
+}
+
+func findResponseCookie(res *http.Response, name string) *http.Cookie {
+	for _, cookie := range res.Cookies() {
+		if cookie.Name == name {
+			return cookie
 		}
 	}
 	return nil

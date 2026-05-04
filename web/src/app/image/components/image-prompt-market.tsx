@@ -667,6 +667,9 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                 {visiblePrompts.map((prompt) => {
                   const localizedPrompt = getLocalizedPrompt(prompt, promptLanguage);
                   const dateLabel = formatPromptDate(prompt.created);
+                  const promptMetaLabels = [localizedPrompt.subCategory, dateLabel].filter(
+                    (label): label is string => Boolean(label),
+                  );
                   const favoriteKey = promptFavoriteKey(prompt);
                   const isFavorite = favoriteIds.has(favoriteKey);
                   const isFavoriteBusy = favoriteBusyIds.has(favoriteKey);
@@ -677,6 +680,16 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                     >
                       <div className="relative aspect-[16/10] overflow-hidden bg-[#f0f0f0]">
                         <PromptPreviewImage prompt={localizedPrompt} />
+                        {localizedPrompt.author ? (
+                          <div className="absolute left-3 top-3 z-10 flex max-w-[calc(100%-1.5rem)]">
+                            <span
+                              className="min-w-0 truncate rounded-full bg-black/45 px-2 py-1 text-[11px] font-medium text-white shadow-sm backdrop-blur-sm"
+                              title={`作者：${localizedPrompt.author}`}
+                            >
+                              {localizedPrompt.author}
+                            </span>
+                          </div>
+                        ) : null}
                         <div className="absolute inset-x-0 bottom-0 flex flex-wrap items-center gap-1.5 bg-gradient-to-t from-black/70 via-black/25 to-transparent px-3 pt-8 pb-2">
                           <Badge className="bg-white/92 text-[#18181b] shadow-sm">
                             {localizedPrompt.mode === "edit" ? "编辑" : "文生图"}
@@ -702,11 +715,13 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                             <h3 className="font-display truncate text-base font-semibold text-[#222222]">
                               {localizedPrompt.title}
                             </h3>
-                            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-[#8e8e93]">
-                              <span>{localizedPrompt.author}</span>
-                              {localizedPrompt.subCategory ? <span>/{localizedPrompt.subCategory}</span> : null}
-                              {dateLabel ? <span>/{dateLabel}</span> : null}
-                            </div>
+                            {promptMetaLabels.length > 0 ? (
+                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-[#8e8e93]">
+                                {promptMetaLabels.map((label) => (
+                                  <span key={label}>/{label}</span>
+                                ))}
+                              </div>
+                            ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-1.5">
                             <button

@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"chatgpt2api/internal/util"
@@ -39,6 +41,7 @@ func (a *App) routes() []appRoute {
 		exact(http.MethodPost, "/v1/messages", a.handleMessages),
 
 		exact(http.MethodPost, "/auth/login", a.handleLogin),
+		exact(http.MethodPost, "/auth/logout", a.handleLogout),
 		exact(http.MethodPost, "/auth/register", a.handleAccountRegister),
 		exact(http.MethodGet, "/auth/session", a.handleSession),
 		exact("", "/auth/providers", a.handleAuthProviders),
@@ -78,7 +81,7 @@ func (a *App) routes() []appRoute {
 		exact("", "/api/proxy/test", a.handleProxy),
 		exact(http.MethodGet, "/api/storage/info", a.handleStorageInfo),
 
-		prefix("/images/", http.StripPrefix("/images/", http.FileServer(http.Dir(a.config.ImagesDir()))).ServeHTTP),
+		prefix("/images/", a.handleImageFile),
 		prefix("/image-thumbnails/", a.handleImageThumbnail),
 		prefix("/login-page-images/", http.StripPrefix("/login-page-images/", http.FileServer(http.Dir(a.config.LoginPageImagesDir()))).ServeHTTP),
 	}
@@ -97,7 +100,7 @@ func subtree(path string, handler http.HandlerFunc) appRoute {
 }
 
 func (a *App) serveHTTP(w http.ResponseWriter, r *http.Request, routes []appRoute) {
-	applyCORS(w)
+	applyCORS(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -139,8 +142,44 @@ func isAPISpace(path string) bool {
 		path == "/v1" || strings.HasPrefix(path, "/v1/")
 }
 
-func applyCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+func applyCORS(w http.ResponseWriter, r *http.Request) {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin != "" && isAllowedCredentialedOrigin(origin, r.Host) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Add("Vary", "Origin")
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if requestedHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers")); requestedHeaders != "" {
+		w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
+		w.Header().Add("Vary", "Access-Control-Request-Headers")
+	} else {
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+	}
+}
+
+func isAllowedCredentialedOrigin(origin, requestHost string) bool {
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Scheme == "" || originURL.Hostname() == "" {
+		return false
+	}
+	requestHostname := requestHost
+	if host, _, err := net.SplitHostPort(requestHost); err == nil {
+		requestHostname = host
+	}
+	requestHostname = strings.Trim(requestHostname, "[]")
+	originHostname := originURL.Hostname()
+	return strings.EqualFold(originHostname, requestHostname) ||
+		isLoopbackHostname(originHostname) && isLoopbackHostname(requestHostname)
+}
+
+func isLoopbackHostname(hostname string) bool {
+	switch strings.ToLower(strings.TrimSpace(hostname)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }

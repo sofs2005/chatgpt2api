@@ -30,6 +30,7 @@ function errorMessageFromValue(value: unknown): string {
 
 const request = axios.create({
     baseURL: webConfig.apiUrl.replace(/\/$/, ""),
+    withCredentials: true,
 });
 
 request.interceptors.request.use(async (config) => {

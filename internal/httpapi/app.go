@@ -34,6 +34,7 @@ import (
 const (
 	maxLoginPageImageSize      = 10 << 20
 	imageThumbnailCacheControl = "public, max-age=31536000, immutable"
+	authSessionCookieName      = "chatgpt2api_session"
 )
 
 type App struct {
@@ -113,6 +114,9 @@ func NewApp() (*App, error) {
 		cfg.UserDefaultConcurrentLimit,
 		cfg.UserDefaultRPMLimit,
 	)
+	app.tasks.SetTaskTimeoutGetter(func() time.Duration {
+		return time.Duration(app.config.ImageTaskTimeoutSeconds()) * time.Second
+	})
 	app.tasks.SetResponseImageHandler(func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
 		return app.runLoggedImageTask(ctx, identity, payload, "/api/creation-tasks/response-image-generations", "Responses 作画", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
 			return app.runResponsesImageGenerationTask(ctx, payload)
@@ -370,6 +374,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	setAuthSessionCookie(w, r, token)
 	a.writeLoginResponse(w, *identity, token)
 }
 
@@ -377,6 +382,9 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	identity, ok := a.requireIdentity(w, r, "")
 	if !ok {
 		return
+	}
+	if token := requestBearerToken(r); token != "" {
+		setAuthSessionCookie(w, r, token)
 	}
 	a.writeLoginResponse(w, identity, "")
 }
@@ -396,7 +404,17 @@ func (a *App) handleAccountRegister(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	setAuthSessionCookie(w, r, token)
 	a.writeLoginResponse(w, *identity, token)
+}
+
+func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	clearAuthSessionCookie(w, r)
+	util.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *App) writeLoginResponse(w http.ResponseWriter, identity service.Identity, token string) {
@@ -703,6 +721,43 @@ func (a *App) handleImageVisibility(w http.ResponseWriter, r *http.Request) {
 	util.WriteJSON(w, http.StatusOK, map[string]any{"item": item})
 }
 
+func (a *App) handleImageFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	rel, err := imageFileRequestPath(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ref, ok := a.authorizeImageFileRequest(w, r, rel)
+	if !ok {
+		return
+	}
+	http.ServeFile(w, r, ref.Path)
+}
+
+func (a *App) authorizeImageFileRequest(w http.ResponseWriter, r *http.Request, rel string) (service.ImageFileAccess, bool) {
+	ref, err := a.images.ImageFileAccess(rel, service.ImageAccessScope{All: true})
+	if err != nil {
+		http.NotFound(w, r)
+		return service.ImageFileAccess{}, false
+	}
+	if ref.Visibility == service.ImageVisibilityPublic {
+		return ref, true
+	}
+	identity, ok := a.imageRequestIdentity(w, r)
+	if !ok {
+		return service.ImageFileAccess{}, false
+	}
+	if identity.Role == service.AuthRoleAdmin || (ref.OwnerID != "" && ref.OwnerID == identityScope(identity)) {
+		return ref, true
+	}
+	http.NotFound(w, r)
+	return service.ImageFileAccess{}, false
+}
+
 func (a *App) handleImageThumbnail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -718,6 +773,9 @@ func (a *App) handleImageThumbnail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if _, ok := a.authorizeImageFileRequest(w, r, sourceRel); !ok {
+		return
+	}
 	_ = a.images.EnsureThumbnail(thumbnailRel)
 	thumbPath := filepath.Join(a.config.ImageThumbnailsDir(), filepath.FromSlash(thumbnailRel))
 	if info, err := os.Stat(thumbPath); err == nil && !info.IsDir() {
@@ -731,6 +789,18 @@ func (a *App) handleImageThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func imageFileRequestPath(r *http.Request) (string, error) {
+	raw := strings.TrimPrefix(r.URL.EscapedPath(), "/images/")
+	if raw == "" || raw == r.URL.EscapedPath() {
+		return "", errors.New("invalid image path")
+	}
+	rel, err := url.PathUnescape(raw)
+	if err != nil {
+		return "", err
+	}
+	return rel, nil
 }
 
 func imageThumbnailRequestPath(r *http.Request) (string, error) {
@@ -837,17 +907,52 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) requireIdentity(w http.ResponseWriter, r *http.Request, overrideAuth string) (service.Identity, bool) {
-	auth := overrideAuth
-	if auth == "" {
-		auth = r.Header.Get("Authorization")
-	}
-	token := extractBearerToken(auth)
+	token := overrideAuthToken(overrideAuth, r)
 	if identity := a.auth.Authenticate(token); identity != nil {
 		if !a.identityCanAccessRequest(*identity, r) {
 			util.WriteError(w, http.StatusForbidden, "permission denied")
 			return service.Identity{}, false
 		}
 		*r = *r.WithContext(withRequestIdentity(r.Context(), *identity))
+		return *identity, true
+	}
+	util.WriteError(w, http.StatusUnauthorized, "authorization is invalid")
+	return service.Identity{}, false
+}
+
+func overrideAuthToken(overrideAuth string, r *http.Request) string {
+	if overrideAuth != "" {
+		return extractBearerToken(overrideAuth)
+	}
+	return requestAuthToken(r)
+}
+
+func requestAuthToken(r *http.Request) string {
+	if token := requestBearerToken(r); token != "" {
+		return token
+	}
+	return requestAuthCookieToken(r)
+}
+
+func requestBearerToken(r *http.Request) string {
+	return extractBearerToken(r.Header.Get("Authorization"))
+}
+
+func requestAuthCookieToken(r *http.Request) string {
+	cookie, err := r.Cookie(authSessionCookieName)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cookie.Value)
+}
+
+func (a *App) imageRequestIdentity(w http.ResponseWriter, r *http.Request) (service.Identity, bool) {
+	token := requestAuthToken(r)
+	if token == "" {
+		util.WriteError(w, http.StatusUnauthorized, "authorization is invalid")
+		return service.Identity{}, false
+	}
+	if identity := a.auth.Authenticate(token); identity != nil {
 		return *identity, true
 	}
 	util.WriteError(w, http.StatusUnauthorized, "authorization is invalid")
@@ -882,6 +987,10 @@ func isPermissionCheckSkipped(path string) bool {
 	switch path {
 	case "/auth/login":
 		return true
+	case "/auth/logout":
+		return true
+	case "/auth/register":
+		return true
 	case "/auth/session":
 		return true
 	case "/api/profile":
@@ -903,6 +1012,34 @@ func extractBearerToken(auth string) string {
 		return ""
 	}
 	return strings.TrimSpace(value)
+}
+
+func setAuthSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     authSessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   30 * 24 * 60 * 60,
+		HttpOnly: true,
+		Secure:   isHTTPSRequest(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearAuthSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authSessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   isHTTPSRequest(r),
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func (a *App) resolveImageBaseURL(r *http.Request) string {
@@ -937,15 +1074,17 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 		return nil, nil, err
 	}
 	body := map[string]any{
-		"client_task_id":  firstForm(r.MultipartForm, "client_task_id"),
-		"prompt":          firstForm(r.MultipartForm, "prompt"),
-		"model":           firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
-		"n":               util.ToInt(firstForm(r.MultipartForm, "n"), 1),
-		"size":            firstForm(r.MultipartForm, "size"),
-		"quality":         firstForm(r.MultipartForm, "quality"),
-		"visibility":      firstForm(r.MultipartForm, "visibility"),
-		"response_format": firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
-		"stream":          util.ToBool(firstForm(r.MultipartForm, "stream")),
+		"client_task_id":     firstForm(r.MultipartForm, "client_task_id"),
+		"prompt":             firstForm(r.MultipartForm, "prompt"),
+		"model":              firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
+		"n":                  util.ToInt(firstForm(r.MultipartForm, "n"), 1),
+		"size":               firstForm(r.MultipartForm, "size"),
+		"quality":            firstForm(r.MultipartForm, "quality"),
+		"output_format":      firstForm(r.MultipartForm, "output_format"),
+		"output_compression": firstForm(r.MultipartForm, "output_compression"),
+		"visibility":         firstForm(r.MultipartForm, "visibility"),
+		"response_format":    firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
+		"stream":             util.ToBool(firstForm(r.MultipartForm, "stream")),
 	}
 	if rawMessages := strings.TrimSpace(firstForm(r.MultipartForm, "messages")); rawMessages != "" {
 		var messages any
@@ -1119,6 +1258,18 @@ func (a *App) recordGeneratedImages(identity service.Identity, urls []string, vi
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility)
 }
 
+func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []string, visibility string, payload map[string]any) {
+	if len(urls) == 0 || a.images == nil {
+		return
+	}
+	ownerID := identityScope(identity)
+	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility, service.GeneratedImageMetadata{
+		ResolutionPreset: util.Clean(payload["image_resolution"]),
+		RequestedSize:    util.Clean(payload["size"]),
+		OutputFormat:     service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
+	})
+}
+
 func (a *App) decorateImageList(payload map[string]any) {
 	ownerNames := a.imageOwnerDisplayNames()
 	for _, item := range util.AsMapSlice(payload["items"]) {
@@ -1166,7 +1317,7 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
 	result, err := run(ctx, payload)
 	urls := collectURLs(result)
-	a.recordGeneratedImages(identity, urls, util.Clean(payload["visibility"]))
+	a.recordGeneratedImagesForPayload(identity, urls, util.Clean(payload["visibility"]), payload)
 	if err != nil {
 		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls)
 		return result, err
@@ -1190,13 +1341,28 @@ func (a *App) runResponsesImageGenerationTask(ctx context.Context, payload map[s
 		return completed, err
 	}
 	result := responsesImageTaskResult(a.engine, completed, payload)
-	if len(util.AsMapSlice(result["data"])) == 0 {
-		if text := responseOutputText(completed["output"]); text != "" {
-			result["message"] = text
-			result["output_type"] = "text"
-		}
+	if err := responsesImageTaskTextOutputError(result, completed); err != nil {
+		return result, err
 	}
 	return result, nil
+}
+
+func responsesImageTaskTextOutputError(result map[string]any, completed map[string]any) error {
+	if len(util.AsMapSlice(result["data"])) > 0 {
+		return nil
+	}
+	text := responseOutputText(completed["output"])
+	if text == "" {
+		return nil
+	}
+	result["message"] = text
+	result["output_type"] = "text"
+	return &protocol.ImageGenerationError{
+		Message:    firstNonEmpty(text, "Responses image_generation returned text instead of image data."),
+		StatusCode: http.StatusBadGateway,
+		Type:       "server_error",
+		Code:       "image_generation_text_response",
+	}
 }
 
 func responseImageTaskBody(payload map[string]any) map[string]any {
@@ -1211,13 +1377,17 @@ func responseImageTaskBody(payload map[string]any) map[string]any {
 		input = []map[string]any{{"role": "user", "content": content}}
 	}
 	tool := map[string]any{
-		"type":   "image_generation",
-		"action": responseImageTaskAction(images),
+		"type":          "image_generation",
+		"action":        responseImageTaskAction(images),
+		"size":          firstNonEmpty(util.Clean(payload["size"]), "auto"),
+		"output_format": service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
 	}
-	if size := util.Clean(payload["size"]); size != "" {
-		tool["size"] = size
+	if util.Clean(tool["output_format"]) != "png" {
+		if compression, ok := imageOutputCompressionFromBody(payload["output_compression"]); ok {
+			tool["output_compression"] = compression
+		}
 	}
-	if quality := util.Clean(payload["quality"]); quality != "" {
+	if quality := util.Clean(payload["quality"]); quality != "" && util.Clean(payload["model"]) != util.ImageModelCodex {
 		tool["quality"] = quality
 	}
 	body := map[string]any{
@@ -1273,7 +1443,7 @@ func responseImageTaskInstructions(messages []map[string]any, prompt string) str
 func responsesImageTaskResult(engine *protocol.Engine, completed map[string]any, payload map[string]any) map[string]any {
 	created := int64(util.ToInt(completed["created_at"], int(time.Now().Unix())))
 	items := responseImageOutputItems(completed["output"])
-	return engine.FormatImageResult(items, util.Clean(payload["prompt"]), util.Clean(payload["response_format"]), util.Clean(payload["base_url"]), util.Clean(payload["owner_id"]), util.Clean(payload["owner_name"]), created, "")
+	return engine.FormatImageResultWithOptions(items, util.Clean(payload["prompt"]), util.Clean(payload["response_format"]), util.Clean(payload["base_url"]), util.Clean(payload["owner_id"]), util.Clean(payload["owner_name"]), created, "", protocol.ImageOutputOptionsFromPayload(payload))
 }
 
 func responseImageOutputItems(output any) []map[string]any {

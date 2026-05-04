@@ -155,28 +155,18 @@ func (s *Sub2APIService) ListRemoteGroups(ctx context.Context, server map[string
 	if err != nil {
 		return nil, err
 	}
-	var items []map[string]any
-	page := 1
-	for {
-		payload, err := s.getJSON(ctx, strings.TrimRight(baseURL, "/")+fmt.Sprintf("/api/v1/admin/groups?page=%d&page_size=200", page), headers)
-		if err != nil {
-			return nil, err
+	items := []map[string]any{}
+	payload, err := s.getJSON(ctx, strings.TrimRight(baseURL, "/")+"/api/v1/admin/groups/all?platform=openai", headers)
+	if err != nil {
+		return nil, err
+	}
+	data, _ := extractPagedItems(payload)
+	for _, raw := range data {
+		group, ok := raw.(map[string]any)
+		if !ok || group["id"] == nil {
+			continue
 		}
-		data, total := extractPagedItems(payload)
-		if len(data) == 0 {
-			break
-		}
-		for _, raw := range data {
-			group, ok := raw.(map[string]any)
-			if !ok || group["id"] == nil {
-				continue
-			}
-			items = append(items, map[string]any{"id": util.Clean(group["id"]), "name": util.Clean(group["name"]), "description": util.Clean(group["description"]), "platform": util.Clean(group["platform"]), "status": util.Clean(group["status"]), "account_count": util.ToInt(group["account_count"], 0), "active_account_count": util.ToInt(group["active_account_count"], 0)})
-		}
-		if page*200 >= total || len(data) < 200 {
-			break
-		}
-		page++
+		items = append(items, map[string]any{"id": util.Clean(group["id"]), "name": util.Clean(group["name"]), "description": util.Clean(group["description"]), "platform": util.Clean(group["platform"]), "status": util.Clean(group["status"]), "account_count": util.ToInt(group["account_count"], 0), "active_account_count": util.ToInt(group["active_account_count"], 0)})
 	}
 	return items, nil
 }
@@ -191,7 +181,7 @@ func (s *Sub2APIService) ListRemoteAccounts(ctx context.Context, server map[stri
 		return nil, err
 	}
 	groupID := util.Clean(server["group_id"])
-	var items []map[string]any
+	items := []map[string]any{}
 	page := 1
 	for {
 		u := strings.TrimRight(baseURL, "/") + fmt.Sprintf("/api/v1/admin/accounts?platform=openai&type=oauth&page=%d&page_size=200", page)
@@ -449,15 +439,29 @@ func unwrapEnvelope(payload map[string]any) any {
 
 func extractPagedItems(payload map[string]any) ([]any, int) {
 	inner := unwrapEnvelope(payload)
-	if list := anyList(inner); list != nil {
+	if list, ok := asArray(inner); ok {
 		return list, len(list)
 	}
 	if obj, ok := inner.(map[string]any); ok {
 		for _, key := range []string{"items", "data", "list"} {
-			if list := anyList(obj[key]); list != nil {
+			if list, ok := asArray(obj[key]); ok {
 				return list, util.ToInt(obj["total"], len(list))
 			}
 		}
 	}
-	return nil, 0
+	return []any{}, 0
+}
+
+func asArray(value any) ([]any, bool) {
+	if list, ok := value.([]any); ok {
+		return list, true
+	}
+	if list, ok := value.([]map[string]any); ok {
+		out := make([]any, len(list))
+		for index, item := range list {
+			out[index] = item
+		}
+		return out, true
+	}
+	return nil, false
 }

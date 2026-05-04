@@ -78,12 +78,24 @@ export function supportsImageQuality(model: ImageModel) {
 }
 
 export type ImageQuality = "low" | "medium" | "high";
+export type ImageOutputFormat = "png" | "jpeg" | "webp";
 export type ImageVisibility = "private" | "public";
 
 const IMAGE_QUALITY_VALUES = new Set<string>(["low", "medium", "high"]);
+const IMAGE_OUTPUT_FORMAT_VALUES = new Set<string>(["png", "jpeg", "webp"]);
+
+export const IMAGE_OUTPUT_FORMAT_OPTIONS = [
+  { value: "png", label: "PNG" },
+  { value: "jpeg", label: "JPEG" },
+  { value: "webp", label: "WebP" },
+] as const satisfies ReadonlyArray<{ value: ImageOutputFormat; label: string }>;
 
 export function isImageQuality(value: unknown): value is ImageQuality {
   return typeof value === "string" && IMAGE_QUALITY_VALUES.has(value);
+}
+
+export function isImageOutputFormat(value: unknown): value is ImageOutputFormat {
+  return typeof value === "string" && IMAGE_OUTPUT_FORMAT_VALUES.has(value);
 }
 
 export type AuthRole = "admin" | "user";
@@ -163,6 +175,7 @@ export type SettingsConfig = {
   registration_enabled?: boolean;
   refresh_account_interval_minute?: number | string;
   image_concurrent_limit?: number | string;
+  image_task_timeout_seconds?: number | string;
   user_default_concurrent_limit?: number | string;
   user_default_rpm_limit?: number | string;
   image_retention_days?: number | string;
@@ -207,6 +220,12 @@ export type ManagedImage = {
   thumbnail_url?: string;
   width?: number;
   height?: number;
+  resolution?: string;
+  resolution_preset?: string;
+  requested_size?: string;
+  aspect_ratio?: string;
+  orientation?: string;
+  megapixels?: number;
   created_at: string;
   published_at?: string;
 };
@@ -281,6 +300,17 @@ export type ImageResponse = {
   data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
 };
 
+export type CreationTaskData = {
+  b64_json?: string;
+  url?: string;
+  revised_prompt?: string;
+  text_response?: string;
+  width?: number;
+  height?: number;
+  resolution?: string;
+  output_format?: ImageOutputFormat;
+};
+
 export type CreationTask = {
   id: string;
   status: "queued" | "running" | "success" | "error" | "cancelled";
@@ -288,9 +318,11 @@ export type CreationTask = {
   model?: ImageModel;
   size?: string;
   quality?: ImageQuality;
+  output_format?: ImageOutputFormat;
+  output_compression?: number;
   created_at: string;
   updated_at: string;
-  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string; text_response?: string }>;
+  data?: CreationTaskData[];
   error?: string;
   output_type?: "text";
   visibility?: ImageVisibility;
@@ -489,6 +521,13 @@ export async function verifySession(token: string) {
   });
 }
 
+export async function logout() {
+  return httpRequest<{ ok: boolean }>("/auth/logout", {
+    method: "POST",
+    redirectOnUnauthorized: false,
+  });
+}
+
 export async function fetchAuthProviders() {
   return httpRequest<AuthProviders>("/auth/providers", {
     redirectOnUnauthorized: false,
@@ -635,6 +674,9 @@ export async function createImageGenerationTask(
   count = 1,
   messages?: CreationTaskMessage[],
   visibility: ImageVisibility = "private",
+  imageResolution?: string,
+  outputFormat?: ImageOutputFormat,
+  outputCompression?: number,
 ) {
   return httpRequest<CreationTask>("/api/creation-tasks/image-generations", {
     method: "POST",
@@ -643,7 +685,10 @@ export async function createImageGenerationTask(
       prompt,
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
+      ...(imageResolution ? { image_resolution: imageResolution } : {}),
       ...(quality ? { quality } : {}),
+      ...(outputFormat ? { output_format: outputFormat } : {}),
+      ...(typeof outputCompression === "number" ? { output_compression: outputCompression } : {}),
       ...(messages?.length ? { messages } : {}),
       visibility,
       n: count,
@@ -661,6 +706,9 @@ export async function createResponseImageGenerationTask(
   messages?: CreationTaskMessage[],
   images?: string[],
   visibility: ImageVisibility = "private",
+  imageResolution?: string,
+  outputFormat?: ImageOutputFormat,
+  outputCompression?: number,
 ) {
   return httpRequest<CreationTask>("/api/creation-tasks/response-image-generations", {
     method: "POST",
@@ -669,7 +717,10 @@ export async function createResponseImageGenerationTask(
       prompt,
       model,
       ...(size ? { size } : {}),
+      ...(imageResolution ? { image_resolution: imageResolution } : {}),
       ...(quality ? { quality } : {}),
+      ...(outputFormat ? { output_format: outputFormat } : {}),
+      ...(typeof outputCompression === "number" ? { output_compression: outputCompression } : {}),
       ...(messages?.length ? { messages } : {}),
       ...(images?.length ? { images } : {}),
       visibility,
@@ -688,6 +739,9 @@ export async function createImageEditTask(
   count = 1,
   messages?: CreationTaskMessage[],
   visibility: ImageVisibility = "private",
+  imageResolution?: string,
+  outputFormat?: ImageOutputFormat,
+  outputCompression?: number,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -703,8 +757,17 @@ export async function createImageEditTask(
   if (size) {
     formData.append("size", size);
   }
+  if (imageResolution) {
+    formData.append("image_resolution", imageResolution);
+  }
   if (quality) {
     formData.append("quality", quality);
+  }
+  if (outputFormat) {
+    formData.append("output_format", outputFormat);
+  }
+  if (typeof outputCompression === "number") {
+    formData.append("output_compression", String(outputCompression));
   }
   if (messages?.length) {
     formData.append("messages", JSON.stringify(messages));
@@ -1175,7 +1238,10 @@ export type Sub2APIRemoteGroup = {
 };
 
 export async function fetchSub2APIServers() {
-  return httpRequest<{ servers: Sub2APIServer[] }>("/api/sub2api/servers");
+  const data = await httpRequest<{ servers?: Sub2APIServer[] | null }>("/api/sub2api/servers");
+  return {
+    servers: Array.isArray(data.servers) ? data.servers : [],
+  };
 }
 
 export async function createSub2APIServer(server: {
@@ -1186,10 +1252,14 @@ export async function createSub2APIServer(server: {
   api_key: string;
   group_id: string;
 }) {
-  return httpRequest<{ server: Sub2APIServer; servers: Sub2APIServer[] }>("/api/sub2api/servers", {
+  const data = await httpRequest<{ server: Sub2APIServer; servers?: Sub2APIServer[] | null }>("/api/sub2api/servers", {
     method: "POST",
     body: server,
   });
+  return {
+    server: data.server,
+    servers: Array.isArray(data.servers) ? data.servers : [],
+  };
 }
 
 export async function updateSub2APIServer(
@@ -1203,28 +1273,43 @@ export async function updateSub2APIServer(
     group_id?: string;
   },
 ) {
-  return httpRequest<{ server: Sub2APIServer; servers: Sub2APIServer[] }>(`/api/sub2api/servers/${serverId}`, {
+  const data = await httpRequest<{ server: Sub2APIServer; servers?: Sub2APIServer[] | null }>(`/api/sub2api/servers/${serverId}`, {
     method: "POST",
     body: updates,
   });
+  return {
+    server: data.server,
+    servers: Array.isArray(data.servers) ? data.servers : [],
+  };
 }
 
 export async function fetchSub2APIServerGroups(serverId: string) {
-  return httpRequest<{ server_id: string; groups: Sub2APIRemoteGroup[] }>(
+  const data = await httpRequest<{ server_id: string; groups?: Sub2APIRemoteGroup[] | null }>(
     `/api/sub2api/servers/${serverId}/groups`,
   );
+  return {
+    server_id: data.server_id,
+    groups: Array.isArray(data.groups) ? data.groups : [],
+  };
 }
 
 export async function deleteSub2APIServer(serverId: string) {
-  return httpRequest<{ servers: Sub2APIServer[] }>(`/api/sub2api/servers/${serverId}`, {
+  const data = await httpRequest<{ servers?: Sub2APIServer[] | null }>(`/api/sub2api/servers/${serverId}`, {
     method: "DELETE",
   });
+  return {
+    servers: Array.isArray(data.servers) ? data.servers : [],
+  };
 }
 
 export async function fetchSub2APIServerAccounts(serverId: string) {
-  return httpRequest<{ server_id: string; accounts: Sub2APIRemoteAccount[] }>(
+  const data = await httpRequest<{ server_id: string; accounts?: Sub2APIRemoteAccount[] | null }>(
     `/api/sub2api/servers/${serverId}/accounts`,
   );
+  return {
+    server_id: data.server_id,
+    accounts: Array.isArray(data.accounts) ? data.accounts : [],
+  };
 }
 
 export async function startSub2APIImport(serverId: string, accountIds: string[]) {

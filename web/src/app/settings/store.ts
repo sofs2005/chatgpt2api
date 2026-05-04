@@ -50,6 +50,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
     image_concurrent_limit: Number(config.image_concurrent_limit || 4),
+    image_task_timeout_seconds: Number(config.image_task_timeout_seconds || 300),
     user_default_concurrent_limit: Number(config.user_default_concurrent_limit || 0),
     user_default_rpm_limit: Number(config.user_default_rpm_limit || 0),
     image_retention_days: Number(config.image_retention_days || 30),
@@ -135,6 +136,7 @@ type SettingsStore = {
   saveConfig: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setImageConcurrentLimit: (value: string) => void;
+  setImageTaskTimeoutSeconds: (value: string) => void;
   setUserDefaultConcurrentLimit: (value: string) => void;
   setUserDefaultRpmLimit: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
@@ -265,6 +267,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
         image_concurrent_limit: Math.max(1, Number(config.image_concurrent_limit) || 4),
+        image_task_timeout_seconds: Math.min(3600, Math.max(30, Number(config.image_task_timeout_seconds) || 300)),
         user_default_concurrent_limit: Math.max(0, Number(config.user_default_concurrent_limit) || 0),
         user_default_rpm_limit: Math.max(0, Number(config.user_default_rpm_limit) || 0),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
@@ -327,6 +330,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageConcurrentLimit: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_concurrent_limit: value } } : {});
+  },
+
+  setImageTaskTimeoutSeconds: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_task_timeout_seconds: value } } : {});
   },
 
   setUserDefaultConcurrentLimit: (value) => {

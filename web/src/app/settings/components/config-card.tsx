@@ -109,6 +109,9 @@ export function ConfigCard() {
   const setImageConcurrentLimit = useSettingsStore(
     (state) => state.setImageConcurrentLimit,
   );
+  const setImageTaskTimeoutSeconds = useSettingsStore(
+    (state) => state.setImageTaskTimeoutSeconds,
+  );
   const setUserDefaultConcurrentLimit = useSettingsStore(
     (state) => state.setUserDefaultConcurrentLimit,
   );
@@ -194,7 +197,7 @@ export function ConfigCard() {
         <section className={configSectionClassName}>
           <SectionHeading
             title="基础参数"
-            tip="账号刷新间隔单位分钟；图片访问地址是图片结果访问前缀；同时生成张数控制后台生成槽位；图片自动清理会删除指定天数前的本地图片。"
+            tip="账号刷新间隔单位分钟；图片访问地址是图片结果访问前缀；同时生成张数控制后台生成槽位；任务超时时间单位秒；图片自动清理会删除指定天数前的本地图片。"
           />
           <div className="grid gap-3 sm:grid-cols-2">
             <Field className={configFieldClassName}>
@@ -246,6 +249,20 @@ export function ConfigCard() {
                 value={String(config?.image_retention_days || "")}
                 onChange={(event) => setImageRetentionDays(event.target.value)}
                 placeholder="30"
+                className={settingsInputClassName}
+              />
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-task-timeout-seconds">
+                任务超时时间
+              </ConfigFieldLabel>
+              <Input
+                id="settings-image-task-timeout-seconds"
+                value={String(config?.image_task_timeout_seconds || "")}
+                onChange={(event) =>
+                  setImageTaskTimeoutSeconds(event.target.value)
+                }
+                placeholder="300"
                 className={settingsInputClassName}
               />
             </Field>

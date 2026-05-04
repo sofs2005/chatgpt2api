@@ -56,7 +56,7 @@ func TestImageServiceListImagesReturnsEmptyArrays(t *testing.T) {
 	}
 }
 
-func TestImageServiceListImagesDoesNotGenerateThumbnailsSynchronously(t *testing.T) {
+func TestImageServiceListImagesReturnsDimensionsWithoutGeneratingThumbnails(t *testing.T) {
 	root := t.TempDir()
 	config := testImageConfig{root: root}
 	imagePath := filepath.Join(config.ImagesDir(), "2026", "04", "29", "sample.png")
@@ -81,8 +81,17 @@ func TestImageServiceListImagesDoesNotGenerateThumbnailsSynchronously(t *testing
 	if !strings.HasSuffix(thumbnailPath, thumbnailExtension) {
 		t.Fatalf("thumbnail_url path = %q, want %s suffix", thumbnailPath, thumbnailExtension)
 	}
-	if items[0]["width"] != nil || items[0]["height"] != nil {
-		t.Fatalf("ListImages() generated image dimensions synchronously: %#v", items[0])
+	if numericMetaValue(items[0]["width"]) != 32 || numericMetaValue(items[0]["height"]) != 24 {
+		t.Fatalf("ListImages() dimensions = %#v, want 32x24", items[0])
+	}
+	if toString(items[0]["resolution"]) != "32x24" {
+		t.Fatalf("ListImages() resolution = %#v, want 32x24", items[0]["resolution"])
+	}
+	if toString(items[0]["aspect_ratio"]) != "4:3" {
+		t.Fatalf("ListImages() aspect_ratio = %#v, want 4:3", items[0]["aspect_ratio"])
+	}
+	if toString(items[0]["orientation"]) != "landscape" {
+		t.Fatalf("ListImages() orientation = %#v, want landscape", items[0]["orientation"])
 	}
 	thumbPath := filepath.Join(config.ImageThumbnailsDir(), "2026", "04", "29", "sample.png"+thumbnailExtension)
 	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
@@ -449,6 +458,37 @@ func TestImageServicePublicVisibility(t *testing.T) {
 	public = service.ListImages("http://127.0.0.1:8000", "", "", ImageAccessScope{Public: true})
 	if items := public["items"].([]map[string]any); len(items) != 0 {
 		t.Fatalf("private image should leave public gallery: %#v", public)
+	}
+}
+
+func TestImageServiceListImagesReturnsRequestedResolutionPreset(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	rel := "2026/04/29/alice.png"
+	path := filepath.Join(config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeTestPNG(path); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(config)
+	service.RecordGeneratedImages([]string{rel}, "linuxdo:123", "alice", ImageVisibilityPrivate, GeneratedImageMetadata{
+		ResolutionPreset: "2k",
+		RequestedSize:    "2048x2048",
+	})
+
+	list := service.ListImages("http://127.0.0.1:8000", "", "", allImages)
+	items := list["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("ListImages() = %#v", list)
+	}
+	if items[0]["resolution_preset"] != "2k" || items[0]["requested_size"] != "2048x2048" {
+		t.Fatalf("request metadata = %#v", items[0])
+	}
+	if items[0]["resolution"] != "32x24" {
+		t.Fatalf("actual resolution = %#v, want 32x24", items[0]["resolution"])
 	}
 }
 

@@ -87,6 +87,9 @@ jobs:
       - name: Verify Go version
         run: go version | grep -q 'go1.26.2'
 
+      - name: Configure git for Go modules
+        run: git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

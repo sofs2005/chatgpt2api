@@ -154,7 +154,7 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 	go func() {
 		defer close(out)
 		defer close(errCh)
-		if contains(systemHints, "picture_v2") && (model == util.ImageModelAuto || util.IsImageModel(model)) {
+		if contains(systemHints, "picture_v2") && util.IsImageGenerationModel(model) {
 			errCh <- c.streamPictureConversation(ctx, out, prompt, model, images)
 			return
 		}

@@ -504,6 +504,8 @@ curl http://localhost:3000/v1/images/generations \
 
 `gpt-image-2` 走官网图片链路，`codex-gpt-image-2` 走 Codex TUI 风格的 `/backend-api/codex/responses` 链路，`auto` 默认使用官网图片链路。`codex-gpt-image-2` 是本项目的路由别名，上游 payload 会映射为 Codex 可识别的 `tools[0].model=gpt-5.4-mini`。Free 账号不会被本地预先拦截；如果账号没有对应图片工具权限，上游可能直接返回失败。
 
+`size` 可以传 `auto`、比例值（如 `1:1`、`16:9`、`9:16`）、分辨率档位（`1080p`、`2k`、`4k`）或显式 `WIDTHxHEIGHT`。后端会在发送 Codex Responses 上游请求前转换为合法的 `WIDTHxHEIGHT` 工具尺寸，并保证边长是 16 的倍数、最长边不超过 3840、宽高比不超过 3:1。
+
 ### `POST /v1/images/edits`
 
 ```bash

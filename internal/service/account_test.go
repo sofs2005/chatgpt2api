@@ -218,9 +218,12 @@ func TestRefreshAccountStateMarksUnauthorizedInitAsInvalid(t *testing.T) {
 	accounts.AddAccounts([]string{"token-1"})
 	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
 
-	account := accounts.RefreshAccountState(context.Background(), "token-1")
+	account, err := accounts.RefreshAccountState(context.Background(), "token-1")
+	if err != nil {
+		t.Fatalf("RefreshAccountState() error = %v", err)
+	}
 	if account == nil {
-		t.Fatal("RefreshAccountState() = nil, want updated invalid account")
+		t.Fatal("RefreshAccountState() account = nil, want updated invalid account")
 	}
 	if account["status"] != "异常" {
 		t.Fatalf("status = %#v, want 异常", account["status"])
@@ -387,6 +390,36 @@ func TestGetAvailableAccessTokenAllowsFreeUnknownImageQuota(t *testing.T) {
 		t.Fatalf("free unknown quota account = %#v, want available Free account with unknown image quota", account)
 	}
 	accounts.MarkImageResult("free-token", false)
+}
+
+func TestGetAvailableAccessTokenReportsRefreshFailure(t *testing.T) {
+	accounts := newTestAccountService(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			http.Error(w, "temporary upstream failure", http.StatusBadGateway)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 1})
+
+	token, err := accounts.GetAvailableAccessToken(context.Background())
+	if err == nil {
+		t.Fatalf("GetAvailableAccessToken() token = %q, want refresh error", token)
+	}
+	if !strings.Contains(err.Error(), "/backend-api/me failed: HTTP 502") {
+		t.Fatalf("GetAvailableAccessToken() error = %q, want refresh failure detail", err.Error())
+	}
 }
 
 func TestReserveNextCandidateTokenCanFilterPaidAccounts(t *testing.T) {

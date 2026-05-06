@@ -202,6 +202,31 @@ func NewImageGenerationError(message string) *ImageGenerationError {
 	return &ImageGenerationError{Message: message, StatusCode: 502, Type: "server_error", Code: "upstream_error"}
 }
 
+const maxTransientImageStreamAttempts = 3
+
+func isTransientImageStreamErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	for _, token := range []string{
+		"sse read error",
+		"responses sse read error",
+		"stream error",
+		"internal_error",
+		"received from peer",
+		"unexpected eof",
+		"http2: client connection lost",
+		"connection reset by peer",
+		"stream closed",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
 func imageStreamErrorMessage(message string) string {
 	text := strings.TrimSpace(message)
 	lower := strings.ToLower(text)
@@ -418,6 +443,7 @@ func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request Convers
 			allowAccount = service.IsPaidImageAccount
 		}
 		for index := 1; index <= request.N; index++ {
+			transientAttempts := 0
 			for {
 				token, err := e.Accounts.GetAvailableAccessTokenFor(ctx, allowAccount)
 				if err != nil {
@@ -481,6 +507,10 @@ func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request Convers
 					}
 				}
 				if !emittedForToken && IsTokenInvalidError(lastError) {
+					continue
+				}
+				if !returnedResult && isTransientImageStreamErrorMessage(lastError) && transientAttempts < maxTransientImageStreamAttempts {
+					transientAttempts++
 					continue
 				}
 				errCh <- NewImageGenerationError(imageStreamErrorMessage(lastError))

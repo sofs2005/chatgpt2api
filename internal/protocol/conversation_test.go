@@ -153,3 +153,30 @@ func TestImageStreamErrorMessage(t *testing.T) {
 		t.Fatalf("empty error = %q", got)
 	}
 }
+
+func TestIsTransientImageStreamErrorMessage(t *testing.T) {
+	transient := []string{
+		"responses SSE read error: stream error: stream ID 1; INTERNAL_ERROR; received from peer",
+		"http2: client connection lost",
+		"unexpected EOF",
+		"connection reset by peer",
+		"stream closed",
+	}
+	for _, input := range transient {
+		if !isTransientImageStreamErrorMessage(input) {
+			t.Fatalf("isTransientImageStreamErrorMessage(%q) = false, want true", input)
+		}
+	}
+
+	stable := []string{
+		"upstream returned Cloudflare challenge page",
+		"You've reached the image generation limit for now.",
+		"invalid size: expected WIDTHxHEIGHT",
+		"auth_chat_requirements failed: status=401",
+	}
+	for _, input := range stable {
+		if isTransientImageStreamErrorMessage(input) {
+			t.Fatalf("isTransientImageStreamErrorMessage(%q) = true, want false", input)
+		}
+	}
+}

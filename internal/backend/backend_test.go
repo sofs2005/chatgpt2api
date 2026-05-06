@@ -156,6 +156,42 @@ func TestBuildResponsesImageRequestMapsCodexAliasToCodexToolModel(t *testing.T) 
 	}
 }
 
+func TestBuildResponsesImageRequestNormalizesToolSize(t *testing.T) {
+	tests := []struct {
+		name string
+		size string
+		want any
+	}{
+		{name: "auto omitted", size: "auto", want: nil},
+		{name: "square aspect ratio becomes codex size", size: "1:1", want: "1024x1024"},
+		{name: "landscape aspect ratio becomes codex size", size: "3:2", want: "1536x1024"},
+		{name: "portrait aspect ratio becomes codex size", size: "2:3", want: "1024x1536"},
+		{name: "x separated ratio becomes codex size", size: "16x9", want: "1536x864"},
+		{name: "1080p tier becomes valid multiple", size: "1080x1080", want: "1088x1088"},
+		{name: "oversized dimensions are clamped", size: "8192x8192", want: "2880x2880"},
+		{name: "unknown size omitted", size: "poster", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := buildResponsesImagePayload(ResponsesImageRequest{
+				Prompt: "生成封面",
+				Size:   tt.size,
+			})
+			if err != nil {
+				t.Fatalf("buildResponsesImagePayload() error = %v", err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(payload, &body); err != nil {
+				t.Fatalf("payload json error = %v", err)
+			}
+			tool := body["tools"].([]any)[0].(map[string]any)
+			if got := tool["size"]; got != tt.want {
+				t.Fatalf("tool size = %#v, want %#v in %#v", got, tt.want, tool)
+			}
+		})
+	}
+}
+
 func TestNormalizeResponsesImageToolModel(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -151,7 +151,12 @@ func applyCORS(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 	}
-	w.Header().Set("Access-Control-Allow-Methods", "*")
+	if requestedMethod := strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")); requestedMethod != "" {
+		w.Header().Set("Access-Control-Allow-Methods", requestedMethod)
+		w.Header().Add("Vary", "Access-Control-Request-Method")
+	} else {
+		w.Header().Set("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS")
+	}
 	if requestedHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers")); requestedHeaders != "" {
 		w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
 		w.Header().Add("Vary", "Access-Control-Request-Headers")

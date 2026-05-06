@@ -1450,6 +1450,34 @@ func TestCredentialedLoginPreflightAllowsContentType(t *testing.T) {
 	}
 }
 
+func TestCredentialedImageVisibilityPreflightAllowsPatchAuthorization(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/images/visibility", nil)
+	req.Host = "127.0.0.1:8000"
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPatch)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d body = %s", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want request origin", got)
+	}
+	if got := res.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want true", got)
+	}
+	if got := res.Header().Get("Access-Control-Allow-Methods"); got != http.MethodPatch {
+		t.Fatalf("Access-Control-Allow-Methods = %q, want PATCH", got)
+	}
+	if got := res.Header().Get("Access-Control-Allow-Headers"); got != "authorization,content-type" {
+		t.Fatalf("Access-Control-Allow-Headers = %q, want authorization,content-type", got)
+	}
+}
+
 func TestImageThumbnailRejectsTraversal(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()

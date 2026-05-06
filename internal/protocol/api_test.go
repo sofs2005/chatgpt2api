@@ -6,8 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"chatgpt2api/internal/util"
 )
 
 func ptrInt(value int) *int {
@@ -271,7 +269,7 @@ func TestResponsesInputKeepsAssistantAndGeneratedImageContext(t *testing.T) {
 	}
 }
 
-func TestResponseImageGenerationRequestUsesTextModelAndToolParams(t *testing.T) {
+func TestResponseImageGenerationRequestMapsTextModelToLegacyImageFlow(t *testing.T) {
 	body := map[string]any{
 		"model": "gpt-5.5",
 		"input": "生成封面",
@@ -286,14 +284,11 @@ func TestResponseImageGenerationRequestUsesTextModelAndToolParams(t *testing.T) 
 	if prompt != "生成封面" {
 		t.Fatalf("prompt = %q, want 生成封面", prompt)
 	}
-	if request.Model != "gpt-5.5" {
-		t.Fatalf("model = %q, want gpt-5.5", request.Model)
-	}
-	if !request.ResponsesImageTool {
-		t.Fatal("ResponsesImageTool = false, want true")
+	if request.Model != "auto" {
+		t.Fatalf("model = %q, want auto legacy image model", request.Model)
 	}
 	if !request.SupportsImageGenerationModel() {
-		t.Fatal("request should support image generation with gpt-5.5 responses image tool")
+		t.Fatal("request should support the legacy image generation flow")
 	}
 	if request.Size != "16:9" || request.Quality != "high" {
 		t.Fatalf("request size/quality = %q/%q, want 16:9/high", request.Size, request.Quality)
@@ -327,8 +322,8 @@ func TestResponseImageGenerationToolAcceptsTypedToolSlice(t *testing.T) {
 	if prompt != "生成封面" {
 		t.Fatalf("prompt = %q, want 生成封面", prompt)
 	}
-	if !request.ResponsesImageTool {
-		t.Fatal("ResponsesImageTool = false, want true")
+	if request.Model != "gpt-image-2" {
+		t.Fatalf("model = %q, want gpt-image-2", request.Model)
 	}
 	if request.Size != "2880x2880" {
 		t.Fatalf("request size = %q, want 2880x2880", request.Size)
@@ -355,92 +350,6 @@ func TestResponseImageGenerationRequestDefaultsImageModelForAuto(t *testing.T) {
 	}
 	if request.Size != "auto" {
 		t.Fatalf("size = %q, want auto", request.Size)
-	}
-}
-
-func TestCodexResponsesImageToolPayloadUsesGPT55ForImageOnlyModel(t *testing.T) {
-	request := ConversationRequest{
-		Model:        "gpt-image-2",
-		Prompt:       "生成 2K 正方形封面",
-		Size:         "2048x2048",
-		Quality:      "high",
-		OutputFormat: "png",
-	}.Normalized()
-	payload := CodexResponsesImageToolPayload(request)
-	if payload["model"] != codexResponsesImageMainModel {
-		t.Fatalf("payload model = %#v, want %s", payload["model"], codexResponsesImageMainModel)
-	}
-	tools := payload["tools"].([]map[string]any)
-	tool := tools[0]
-	if tool["model"] != "gpt-image-2" {
-		t.Fatalf("tool model = %#v, want gpt-image-2", tool["model"])
-	}
-	input := payload["input"].([]map[string]any)
-	content := input[0]["content"].([]map[string]any)
-	text := util.Clean(content[0]["text"])
-	if !strings.HasPrefix(text, responsesImagePromptGuardPrefix+"\n") || !strings.Contains(text, "生成 2K 正方形封面") {
-		t.Fatalf("payload prompt missing guard: %q", text)
-	}
-}
-
-func TestCodexResponsesImageToolPayloadCarriesExactSize(t *testing.T) {
-	request := ConversationRequest{
-		Model:             "gpt-5.5",
-		Prompt:            "生成 4K 正方形封面",
-		Size:              "2880x2880",
-		Quality:           "high",
-		OutputFormat:      "jpeg",
-		OutputCompression: ptrInt(28),
-	}.Normalized()
-	payload := CodexResponsesImageToolPayload(request)
-	tools := payload["tools"].([]map[string]any)
-	if len(tools) != 1 {
-		t.Fatalf("tools = %#v", payload["tools"])
-	}
-	tool := tools[0]
-	if tool["size"] != "2880x2880" {
-		t.Fatalf("tool size = %#v, want 2880x2880", tool["size"])
-	}
-	if tool["quality"] != "high" {
-		t.Fatalf("tool quality = %#v, want high", tool["quality"])
-	}
-	if tool["output_format"] != "jpeg" {
-		t.Fatalf("tool output_format = %#v, want jpeg", tool["output_format"])
-	}
-	if tool["output_compression"] != 28 {
-		t.Fatalf("tool output_compression = %#v, want 28", tool["output_compression"])
-	}
-	if tool["model"] != nil {
-		t.Fatalf("text-model request should not set image tool model: %#v", tool["model"])
-	}
-	if payload["model"] != "gpt-5.5" {
-		t.Fatalf("payload model = %#v, want gpt-5.5", payload["model"])
-	}
-	instructions, ok := payload["instructions"].(string)
-	if !ok || !strings.Contains(instructions, codexResponsesImageToolBridgeMarker) {
-		t.Fatalf("payload instructions missing image bridge: %#v", payload["instructions"])
-	}
-}
-
-func TestCodexResponsesImageToolPayloadOmitsCodexQuality(t *testing.T) {
-	request := ConversationRequest{
-		Model:        "codex-gpt-image-2",
-		Prompt:       "生成封面",
-		Size:         "3840x2160",
-		Quality:      "high",
-		OutputFormat: "png",
-	}.Normalized()
-	payload := CodexResponsesImageToolPayload(request)
-	tools := payload["tools"].([]map[string]any)
-	tool := tools[0]
-	if tool["model"] != "codex-gpt-image-2" {
-		t.Fatalf("tool model = %#v, want codex-gpt-image-2", tool["model"])
-	}
-	if _, ok := tool["quality"]; ok {
-		t.Fatalf("codex image tool should not include quality: %#v", tool)
-	}
-	if payload["model"] != codexResponsesImageMainModel {
-		t.Fatalf("payload model = %#v, want %s", payload["model"], codexResponsesImageMainModel)
 	}
 }
 

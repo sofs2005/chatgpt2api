@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy, Download, Eye, Globe2, ImageIcon, LoaderCircle, Lock, MoreHorizontal, RefreshCw, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { PageHeader } from "@/components/page-header";
@@ -27,6 +28,7 @@ import {
   type ImageVisibility,
   type ManagedImage,
 } from "@/lib/api";
+import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
 import {
   clearImageManagerCache,
   getImageManagerCache,
@@ -64,9 +66,10 @@ async function downloadManagedImage(item: ManagedImage, index: number) {
   let objectUrl = "";
 
   try {
-    const response = await fetch(item.url);
-    if (response.ok) {
-      const blob = await response.blob();
+    const blob = shouldUseAuthenticatedImageFallback(item.url)
+      ? await fetchAuthenticatedImageBlob(item.url)
+      : await fetch(item.url).then((response) => (response.ok ? response.blob() : null));
+    if (blob) {
       objectUrl = URL.createObjectURL(blob);
       href = objectUrl;
     }
@@ -1469,7 +1472,7 @@ function ImageManagerContent({
                       onFocus={() => setFocusedImagePath(imageKey)}
                       aria-label={selected ? "取消选择图片" : "选择图片"}
                     >
-                      <img
+                      <AuthenticatedImage
                         src={item.thumbnail_url || item.url}
                         alt={item.name}
                         width={item.width || undefined}

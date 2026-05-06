@@ -4,6 +4,8 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, RotateCcw, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
+import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
 import { cn } from "@/lib/utils";
 
 type LightboxImage = {
@@ -101,10 +103,31 @@ export function ImageLightbox({
 
   const handleDownload = useCallback(() => {
     if (!current) return;
-    const link = document.createElement("a");
-    link.href = current.src;
-    link.download = `image-${current.id}.png`;
-    link.click();
+    const download = async () => {
+      let href = current.src;
+      let objectURL = "";
+
+      if (shouldUseAuthenticatedImageFallback(current.src)) {
+        try {
+          const blob = await fetchAuthenticatedImageBlob(current.src);
+          objectURL = URL.createObjectURL(blob);
+          href = objectURL;
+        } catch {
+          href = current.src;
+        }
+      }
+
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = `image-${current.id}.png`;
+      link.click();
+
+      if (objectURL) {
+        window.setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+      }
+    };
+
+    void download();
   }, [current]);
 
   const handleImagePointerDown = useCallback(
@@ -156,6 +179,9 @@ export function ImageLightbox({
           <DialogPrimitive.Title className="sr-only">
             图片预览
           </DialogPrimitive.Title>
+          <DialogPrimitive.Description className="sr-only">
+            查看、缩放、切换或下载当前图片。
+          </DialogPrimitive.Description>
 
           <div className="absolute top-3 right-3 left-3 z-20 flex flex-wrap items-center justify-end gap-2 sm:top-4 sm:right-4 sm:left-auto">
             {current.sizeLabel || current.dimensions ? (
@@ -230,7 +256,7 @@ export function ImageLightbox({
             className="flex h-full w-full items-center justify-center overflow-hidden p-4 pt-24 sm:p-8 sm:pt-20"
             onClick={() => onOpenChange(false)}
           >
-            <img
+            <AuthenticatedImage
               src={current.src}
               alt=""
               className={cn(

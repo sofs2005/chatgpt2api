@@ -3,9 +3,11 @@
 import { useRef, useState } from "react";
 import { Check, CircleStop, Clock3, Download, Eye, Globe2, LoaderCircle, Lock, PencilLine, Plus, RotateCcw, Sparkles } from "lucide-react";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
 import type { ImagePromptPreset } from "@/app/image/image-presets";
 import type { ImageVisibility } from "@/lib/api";
+import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
 import { formatBase64ImageFileSize, formatImageFileSize } from "@/lib/image-size";
 import { cn } from "@/lib/utils";
 import type { ImageConversation, ImageTurn, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
@@ -153,9 +155,10 @@ async function downloadImage(image: DownloadableImage) {
 
   if (!image.src.startsWith("data:")) {
     try {
-      const response = await fetch(image.src);
-      if (response.ok) {
-        const blob = await response.blob();
+      const blob = shouldUseAuthenticatedImageFallback(image.src)
+        ? await fetchAuthenticatedImageBlob(image.src)
+        : await fetch(image.src).then((response) => (response.ok ? response.blob() : null));
+      if (blob) {
         objectUrl = URL.createObjectURL(blob);
         href = objectUrl;
       }
@@ -186,11 +189,10 @@ async function fetchImageSizeLabel(src: string) {
   }
 
   try {
-    const response = await fetch(src);
-    if (!response.ok) {
-      return "";
-    }
-    const blob = await response.blob();
+    const blob = shouldUseAuthenticatedImageFallback(src)
+      ? await fetchAuthenticatedImageBlob(src)
+      : await fetch(src).then((response) => (response.ok ? response.blob() : null));
+    if (!blob) return "";
     return formatImageFileSize(blob.size);
   } catch {
     return "";
@@ -623,7 +625,7 @@ export function ImageResults({
                             className="block w-full cursor-pointer overflow-hidden text-left"
                             aria-label={selected ? "取消选择图片" : "选择图片"}
                           >
-                            <img
+                            <AuthenticatedImage
                               src={imageSrc}
                               alt={`Generated result ${index + 1}`}
                               className="block h-auto w-full transition duration-200 group-hover:brightness-95"

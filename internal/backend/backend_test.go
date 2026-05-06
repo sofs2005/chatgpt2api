@@ -179,11 +179,11 @@ func TestConversationPayloadKeepsSingleUserMessagePrompt(t *testing.T) {
 	}
 }
 
-func TestConversationPayloadCanEnableImageGenerationToolForTextModel(t *testing.T) {
+func TestConversationPayloadKeepsSystemHintsEmpty(t *testing.T) {
 	client := &Client{}
 	payload := client.conversationPayload([]map[string]any{
 		{"role": "user", "content": "draw\n\n输出为 16:9 横屏构图"},
-	}, "gpt-5.5", "Asia/Shanghai", []string{"picture_v2"})
+	}, "gpt-5.5", "Asia/Shanghai")
 
 	if payload["model"] != "gpt-5.5" {
 		t.Fatalf("model = %q, want gpt-5.5", payload["model"])
@@ -192,8 +192,8 @@ func TestConversationPayloadCanEnableImageGenerationToolForTextModel(t *testing.
 	if !ok {
 		t.Fatalf("system_hints = %T, want []any", payload["system_hints"])
 	}
-	if len(hints) != 1 || hints[0] != "picture_v2" {
-		t.Fatalf("system_hints = %#v, want picture_v2", hints)
+	if len(hints) != 0 {
+		t.Fatalf("system_hints = %#v, want empty", hints)
 	}
 	messages := payload["messages"].([]map[string]any)
 	content := messages[0]["content"].(map[string]any)

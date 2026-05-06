@@ -552,7 +552,7 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 	outputFormat := NormalizeImageOutputFormat(firstNonEmpty(util.Clean(tool["output_format"]), util.Clean(body["output_format"])))
 	request := ConversationRequest{
 		Prompt:             prompt,
-		Model:              responseModel,
+		Model:              responseImageGenerationModel(responseModel),
 		Messages:           messages,
 		N:                  n,
 		Size:               size,
@@ -563,7 +563,6 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 		OwnerName:          util.Clean(body["owner_name"]),
 		Images:             images,
 		RequirePaidAccount: RequiresPaidImageSize(size),
-		ResponsesImageTool: true,
 	}
 	if outputFormat != "png" {
 		if compression, ok := normalizedImageOutputCompression(firstNonNil(tool["output_compression"], body["output_compression"])); ok {
@@ -571,6 +570,14 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 		}
 	}
 	return request.Normalized(), prompt, nil
+}
+
+func responseImageGenerationModel(model string) string {
+	model = strings.TrimSpace(model)
+	if util.IsImageGenerationModel(model) {
+		return model
+	}
+	return util.ImageModelAuto
 }
 
 func (e *Engine) StreamTextResponse(ctx context.Context, body map[string]any) (<-chan map[string]any, <-chan error) {

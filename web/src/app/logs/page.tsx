@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ChevronLeft, ChevronRight, Copy, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
 import { toast } from "sonner";
 
+import { AuthenticatedImage } from "@/components/authenticated-image";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { PageHeader } from "@/components/page-header";
@@ -496,7 +497,7 @@ function LogsContent() {
                         }}
                       >
                         <div className="aspect-square overflow-hidden bg-muted">
-                          <img src={url} alt="" className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]" />
+                          <AuthenticatedImage src={url} alt="" className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]" />
                         </div>
                         <div className="truncate border-t border-border px-3 py-2 text-xs text-muted-foreground">{url}</div>
                       </button>

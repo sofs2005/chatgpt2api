@@ -79,6 +79,7 @@ import {
   type CreationTaskMessage,
   type ImageVisibility,
 } from "@/lib/api";
+import { fetchAuthenticatedImageBlob } from "@/lib/authenticated-image";
 import { clearImageManagerCache } from "@/lib/image-manager-cache";
 import { getManagedImagePathFromUrl } from "@/lib/image-path";
 import { cn } from "@/lib/utils";
@@ -214,11 +215,7 @@ function buildReferenceImageFromResult(image: StoredImage, fileName: string): St
 }
 
 async function fetchImageAsFile(url: string, fileName: string) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error("读取结果图失败");
-  }
-  const blob = await response.blob();
+  const blob = await fetchAuthenticatedImageBlob(url);
   return new File([blob], fileName, { type: blob.type || "image/png" });
 }
 
@@ -635,7 +632,7 @@ function usesReferenceImages(mode: ImageConversationMode) {
 }
 
 function usesResponseImageTaskModel(model: ImageModel) {
-  return isResponseImageToolModel(model);
+  return isResponseImageToolModel(model) && !isImageTaskModel(model);
 }
 
 function isMissingBatchImageDataError(error?: string) {

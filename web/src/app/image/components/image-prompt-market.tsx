@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, LoaderCircle, RefreshCcw, Search, SlidersHorizontal, Star } from "lucide-react";
+import { ClipboardCopy, ExternalLink, LoaderCircle, RefreshCcw, Search, SlidersHorizontal, Star } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -97,6 +97,31 @@ function getLocalizedPrompt(prompt: BananaPrompt, language: PromptMarketLanguage
     category: localization.category,
     subCategory: localization.subCategory,
   };
+}
+
+function getPromptReferenceImageUrls(prompt: BananaPrompt) {
+  const urls = prompt.referenceImageUrls.length > 0 ? prompt.referenceImageUrls : [prompt.preview];
+  return Array.from(new Set(urls.map((url) => url.trim()).filter(Boolean)));
+}
+
+function buildPromptJSON(prompt: BananaPrompt) {
+  return JSON.stringify(
+    {
+      title: prompt.title,
+      prompt: prompt.prompt,
+      mode: prompt.mode,
+      category: prompt.category,
+      sub_category: prompt.subCategory || undefined,
+      reference_image_urls: getPromptReferenceImageUrls(prompt),
+      preview: prompt.preview,
+      source: prompt.source,
+      source_label: prompt.sourceLabel,
+      author: prompt.author || undefined,
+      link: prompt.link || undefined,
+    },
+    null,
+    2,
+  );
 }
 
 function PromptPreviewImage({ prompt }: { prompt: BananaPrompt }) {
@@ -385,6 +410,15 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
     }
   };
 
+  const copyPromptJSON = async (prompt: BananaPrompt) => {
+    try {
+      await navigator.clipboard.writeText(buildPromptJSON(prompt));
+      toast.success("已复制 JSON");
+    } catch {
+      toast.error("复制失败，请手动复制");
+    }
+  };
+
   const renderFavoriteTabs = (className?: string) => (
     <div className={cn("flex h-10 rounded-full bg-[#f0f0f0] p-1", className)}>
       <button
@@ -663,7 +697,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
             </div>
           ) : (
             <div className="flex flex-col gap-4">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {visiblePrompts.map((prompt) => {
                   const localizedPrompt = getLocalizedPrompt(prompt, promptLanguage);
                   const dateLabel = formatPromptDate(prompt.created);
@@ -676,7 +710,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                   return (
                     <article
                       key={prompt.id}
-                      className="group overflow-hidden rounded-[22px] border border-[#f2f3f5] bg-white shadow-[0_4px_6px_rgba(0,0,0,0.08)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_16px_-4px_rgba(36,36,36,0.08)]"
+                      className="group flex h-full flex-col overflow-hidden rounded-[22px] border border-[#f2f3f5] bg-white shadow-[0_4px_6px_rgba(0,0,0,0.08)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_16px_-4px_rgba(36,36,36,0.08)]"
                     >
                       <div className="relative aspect-[16/10] overflow-hidden bg-[#f0f0f0]">
                         <PromptPreviewImage prompt={localizedPrompt} />
@@ -709,7 +743,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                           ) : null}
                         </div>
                       </div>
-                      <div className="flex min-h-[196px] flex-col gap-3 p-4">
+                      <div className="flex min-h-[196px] flex-1 flex-col gap-3 p-4">
                         <div className="flex min-w-0 items-start justify-between gap-3">
                           <div className="min-w-0">
                             <h3 className="font-display truncate text-base font-semibold text-[#222222]">
@@ -756,7 +790,17 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                           </div>
                         </div>
                         <p className="line-clamp-4 text-sm leading-6 text-[#45515e]">{localizedPrompt.prompt}</p>
-                        <div className="mt-auto flex justify-end border-t border-[#f2f3f5] pt-3">
+                        <div className="mt-auto flex flex-wrap justify-end gap-2 border-t border-[#f2f3f5] pt-3">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 rounded-full border-[#e5e7eb] px-3 text-xs text-[#45515e] hover:bg-black/[0.05] hover:text-[#18181b]"
+                            onClick={() => void copyPromptJSON(localizedPrompt)}
+                          >
+                            <ClipboardCopy className="size-3.5" />
+                            复制 JSON
+                          </Button>
                           <Button
                             type="button"
                             size="sm"

@@ -42,7 +42,6 @@ export const IMAGE_MODEL_ROUTE_DETAILS: Partial<Record<
     routeLabel: string;
     description: string;
     badge?: string;
-    longRunning?: boolean;
   }
 >> = {
   auto: {
@@ -55,9 +54,7 @@ export const IMAGE_MODEL_ROUTE_DETAILS: Partial<Record<
   },
   "codex-gpt-image-2": {
     routeLabel: "Codex 链路",
-    description: "使用 Codex TUI 请求头，2K 任务可能超过 3 分钟。",
-    badge: "Paid / 慢任务",
-    longRunning: true,
+    description: "使用 Codex TUI 请求头访问 Responses image_generation tool 语义。",
   },
 };
 

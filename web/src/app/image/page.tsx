@@ -56,7 +56,6 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   cancelCreationTask,
   CHAT_MODEL_OPTIONS,
-  CODEX_IMAGE_MODEL,
   createChatCompletionTask,
   createImageEditTask,
   createImageGenerationTask,
@@ -341,19 +340,7 @@ function imageTaskProgressMessage(turn: ImageTurn, elapsedSeconds = 0) {
 
   const route = IMAGE_MODEL_ROUTE_DETAILS[turn.model];
   const paidRequired = requiresPaidImageSize(turn.size);
-  const isSlowCodex = turn.model === CODEX_IMAGE_MODEL && paidRequired;
-  if (isSlowCodex && elapsedSeconds >= 180) {
-    return {
-      message: "Codex 2K 长任务仍在生成",
-      detail: "真实链路可能超过 3 分钟；若上游 SSE 连接中断，后端会有限重试",
-    };
-  }
-  if (isSlowCodex && elapsedSeconds >= 60) {
-    return {
-      message: "Codex 高分辨率生成中",
-      detail: "2K PNG 可能耗时数分钟，请保持页面打开",
-    };
-  }
+  void elapsedSeconds;
   if (paidRequired) {
     return {
       message: "高分辨率生成中",
@@ -361,7 +348,7 @@ function imageTaskProgressMessage(turn: ImageTurn, elapsedSeconds = 0) {
     };
   }
   return {
-    message: route?.longRunning ? "Codex 链路生成中" : "等待生成结果",
+    message: route ? `${route.routeLabel}生成中` : "等待生成结果",
     detail: "后端正在轮询任务状态",
   };
 }
@@ -2517,10 +2504,6 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
           toast.message(`${sizeLabel} 属于高分辨率任务，将使用 Paid 图片账号并可能耗时更久。`);
         }
       }
-      if (effectiveImageMode !== "chat" && effectiveModel === CODEX_IMAGE_MODEL && needsPaidImageAccount) {
-        toast.message("Codex 2K/高分辨率任务可能超过 3 分钟，期间任务队列会持续显示状态。");
-      }
-
       const targetConversation = selectedConversationId
         ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
         : null;

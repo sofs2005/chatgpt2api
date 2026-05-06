@@ -7,7 +7,7 @@ import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
 import type { ImagePromptPreset } from "@/app/image/image-presets";
 import { formatImageSizeDisplay, getImageSizeRequirementLabel, requiresPaidImageSize } from "@/app/image/image-options";
-import { CODEX_IMAGE_MODEL, IMAGE_MODEL_ROUTE_DETAILS } from "@/lib/api";
+import { IMAGE_MODEL_ROUTE_DETAILS } from "@/lib/api";
 import type { ImageVisibility } from "@/lib/api";
 import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
 import { formatBase64ImageFileSize, formatImageFileSize } from "@/lib/image-size";
@@ -117,13 +117,9 @@ function getRequestedSizeLabel(turn: ImageTurn) {
 }
 
 function getLongTaskHint(turn: ImageTurn, elapsedSeconds: number) {
+  void elapsedSeconds;
   if (!isTurnBusy(turn) || turn.mode === "chat") {
     return "";
-  }
-  if (turn.model === CODEX_IMAGE_MODEL && requiresPaidImageSize(turn.size)) {
-    return elapsedSeconds >= 180
-      ? "Codex 高分辨率长任务仍在生成；后端遇到上游 SSE 临时断流会有限重试"
-      : "Codex 高分辨率任务可能超过 3 分钟";
   }
   if (requiresPaidImageSize(turn.size)) {
     return "高分辨率任务正在使用 Paid 图片账号链路";

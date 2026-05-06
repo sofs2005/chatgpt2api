@@ -7,7 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { formatImageSizeDisplay, getImageSizeRequirementLabel, requiresPaidImageSize } from "@/app/image/image-options";
-import { CODEX_IMAGE_MODEL, IMAGE_MODEL_ROUTE_DETAILS } from "@/lib/api";
+import { IMAGE_MODEL_ROUTE_DETAILS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   ACTIVE_IMAGE_CONVERSATION_STORAGE_KEY,
@@ -130,11 +130,9 @@ function getQueueSizeLabel(turn: ImageTurn) {
 }
 
 function getQueueLongTaskHint(turn: ImageTurn, elapsedSeconds: number) {
+  void elapsedSeconds;
   if (turn.mode === "chat") {
     return "";
-  }
-  if (turn.model === CODEX_IMAGE_MODEL && requiresPaidImageSize(turn.size)) {
-    return elapsedSeconds >= 180 ? "Codex 高分辨率长任务仍在生成" : "Codex 高分辨率可能超过 3 分钟";
   }
   if (requiresPaidImageSize(turn.size)) {
     return "高分辨率任务使用 Paid 图片账号链路";

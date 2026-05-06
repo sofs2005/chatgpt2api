@@ -36,6 +36,30 @@ const CHAT_MODEL_VALUES = new Set<ImageModel>([
 export const IMAGE_TASK_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => IMAGE_TASK_MODEL_VALUES.has(option.value));
 export const IMAGE_CREATION_MODEL_OPTIONS = IMAGE_TASK_MODEL_OPTIONS;
 export const CHAT_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => CHAT_MODEL_VALUES.has(option.value));
+export const IMAGE_MODEL_ROUTE_DETAILS: Partial<Record<
+  ImageModel,
+  {
+    routeLabel: string;
+    description: string;
+    badge?: string;
+    longRunning?: boolean;
+  }
+>> = {
+  auto: {
+    routeLabel: "官方图片工具",
+    description: "默认等价 gpt-image-2，不向上游透传工具模型。",
+  },
+  "gpt-image-2": {
+    routeLabel: "官方图片工具",
+    description: "走 Responses image_generation tool 语义。",
+  },
+  "codex-gpt-image-2": {
+    routeLabel: "Codex 链路",
+    description: "使用 Codex TUI 请求头，2K 任务可能超过 3 分钟。",
+    badge: "Paid / 慢任务",
+    longRunning: true,
+  },
+};
 
 export function isImageModel(value: unknown): value is ImageModel {
   return typeof value === "string" && IMAGE_MODEL_VALUES.has(value);

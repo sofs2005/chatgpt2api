@@ -34,16 +34,25 @@ import {
   CUSTOM_IMAGE_ASPECT_RATIO,
   IMAGE_ASPECT_RATIO_OPTIONS,
   IMAGE_RESOLUTION_OPTIONS,
+  IMAGE_SIZE_PRESET_DETAILS,
   IMAGE_SIZE_MODE_OPTIONS,
   buildImageSize,
   formatImageSizeDisplay,
   getActiveImageAspectRatio,
+  getImageSizeRequirementLabel,
   parseImageRatio,
+  requiresPaidImageSize,
   type ImageAspectRatio,
   type ImageResolution,
   type ImageSizeMode,
 } from "@/app/image/image-options";
-import { IMAGE_OUTPUT_FORMAT_OPTIONS, type ImageModel, type ImageOutputFormat, type ImageQuality } from "@/lib/api";
+import {
+  IMAGE_MODEL_ROUTE_DETAILS,
+  IMAGE_OUTPUT_FORMAT_OPTIONS,
+  type ImageModel,
+  type ImageOutputFormat,
+  type ImageQuality,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ImageComposerProps = {
@@ -63,6 +72,7 @@ type ImageComposerProps = {
   imageOutputFormat: ImageOutputFormat;
   imageOutputCompression: string;
   imageOutputHint: ReactNode;
+  paidImageAccountHint?: ReactNode;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -133,6 +143,52 @@ function ImageComposerDock({ children }: { children: ReactNode }) {
   );
 }
 
+const imageSettingsFieldClass =
+  "flex min-h-8 min-w-0 items-center justify-between gap-2 rounded-xl border border-[#e5e7eb] bg-white px-3 py-1 text-[11px] dark:border-border dark:bg-background/70";
+
+function ImageSizePreviewPanel({
+  label,
+  detail,
+  paidRequired,
+  paidHint,
+}: {
+  label: string;
+  detail: string;
+  paidRequired: boolean;
+  paidHint?: ReactNode;
+}) {
+  return (
+    <div className="col-span-2 rounded-xl border border-[#e5e7eb] bg-[#f8fafc] px-3 py-1 dark:border-border dark:bg-background/50 sm:col-span-3">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <span className="shrink-0 text-[11px] font-medium text-[#45515e] dark:text-muted-foreground">
+          计算后分辨率
+        </span>
+        <span
+          className={cn(
+            "min-w-0 truncate text-right font-mono text-sm font-semibold dark:text-foreground",
+            paidRequired ? "text-amber-700 dark:text-amber-300" : "text-[#18181b]",
+          )}
+        >
+          {label}
+        </span>
+      </div>
+      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-[#8e8e93] dark:text-muted-foreground">
+        <span className="min-w-0 truncate">{detail}</span>
+        {paidRequired ? (
+          <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700 ring-1 ring-amber-100 dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-800">
+            Paid
+          </span>
+        ) : null}
+      </div>
+      {paidRequired && paidHint ? (
+        <div className="mt-1.5 rounded-lg bg-white px-2.5 py-1 text-[11px] leading-5 text-[#45515e] ring-1 ring-[#f2f3f5] dark:bg-background/70 dark:text-muted-foreground dark:ring-border">
+          {paidHint}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ImageComposer({
   composerMode,
   prompt,
@@ -150,6 +206,7 @@ export function ImageComposer({
   imageOutputFormat,
   imageOutputCompression,
   imageOutputHint,
+  paidImageAccountHint,
   referenceImages,
   textareaRef,
   fileInputRef,
@@ -195,6 +252,7 @@ export function ImageComposer({
     [referenceImages],
   );
   const imageModelLabel = imageModelOptions.find((option) => option.value === imageModel)?.label || imageModel;
+  const imageModelRoute = IMAGE_MODEL_ROUTE_DETAILS[imageModel];
   const imageAspectRatioLabel =
     imageAspectRatio === CUSTOM_IMAGE_ASPECT_RATIO
       ? imageCustomRatio.trim() || "自定义比例"
@@ -203,8 +261,6 @@ export function ImageComposer({
     IMAGE_RESOLUTION_OPTIONS.find((option) => option.value === imageResolution)?.label || "Auto";
   const imageQualityLabel =
     imageQualityOptions.find((option) => option.value === imageQuality)?.label || imageQuality;
-  const imageOutputFormatLabel =
-    IMAGE_OUTPUT_FORMAT_OPTIONS.find((option) => option.value === imageOutputFormat)?.label || imageOutputFormat.toUpperCase();
   const compressionDisabled = imageOutputFormat === "png";
   const supportsQuality = imageQualityOptions.length > 0;
   const submitLabel = composerMode === "chat" ? "发送对话" : referenceImages.length > 0 ? "编辑图片" : "生成图片";
@@ -231,6 +287,8 @@ export function ImageComposer({
     : imageSizeMode === "auto" || (imageSizeMode === "ratio" && imageResolution === "auto" && !isCustomRatioInvalid)
       ? "Auto"
       : "尺寸无效";
+  const sizeRequiresPaid = Boolean(computedImageSize && requiresPaidImageSize(computedImageSize));
+  const sizeRequirementLabel = computedImageSize ? getImageSizeRequirementLabel(computedImageSize) : "Auto";
   const sizePreviewDetail =
     imageSizeMode === "ratio"
       ? isCustomRatioInvalid
@@ -240,11 +298,11 @@ export function ImageComposer({
             ? `将按 ${activeImageAspectRatio} 比例下发`
             : "Auto 比例将交给模型决定"
           : computedImageSize
-            ? `将下发计算后的 ${formatImageSizeDisplay(computedImageSize)}`
+            ? `将下发计算后的 ${formatImageSizeDisplay(computedImageSize)}，${sizeRequirementLabel}`
             : "比例需要填写为宽:高"
       : imageSizeMode === "custom"
         ? computedImageSize
-          ? `已按链路限制校准为 ${formatImageSizeDisplay(computedImageSize)}`
+          ? `已按链路限制校准为 ${formatImageSizeDisplay(computedImageSize)}，${sizeRequirementLabel}`
           : "宽高需要填写正整数"
         : "不会强制指定尺寸";
 
@@ -676,7 +734,14 @@ export function ImageComposer({
                               setIsModelMenuOpen(false);
                             }}
                           >
-                            <span className="truncate">{option.label}</span>
+                            <span className="min-w-0">
+                              <span className="block truncate">{option.label}</span>
+                              {composerMode === "image" && IMAGE_MODEL_ROUTE_DETAILS[option.value] ? (
+                                <span className="block truncate text-[11px] font-normal text-[#8e8e93] dark:text-muted-foreground">
+                                  {IMAGE_MODEL_ROUTE_DETAILS[option.value]?.routeLabel}
+                                </span>
+                              ) : null}
+                            </span>
                             {active ? <Check className="size-4 shrink-0" /> : null}
                           </button>
                         );
@@ -715,11 +780,26 @@ export function ImageComposer({
                       align="start"
                       side="top"
                       sideOffset={8}
-                      className="z-[70] max-h-[min(calc(100dvh-2rem),34rem)] w-[min(calc(100vw-1rem),28rem)] overflow-y-auto overflow-x-hidden rounded-[20px] border-[#e5e7eb] bg-white p-2.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] dark:border-border dark:bg-card dark:shadow-[0_24px_80px_-28px_rgba(0,0,0,0.72)] sm:w-[min(calc(100vw-2rem),28rem)] sm:overflow-visible"
+                      className="z-[70] max-h-[min(calc(100dvh-2rem),34rem)] w-[min(calc(100vw-1rem),28rem)] overflow-y-auto overflow-x-hidden rounded-[20px] border-[#e5e7eb] bg-white p-2.5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] dark:border-border dark:bg-card dark:shadow-[0_24px_80px_-28px_rgba(0,0,0,0.72)] sm:w-[min(calc(100vw-2rem),28rem)]"
                       onOpenAutoFocus={(event) => event.preventDefault()}
                     >
                       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                        <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 dark:border-border dark:bg-background/70">
+                        {imageModelRoute ? (
+                          <div className="col-span-2 rounded-xl border border-[#dbe7ff] bg-[#f8fbff] px-3 py-1 text-[11px] leading-5 text-[#45515e] dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-muted-foreground sm:col-span-3">
+                            <div className="flex min-w-0 items-center justify-between gap-2">
+                              <span className="truncate font-semibold text-[#18181b] dark:text-foreground">
+                                {imageModelRoute.routeLabel}
+                              </span>
+                              {imageModelRoute.badge ? (
+                                <span className="shrink-0 rounded-full bg-[#1456f0] px-2 py-0.5 text-[10px] font-semibold text-white">
+                                  {imageModelRoute.badge}
+                                </span>
+                              ) : null}
+                            </div>
+                            <p className="mt-0.5 line-clamp-2">{imageModelRoute.description}</p>
+                          </div>
+                        ) : null}
+                        <div className={imageSettingsFieldClass}>
                           <span className="shrink-0 text-[11px] font-medium text-[#45515e] dark:text-muted-foreground">张数</span>
                           <Input
                             type="number"
@@ -732,9 +812,12 @@ export function ImageComposer({
                             className="h-7 w-[36px] border-0 bg-transparent px-0 text-center text-xs font-semibold text-[#18181b] shadow-none focus-visible:ring-0 dark:text-foreground"
                           />
                         </div>
-                        <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70">
+                        <div className={imageSettingsFieldClass}>
                           <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">尺寸</span>
-                          <span className="min-w-0 truncate text-right text-xs font-semibold text-[#18181b] dark:text-foreground">
+                          <span className={cn(
+                            "min-w-0 truncate text-right text-xs font-semibold dark:text-foreground",
+                            sizeRequiresPaid ? "text-amber-700 dark:text-amber-300" : "text-[#18181b]",
+                          )}>
                             {sizePreviewLabel}
                           </span>
                         </div>
@@ -762,7 +845,7 @@ export function ImageComposer({
                           })}
                         </div>
                         {imageSizeMode === "custom" ? (
-                          <div className="col-span-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-2xl border border-[#e5e7eb] bg-white px-3 py-2 dark:border-border dark:bg-background/70 sm:col-span-3">
+                          <div className="col-span-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-xl border border-[#e5e7eb] bg-white px-3 py-1 dark:border-border dark:bg-background/70 sm:col-span-3">
                             <label className="min-w-0">
                               <span className="sr-only">手动输入宽度</span>
                               <Input
@@ -794,7 +877,7 @@ export function ImageComposer({
                           <>
                             <div
                               ref={aspectRatioMenuRef}
-                              className="relative flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70"
+                              className={cn("relative", imageSettingsFieldClass)}
                             >
                               <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">比例</span>
                               <button
@@ -864,7 +947,7 @@ export function ImageComposer({
                             ) : null}
                             <div
                               ref={resolutionMenuRef}
-                              className="relative flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70"
+                              className={cn("relative", imageSettingsFieldClass)}
                             >
                               <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">分辨率</span>
                               <button
@@ -897,7 +980,12 @@ export function ImageComposer({
                                           setIsResolutionMenuOpen(false);
                                         }}
                                       >
-                                        <span className="min-w-0 truncate">{option.label}</span>
+                                        <span className="min-w-0">
+                                          <span className="block truncate">{option.label}</span>
+                                          <span className="block truncate text-[11px] font-normal text-[#8e8e93] dark:text-muted-foreground">
+                                            {option.description}
+                                          </span>
+                                        </span>
                                         {active ? <Check className="size-4 shrink-0" /> : null}
                                       </button>
                                     );
@@ -925,7 +1013,12 @@ export function ImageComposer({
                                         setIsResolutionMenuOpen(false);
                                       }}
                                     >
-                                      <span className="min-w-0 truncate">{option.label}</span>
+                                      <span className="min-w-0">
+                                        <span className="block truncate">{option.label}</span>
+                                        <span className="block truncate text-[11px] font-normal text-[#8e8e93] dark:text-muted-foreground">
+                                          {option.description}
+                                        </span>
+                                      </span>
                                       {active ? <Check className="size-4 shrink-0" /> : null}
                                     </button>
                                   );
@@ -935,7 +1028,7 @@ export function ImageComposer({
                             {imageAspectRatio === CUSTOM_IMAGE_ASPECT_RATIO ? (
                               <div
                                 className={cn(
-                                  "col-span-2 flex min-w-0 items-center justify-between gap-2 rounded-2xl border bg-white px-3 py-2 dark:bg-background/70 sm:col-span-3",
+                                  "col-span-2 flex min-w-0 items-center justify-between gap-2 rounded-xl border bg-white px-3 py-1 dark:bg-background/70 sm:col-span-3",
                                   isCustomRatioInvalid
                                     ? "border-red-300 dark:border-red-500/60"
                                     : "border-[#e5e7eb] dark:border-border",
@@ -953,41 +1046,51 @@ export function ImageComposer({
                                 />
                               </div>
                             ) : null}
-                            <div className="col-span-2 rounded-2xl border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2 dark:border-border dark:bg-background/50 sm:col-span-3">
-                              <div className="flex min-w-0 items-center justify-between gap-3">
-                                <span className="shrink-0 text-[11px] font-medium text-[#45515e] dark:text-muted-foreground">
-                                  计算后分辨率
-                                </span>
-                                <span className="min-w-0 truncate text-right font-mono text-sm font-semibold text-[#18181b] dark:text-foreground">
-                                  {sizePreviewLabel}
-                                </span>
-                              </div>
-                              <p className="mt-1 truncate text-[11px] text-[#8e8e93] dark:text-muted-foreground">
-                                {sizePreviewDetail}
-                              </p>
-                            </div>
+                            <ImageSizePreviewPanel
+                              label={sizePreviewLabel}
+                              detail={sizePreviewDetail}
+                              paidRequired={sizeRequiresPaid}
+                              paidHint={paidImageAccountHint}
+                            />
                           </>
                         ) : null}
                         {imageSizeMode === "custom" ? (
-                          <div className="col-span-2 rounded-2xl border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2 dark:border-border dark:bg-background/50 sm:col-span-3">
-                            <div className="flex min-w-0 items-center justify-between gap-3">
-                              <span className="shrink-0 text-[11px] font-medium text-[#45515e] dark:text-muted-foreground">
-                                计算后分辨率
-                              </span>
-                              <span className="min-w-0 truncate text-right font-mono text-sm font-semibold text-[#18181b] dark:text-foreground">
-                                {sizePreviewLabel}
-                              </span>
-                            </div>
-                            <p className="mt-1 truncate text-[11px] text-[#8e8e93] dark:text-muted-foreground">
-                              {sizePreviewDetail}
-                            </p>
-                          </div>
+                          <ImageSizePreviewPanel
+                            label={sizePreviewLabel}
+                            detail={sizePreviewDetail}
+                            paidRequired={sizeRequiresPaid}
+                            paidHint={paidImageAccountHint}
+                          />
                         ) : null}
+                        <div className="col-span-2 rounded-xl border border-[#e5e7eb] bg-white px-3 py-1 dark:border-border dark:bg-background/70 sm:col-span-3">
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-medium text-[#45515e] dark:text-muted-foreground">常用映射</span>
+                            <span className="text-[#8e8e93] dark:text-muted-foreground">请求值 → 实际尺寸</span>
+                          </div>
+                          <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                            {IMAGE_SIZE_PRESET_DETAILS.map((preset) => (
+                              <div
+                                key={`${preset.requestValue}-${preset.normalizedSize}`}
+                                className="flex min-w-0 items-center justify-between gap-2 rounded-full bg-[#f8fafc] px-2.5 py-1 text-[11px] text-[#45515e] dark:bg-muted/50 dark:text-muted-foreground"
+                              >
+                                <span className="min-w-0 truncate">{preset.label}</span>
+                                <span className="shrink-0 font-mono text-[#18181b] dark:text-foreground">
+                                  {formatImageSizeDisplay(preset.normalizedSize)}
+                                </span>
+                                {preset.paidRequired ? (
+                                  <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+                                    Paid
+                                  </span>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                         {supportsQuality ? (
                           <>
                             <div
                               ref={qualityMenuRef}
-                              className="relative flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70"
+                              className={cn("relative", imageSettingsFieldClass)}
                             >
                               <span className="flex shrink-0 items-center gap-1 font-medium text-[#45515e] dark:text-muted-foreground">
                                 质量
@@ -1092,7 +1195,7 @@ export function ImageComposer({
                             ) : null}
                           </>
                         ) : null}
-                        <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70">
+                        <div className={imageSettingsFieldClass}>
                           <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">格式</span>
                           <select
                             value={imageOutputFormat}
@@ -1115,7 +1218,7 @@ export function ImageComposer({
                         </div>
                         <label
                           className={cn(
-                            "flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70",
+                            imageSettingsFieldClass,
                             compressionDisabled && "opacity-55",
                           )}
                           title={compressionDisabled ? "PNG 不支持压缩率参数" : "JPEG / WebP 压缩率，0-100"}
@@ -1134,14 +1237,11 @@ export function ImageComposer({
                             className="h-7 w-[4.25rem] border-0 bg-transparent px-0 text-right text-xs font-semibold text-[#18181b] shadow-none focus-visible:ring-0 disabled:cursor-not-allowed dark:text-foreground"
                           />
                         </label>
-                        <div className="flex h-9 min-w-0 items-center justify-between gap-1.5 rounded-full border border-[#e5e7eb] bg-white px-2.5 text-[11px] dark:border-border dark:bg-background/70">
-                          <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">输出</span>
-                          <span className="min-w-0 truncate text-right text-xs font-semibold text-[#18181b] dark:text-foreground">
-                            {compressionDisabled || !imageOutputCompression.trim()
-                              ? imageOutputFormatLabel
-                              : `${imageOutputFormatLabel} / ${imageOutputCompression.trim()}`}
-                          </span>
-                        </div>
+                        <p className="col-span-2 px-1 text-[11px] leading-5 text-[#8e8e93] dark:text-muted-foreground sm:col-span-3">
+                          {compressionDisabled
+                            ? "PNG 会忽略压缩率参数。结果卡会显示实际上游返回的格式、尺寸和文件大小。"
+                            : "JPEG / WebP 会下发 output_compression；实际格式以结果卡显示为准。"}
+                        </p>
                       </div>
                     </PopoverContent>
                   </Popover>

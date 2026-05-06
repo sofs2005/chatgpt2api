@@ -6,6 +6,8 @@ import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { formatImageSizeDisplay, getImageSizeRequirementLabel, requiresPaidImageSize } from "@/app/image/image-options";
+import { CODEX_IMAGE_MODEL, IMAGE_MODEL_ROUTE_DETAILS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   ACTIVE_IMAGE_CONVERSATION_STORAGE_KEY,
@@ -116,6 +118,28 @@ function getStatusClass(status: ImageTurnStatus) {
     return "bg-sky-50 text-[#1456f0] ring-sky-100 dark:bg-sky-950/30 dark:text-sky-300 dark:ring-sky-800";
   }
   return "bg-muted text-muted-foreground ring-border";
+}
+
+function getQueueSizeLabel(turn: ImageTurn) {
+  if (!turn.size) {
+    return "";
+  }
+  const size = turn.size.includes("x") ? formatImageSizeDisplay(turn.size) : turn.size;
+  const requirement = getImageSizeRequirementLabel(turn.size);
+  return requirement === "Auto" ? size : `${size} / ${requirement}`;
+}
+
+function getQueueLongTaskHint(turn: ImageTurn, elapsedSeconds: number) {
+  if (turn.mode === "chat") {
+    return "";
+  }
+  if (turn.model === CODEX_IMAGE_MODEL && requiresPaidImageSize(turn.size)) {
+    return elapsedSeconds >= 180 ? "Codex 高分辨率长任务仍在生成" : "Codex 高分辨率可能超过 3 分钟";
+  }
+  if (requiresPaidImageSize(turn.size)) {
+    return "高分辨率任务使用 Paid 图片账号链路";
+  }
+  return "";
 }
 
 function getCompletionTone(status: ImageTurnStatus) {
@@ -238,10 +262,15 @@ function QueueItem({
     progress && Number.isFinite(progress.startedAt)
       ? formatElapsedClock(Math.floor((now - progress.startedAt) / 1000))
       : "";
+  const elapsedSeconds =
+    progress && Number.isFinite(progress.startedAt) ? Math.max(0, Math.floor((now - progress.startedAt) / 1000)) : 0;
+  const routeDetail = IMAGE_MODEL_ROUTE_DETAILS[item.turn.model];
+  const sizeLabel = getQueueSizeLabel(item.turn);
   const detailParts = [
     getModeLabel(item.turn.mode),
     item.turn.model,
-    item.turn.size,
+    routeDetail?.routeLabel || "",
+    sizeLabel,
     item.turn.quality ? `Quality ${item.turn.quality}` : "",
   ].filter(Boolean);
   const progressMessage =
@@ -253,6 +282,7 @@ function QueueItem({
       : item.loadingCount > 0
         ? `还有 ${item.loadingCount} 张图片处理中`
         : "");
+  const longTaskHint = getQueueLongTaskHint(item.turn, elapsedSeconds);
 
   return (
     <button
@@ -304,7 +334,7 @@ function QueueItem({
               <div className="h-full rounded-full bg-[#1456f0] transition-[width] duration-300" style={{ width: `${progressPercent}%` }} />
             </div>
             <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-[#8e8e93] dark:text-muted-foreground">
-              <span className="truncate">{progressDetail || formatQueueTime(item.turn.createdAt)}</span>
+              <span className="truncate">{longTaskHint || progressDetail || formatQueueTime(item.turn.createdAt)}</span>
               {elapsed ? <span className="shrink-0 font-mono tabular-nums">已等待 {elapsed}</span> : null}
             </div>
           </div>

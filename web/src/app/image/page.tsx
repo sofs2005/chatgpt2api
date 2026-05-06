@@ -20,10 +20,12 @@ import {
   buildImageSize,
   formatImageSizeDisplay,
   getImageSizeSelectionFromSize,
+  getImageSizeRequirementLabel,
   isImageAspectRatio,
   isImageResolution,
   isImageSizeMode,
   parseImageRatio,
+  requiresPaidImageSize,
   type ImageAspectRatio,
   type ImageResolution,
   type ImageSizeMode,
@@ -54,22 +56,25 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   cancelCreationTask,
   CHAT_MODEL_OPTIONS,
+  CODEX_IMAGE_MODEL,
   createChatCompletionTask,
   createImageEditTask,
   createImageGenerationTask,
   DEFAULT_CHAT_MODEL,
   DEFAULT_IMAGE_MODEL,
+  fetchAccounts,
   fetchCreationTasks,
   IMAGE_CREATION_MODEL_OPTIONS,
+  IMAGE_MODEL_ROUTE_DETAILS,
   IMAGE_OUTPUT_FORMAT_OPTIONS,
   isChatModel,
   isImageCreationModel,
   isImageModel,
   isImageOutputFormat,
   isImageQuality,
-  isImageTaskModel,
   supportsImageQuality,
   updateManagedImageVisibility,
+  type Account,
   type ImageModel,
   type ImageOutputFormat,
   type ImageQuality,
@@ -124,6 +129,7 @@ const IMAGE_OUTPUT_COMPRESSION_STORAGE_KEY = "chatgpt2api:image_last_output_comp
 const QUOTA_REFRESH_EVENT = "chatgpt2api:quota-refresh";
 const DEFAULT_IMAGE_QUALITY: ImageQuality = "high";
 const DEFAULT_IMAGE_OUTPUT_FORMAT: ImageOutputFormat = "png";
+const PAID_IMAGE_ACCOUNT_TYPES = new Set<Account["type"]>(["Plus", "ProLite", "Pro", "Team"]);
 const activeConversationQueueIds = new Set<string>();
 const EMPTY_IMAGE_ASPECT_RATIO_SELECT_VALUE = "__empty_aspect_ratio__";
 const MISSING_RECOVERABLE_TASK_ID_ERROR = "页面刷新或任务中断，未找到可恢复的任务 ID";
@@ -305,6 +311,59 @@ function imageOutputCompressionForFormat(format: ImageOutputFormat, value: unkno
     return undefined;
   }
   return normalizeOutputCompressionValue(value);
+}
+
+function isAvailablePaidImageAccount(account: Account) {
+  return account.status === "正常" && PAID_IMAGE_ACCOUNT_TYPES.has(account.type);
+}
+
+function formatPaidImageAccountHint(accounts: Account[] | null, canInspectAccounts: boolean) {
+  if (!canInspectAccounts) {
+    return "当前角色无法读取账号池；高分辨率提交后会由后端选择可用 Paid 图片账号。";
+  }
+  if (!accounts) {
+    return "正在读取账号池状态；高分辨率需要 Plus / Pro / Team 图片账号。";
+  }
+  const availablePaidCount = accounts.filter(isAvailablePaidImageAccount).length;
+  if (availablePaidCount > 0) {
+    return `当前检测到 ${availablePaidCount} 个正常 Paid 图片账号。`;
+  }
+  return "当前未检测到正常 Paid 图片账号，2K / 4K 等高分辨率可能会提交后失败。";
+}
+
+function imageTaskProgressMessage(turn: ImageTurn, elapsedSeconds = 0) {
+  if (turn.mode === "chat") {
+    return {
+      message: "等待对话回复",
+      detail: "对话任务处理中",
+    };
+  }
+
+  const route = IMAGE_MODEL_ROUTE_DETAILS[turn.model];
+  const paidRequired = requiresPaidImageSize(turn.size);
+  const isSlowCodex = turn.model === CODEX_IMAGE_MODEL && paidRequired;
+  if (isSlowCodex && elapsedSeconds >= 180) {
+    return {
+      message: "Codex 2K 长任务仍在生成",
+      detail: "真实链路可能超过 3 分钟；若上游 SSE 连接中断，后端会有限重试",
+    };
+  }
+  if (isSlowCodex && elapsedSeconds >= 60) {
+    return {
+      message: "Codex 高分辨率生成中",
+      detail: "2K PNG 可能耗时数分钟，请保持页面打开",
+    };
+  }
+  if (paidRequired) {
+    return {
+      message: "高分辨率生成中",
+      detail: `${getImageSizeRequirementLabel(turn.size)}，后端正在等待图片结果`,
+    };
+  }
+  return {
+    message: route?.longRunning ? "Codex 链路生成中" : "等待生成结果",
+    detail: "后端正在轮询任务状态",
+  };
 }
 
 function imageTaskBatchId(turnId: string, imageIndex: number) {
@@ -843,7 +902,7 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 }
 
 
-function ImagePageContent() {
+function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof useAuthGuard>["session"]> }) {
   const isSubmitDispatchingRef = useRef(false);
   const retryingImageIdsRef = useRef(new Set<string>());
   const cancelledTurnIdsRef = useRef(new Set<string>());
@@ -886,6 +945,11 @@ function ImagePageContent() {
   const [progressNow, setProgressNow] = useState(Date.now());
   const [composerDockHeight, setComposerDockHeight] = useState(0);
   const [visibilityMutatingImageKey, setVisibilityMutatingImageKey] = useState("");
+  const [imageAccounts, setImageAccounts] = useState<Account[] | null>(null);
+  const [imageAccountHint, setImageAccountHint] = useState("");
+
+  const canInspectAccounts = session.role === "admin" || session.apiPermissions.includes("get/api/accounts");
+  const hasAvailablePaidImageAccount = imageAccounts?.some(isAvailablePaidImageAccount) ?? false;
 
   const parsedCount = useMemo(() => normalizeRequestedImageCount(imageCount), [imageCount]);
   const imageSize = useMemo(
@@ -936,13 +1000,14 @@ function ImagePageContent() {
             ? `将按 ${editingDraftImageSize} 比例下发`
             : "Auto 比例将交给模型决定"
           : editingDraftImageSize
-            ? `将下发计算后的 ${formatImageSizeDisplay(editingDraftImageSize)}`
+            ? `将下发计算后的 ${formatImageSizeDisplay(editingDraftImageSize)}，${getImageSizeRequirementLabel(editingDraftImageSize)}`
             : "比例需要填写为宽:高"
       : editingTurnDraft?.sizeMode === "custom"
         ? editingDraftImageSize
-          ? `已按链路限制校准为 ${formatImageSizeDisplay(editingDraftImageSize)}`
+          ? `已按链路限制校准为 ${formatImageSizeDisplay(editingDraftImageSize)}，${getImageSizeRequirementLabel(editingDraftImageSize)}`
           : "宽高需要填写正整数"
         : "不会强制指定尺寸";
+  const editingDraftSizeRequiresPaid = Boolean(editingDraftImageSize && requiresPaidImageSize(editingDraftImageSize));
   const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_CREATION_MODEL_OPTIONS;
   const imageQualityOptions = supportsImageQuality(imageModel) ? IMAGE_QUALITY_OPTIONS : [];
   const selectedConversation = useMemo(
@@ -995,10 +1060,56 @@ function ImagePageContent() {
     ),
     [],
   );
+  const paidImageAccountHint = useMemo(
+    () => formatPaidImageAccountHint(imageAccounts, canInspectAccounts),
+    [canInspectAccounts, imageAccounts],
+  );
+  const paidImageAccountHintNode = (
+    <>
+      {paidImageAccountHint}
+      {imageAccountHint ? <span className="block text-amber-700 dark:text-amber-300">{imageAccountHint}</span> : null}
+    </>
+  );
 
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+
+  useEffect(() => {
+    if (!canInspectAccounts) {
+      setImageAccounts(null);
+      return;
+    }
+
+    let cancelled = false;
+    const loadImageAccounts = async (silent = false) => {
+      try {
+        const data = await fetchAccounts();
+        if (!cancelled) {
+          setImageAccounts(Array.isArray(data.items) ? data.items : []);
+          setImageAccountHint("");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setImageAccounts(null);
+          setImageAccountHint(error instanceof Error ? error.message : "账号池状态读取失败");
+          if (!silent) {
+            toast.error(error instanceof Error ? error.message : "账号池状态读取失败");
+          }
+        }
+      }
+    };
+
+    void loadImageAccounts(true);
+    const handleRefresh = () => {
+      void loadImageAccounts(true);
+    };
+    window.addEventListener(QUOTA_REFRESH_EVENT, handleRefresh);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(QUOTA_REFRESH_EVENT, handleRefresh);
+    };
+  }, [canInspectAccounts]);
 
   useEffect(() => {
     const node = composerDockRef.current;
@@ -1869,10 +1980,7 @@ function ImagePageContent() {
         });
         const submitted = await Promise.all(pendingTaskGroups.map(submitTaskGroup));
         await applyTasks(submitted);
-        updateTurnProgress(conversationId, activeTurn.id, {
-          message: activeTurn.mode === "chat" ? "等待对话回复" : "等待生成结果",
-          detail: "请求已提交，正在轮询任务状态",
-        });
+        updateTurnProgress(conversationId, activeTurn.id, imageTaskProgressMessage(activeTurn));
 
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
@@ -1888,9 +1996,18 @@ function ImagePageContent() {
             break;
           }
 
+          const progressSnapshot = getImageTurnProgressSnapshot()[activeTurnKey];
+          const elapsedSeconds =
+            progressSnapshot && Number.isFinite(progressSnapshot.startedAt)
+              ? Math.max(0, Math.floor((Date.now() - progressSnapshot.startedAt) / 1000))
+              : 0;
+          const progressCopy = imageTaskProgressMessage(activeTurn, elapsedSeconds);
           updateTurnProgress(conversationId, activeTurn.id, {
-            message: activeTurn.mode === "chat" ? "等待对话回复" : "等待生成结果",
-            detail: activeTurn.mode === "chat" ? "对话任务处理中" : `还有 ${loadingTaskIds.length} 张图片处理中`,
+            message: progressCopy.message,
+            detail:
+              activeTurn.mode === "chat"
+                ? progressCopy.detail
+                : `${progressCopy.detail}；还有 ${loadingTaskIds.length} 张图片处理中`,
           });
           await sleep(2000);
           const taskList = await fetchCreationTasks(loadingTaskIds);
@@ -2272,6 +2389,14 @@ function ImagePageContent() {
         return;
       }
       const draftOutputCompression = imageOutputCompressionForFormat(draft.outputFormat, draft.outputCompression);
+      if (mode !== "chat" && requiresPaidImageSize(draftImageSize)) {
+        const sizeLabel = formatImageSizeDisplay(draftImageSize);
+        if (canInspectAccounts && imageAccounts && !hasAvailablePaidImageAccount) {
+          toast.error(`当前未检测到正常 Paid 图片账号，${sizeLabel} 可能会提交后失败。`);
+        } else if (regenerate) {
+          toast.message(`${sizeLabel} 属于高分辨率任务，将使用 Paid 图片账号并可能耗时更久。`);
+        }
+      }
       const now = new Date().toISOString();
       const regenerationId = createId();
       await updateConversation(draft.conversationId, (current) => {
@@ -2332,7 +2457,14 @@ function ImagePageContent() {
         toast.success("已保存编辑设置");
       }
     },
-    [editingTurnDraft, runConversationQueue, updateConversation],
+    [
+      canInspectAccounts,
+      editingTurnDraft,
+      hasAvailablePaidImageAccount,
+      imageAccounts,
+      runConversationQueue,
+      updateConversation,
+    ],
   );
 
   const handleSubmit = async () => {
@@ -2376,6 +2508,18 @@ function ImagePageContent() {
         customWidth: imageCustomWidth,
         customHeight: imageCustomHeight,
       });
+      const needsPaidImageAccount = effectiveImageMode !== "chat" && requiresPaidImageSize(imageSize);
+      if (needsPaidImageAccount) {
+        const sizeLabel = formatImageSizeDisplay(imageSize);
+        if (canInspectAccounts && imageAccounts && !hasAvailablePaidImageAccount) {
+          toast.error(`当前未检测到正常 Paid 图片账号，${sizeLabel} 可能会提交后失败。`);
+        } else {
+          toast.message(`${sizeLabel} 属于高分辨率任务，将使用 Paid 图片账号并可能耗时更久。`);
+        }
+      }
+      if (effectiveImageMode !== "chat" && effectiveModel === CODEX_IMAGE_MODEL && needsPaidImageAccount) {
+        toast.message("Codex 2K/高分辨率任务可能超过 3 分钟，期间任务队列会持续显示状态。");
+      }
 
       const targetConversation = selectedConversationId
         ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
@@ -2819,11 +2963,26 @@ function ImagePageContent() {
                     <div className="rounded-2xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm sm:col-span-2 lg:col-span-4">
                       <div className="flex min-w-0 items-center justify-between gap-3">
                         <span className="shrink-0 font-medium text-stone-600">计算后分辨率</span>
-                        <span className="min-w-0 truncate text-right font-mono font-semibold text-stone-900">
+                        <span className={cn(
+                          "min-w-0 truncate text-right font-mono font-semibold",
+                          editingDraftSizeRequiresPaid ? "text-amber-700" : "text-stone-900",
+                        )}>
                           {editingDraftSizePreviewLabel}
                         </span>
                       </div>
-                      <div className="mt-1 truncate text-xs text-stone-500">{editingDraftSizePreviewDetail}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-stone-500">
+                        <span className="min-w-0 truncate">{editingDraftSizePreviewDetail}</span>
+                        {editingDraftSizeRequiresPaid ? (
+                          <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-amber-100">
+                            Paid
+                          </span>
+                        ) : null}
+                      </div>
+                      {editingDraftSizeRequiresPaid ? (
+                        <div className="mt-1.5 rounded-xl bg-white px-2.5 py-1.5 text-xs leading-5 text-stone-500 ring-1 ring-stone-100">
+                          {paidImageAccountHintNode}
+                        </div>
+                      ) : null}
                     </div>
                     ) : null}
                     {supportsImageQuality(editingTurnDraft.model) ? (
@@ -2951,6 +3110,7 @@ function ImagePageContent() {
                 imageOutputFormat={imageOutputFormat}
                 imageOutputCompression={imageOutputCompression}
                 imageOutputHint={imageOutputHint}
+                paidImageAccountHint={paidImageAccountHintNode}
                 referenceImages={referenceImages}
                 textareaRef={textareaRef}
                 fileInputRef={fileInputRef}
@@ -3026,5 +3186,5 @@ export default function ImagePage() {
     );
   }
 
-  return <ImagePageContent />;
+  return <ImagePageContent session={session} />;
 }

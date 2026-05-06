@@ -25,10 +25,10 @@ export const IMAGE_SIZE_MODE_OPTIONS = [
 export type ImageSizeMode = (typeof IMAGE_SIZE_MODE_OPTIONS)[number]["value"];
 
 export const IMAGE_RESOLUTION_OPTIONS = [
-  { value: "auto", label: "Auto" },
-  { value: "1080p", label: "1080P" },
-  { value: "2k", label: "2K" },
-  { value: "4k", label: "4K" },
+  { value: "auto", label: "Auto", description: "不指定固定像素，交给图片工具决定" },
+  { value: "1080p", label: "1080P", description: "正方形为 1088×1088，宽高按所选比例计算" },
+  { value: "2k", label: "2K", description: "2K Square 为 2048×2048，通常需要 Paid 图片账号" },
+  { value: "4k", label: "4K", description: "按链路像素上限收敛，通常需要 Paid 图片账号" },
 ] as const;
 
 export type ImageResolution = (typeof IMAGE_RESOLUTION_OPTIONS)[number]["value"];
@@ -52,8 +52,20 @@ const MAX_EDGE = 3840;
 const MAX_ASPECT_RATIO = 3;
 const MIN_PIXELS = 655_360;
 const MAX_PIXELS = 8_294_400;
+const FREE_IMAGE_PIXEL_BUDGET = 1_577_536;
 export const DEFAULT_IMAGE_CUSTOM_WIDTH = "1024";
 export const DEFAULT_IMAGE_CUSTOM_HEIGHT = "1024";
+
+export const IMAGE_SIZE_PRESET_DETAILS = [
+  { label: "1:1", requestValue: "1:1", normalizedSize: "1024x1024", paidRequired: false },
+  { label: "3:2", requestValue: "3:2", normalizedSize: "1536x1024", paidRequired: false },
+  { label: "2:3", requestValue: "2:3", normalizedSize: "1024x1536", paidRequired: false },
+  { label: "16:9", requestValue: "16:9", normalizedSize: "1536x864", paidRequired: false },
+  { label: "9:16", requestValue: "9:16", normalizedSize: "864x1536", paidRequired: false },
+  { label: "1080P Square", requestValue: "1080p", normalizedSize: "1088x1088", paidRequired: false },
+  { label: "2K Square", requestValue: "2k", normalizedSize: "2048x2048", paidRequired: true },
+  { label: "4K", requestValue: "4k", normalizedSize: "2880x2880", paidRequired: true },
+] as const;
 
 export const IMAGE_QUALITY_OPTIONS = [
   { value: "low", label: "Low", description: "低质量，速度更快，适合草稿测试" },
@@ -134,6 +146,18 @@ export function parseImageSizeDimensions(size: string) {
   return { width: match[1], height: match[2] };
 }
 
+export function imageSizePixels(size: string) {
+  const dimensions = parseImageSizeDimensions(size);
+  if (!dimensions) {
+    return 0;
+  }
+  return Number(dimensions.width) * Number(dimensions.height);
+}
+
+export function requiresPaidImageSize(size: string) {
+  return imageSizePixels(size) > FREE_IMAGE_PIXEL_BUDGET;
+}
+
 export function parseImageRatio(ratio: string) {
   const match = ratio.match(RATIO_PATTERN);
   if (!match) {
@@ -205,6 +229,13 @@ export function buildCustomImageSize(width: string, height: string) {
 
 export function formatImageSizeDisplay(size: string) {
   return size.replace(/x/g, "×");
+}
+
+export function getImageSizeRequirementLabel(size: string) {
+  if (!size || size === "auto") {
+    return "Auto";
+  }
+  return requiresPaidImageSize(size) ? "Paid 图片账号" : "Free 可用";
 }
 
 export function isImageAspectRatio(value: unknown): value is ImageAspectRatio {

@@ -6,6 +6,8 @@ import { Check, CircleStop, Clock3, Download, Eye, Globe2, LoaderCircle, Lock, P
 import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
 import type { ImagePromptPreset } from "@/app/image/image-presets";
+import { formatImageSizeDisplay, getImageSizeRequirementLabel, requiresPaidImageSize } from "@/app/image/image-options";
+import { CODEX_IMAGE_MODEL, IMAGE_MODEL_ROUTE_DETAILS } from "@/lib/api";
 import type { ImageVisibility } from "@/lib/api";
 import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
 import { formatBase64ImageFileSize, formatImageFileSize } from "@/lib/image-size";
@@ -103,6 +105,30 @@ function getTurnResultSizeLabel(turn: ImageTurn, dimensionsByImageId: Record<str
     return `${labels.length} 种尺寸`;
   }
   return isTurnBusy(turn) && turn.size ? `请求 ${turn.size}` : "";
+}
+
+function getRequestedSizeLabel(turn: ImageTurn) {
+  if (!turn.size) {
+    return "";
+  }
+  const size = turn.size.includes("x") ? formatImageSizeDisplay(turn.size) : turn.size;
+  const requirement = getImageSizeRequirementLabel(turn.size);
+  return requirement === "Auto" ? size : `请求 ${size} / ${requirement}`;
+}
+
+function getLongTaskHint(turn: ImageTurn, elapsedSeconds: number) {
+  if (!isTurnBusy(turn) || turn.mode === "chat") {
+    return "";
+  }
+  if (turn.model === CODEX_IMAGE_MODEL && requiresPaidImageSize(turn.size)) {
+    return elapsedSeconds >= 180
+      ? "Codex 高分辨率长任务仍在生成；后端遇到上游 SSE 临时断流会有限重试"
+      : "Codex 高分辨率任务可能超过 3 分钟";
+  }
+  if (requiresPaidImageSize(turn.size)) {
+    return "高分辨率任务正在使用 Paid 图片账号链路";
+  }
+  return "";
 }
 
 function imageVisibilityLabel(visibility?: ImageVisibility) {
@@ -387,13 +413,17 @@ export function ImageResults({
         const resultSizeLabel = getTurnResultSizeLabel(turn, imageDimensions);
         const progressStartedAt =
           progress && Number.isFinite(progress.startedAt) ? progress.startedAt : null;
+        const elapsedSeconds = progressStartedAt === null ? 0 : Math.max(0, Math.floor((progressNow - progressStartedAt) / 1000));
         const elapsedClock = turnBusy
           ? progressStartedAt === null
             ? ""
-            : formatElapsedClock(Math.max(0, Math.floor((progressNow - progressStartedAt) / 1000)))
+            : formatElapsedClock(elapsedSeconds)
           : "";
         const progressMessage =
           progress?.message || (turn.status === "queued" ? "等待前序任务" : turnBusy ? "正在处理图片" : "");
+        const requestedSizeLabel = getRequestedSizeLabel(turn);
+        const routeDetail = IMAGE_MODEL_ROUTE_DETAILS[turn.model];
+        const longTaskHint = getLongTaskHint(turn, elapsedSeconds);
         const downloadActions =
           downloadableImages.length > 0 ? (
             <>
@@ -448,6 +478,11 @@ export function ImageResults({
                     <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">第 {turnIndex + 1} 轮</span>
                     <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">{getTurnModeLabel(turn)}</span>
                     <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">{turn.model}</span>
+                    {turn.mode !== "chat" && routeDetail ? (
+                      <span className="rounded-full bg-[#eef4ff] px-2.5 py-0.5 text-[#1456f0]">
+                        {routeDetail.routeLabel}
+                      </span>
+                    ) : null}
                     <span className="rounded-full bg-[#f0f0f0] px-2.5 py-0.5 text-[#45515e]">
                       {getTurnStatusLabel(turn.status)}
                     </span>
@@ -530,6 +565,18 @@ export function ImageResults({
                       {turn.count !== resultCount ? (
                         <span className="rounded-full bg-[#f0f0f0] px-3 py-1">目标 {turn.count} 张</span>
                       ) : null}
+                      {requestedSizeLabel ? (
+                        <span
+                          className={cn(
+                            "rounded-full px-3 py-1",
+                            requiresPaidImageSize(turn.size)
+                              ? "bg-amber-50 text-amber-700"
+                              : "bg-[#f0f0f0]",
+                          )}
+                        >
+                          {requestedSizeLabel}
+                        </span>
+                      ) : null}
                       {resultSizeLabel ? <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{resultSizeLabel}</span> : null}
                       {turn.quality ? (
                         <span className="rounded-full bg-[#f0f0f0] px-3 py-1">Quality {turn.quality}</span>
@@ -548,8 +595,9 @@ export function ImageResults({
                     {turnBusy || downloadActions ? (
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         {turnBusy ? (
-                          <span className="w-fit whitespace-nowrap rounded-full bg-amber-50 px-3 py-1 text-[11px] text-amber-700 sm:text-xs">
-                            {progressMessage}
+                          <span className="flex max-w-full flex-col gap-0.5 rounded-2xl bg-amber-50 px-3 py-1 text-[11px] leading-5 text-amber-700 sm:text-xs">
+                            <span className="w-fit whitespace-nowrap font-medium">{progressMessage}</span>
+                            {longTaskHint ? <span className="max-w-[20rem] text-[11px] leading-5">{longTaskHint}</span> : null}
                           </span>
                         ) : null}
                         {downloadActions}

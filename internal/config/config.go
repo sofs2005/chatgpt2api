@@ -893,13 +893,12 @@ type ImageCompatConfig struct {
 func LoadImageCompatConfig() ImageCompatConfig {
 	cfg := ImageCompatConfig{
 		OfficialMode:         envBool("IMAGE_OFFICIAL_MODE", true),
-		UseAutoModel:         envBool("IMAGE_USE_AUTO_MODEL", true),
+		UseAutoModel:         envBool("IMAGE_USE_AUTO_MODEL", false),
 		UseClientCreatedRoot: envBool("IMAGE_USE_CLIENT_CREATED_ROOT", true),
 		SkipPartialQuery:     envBool("IMAGE_SKIP_PARTIAL_QUERY", true),
 		SkipExtraFields:      envBool("IMAGE_SKIP_EXTRA_FIELDS", true),
 	}
 	if cfg.OfficialMode {
-		cfg.UseAutoModel = true
 		cfg.UseClientCreatedRoot = true
 		cfg.SkipPartialQuery = true
 		cfg.SkipExtraFields = true

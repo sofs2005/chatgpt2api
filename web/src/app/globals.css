@@ -146,6 +146,9 @@
     background-image: linear-gradient(180deg, #f8fbff 0%, var(--background) 42%, #f2f6fb 100%);
     line-height: 1.5;
   }
+  body[data-scroll-locked] {
+    margin-right: 0 !important;
+  }
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;

@@ -89,6 +89,7 @@ import {
   clearImageConversations,
   deleteImageConversation,
   getImageConversationStats,
+  getImageTurnLoadingCounts,
   IMAGE_ACTIVE_CONVERSATION_REQUEST_EVENT,
   IMAGE_CONVERSATIONS_CHANGED_EVENT,
   listImageConversations,
@@ -283,7 +284,7 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
   };
 }
 
-const IMAGE_TASK_IMAGE_COUNT = 1;
+const IMAGE_TASK_IMAGE_COUNT = 4;
 
 function normalizeRequestedImageCount(value: string | number) {
   return Math.max(1, Math.min(10, Number(value) || 1));
@@ -359,6 +360,18 @@ function formatHighResolutionHint(canInspectAccounts: boolean) {
 }
 
 function imageTaskProgressMessage(turn: ImageTurn, elapsedSeconds = 0) {
+  if (turn.status === "queued") {
+    return turn.mode === "chat"
+      ? {
+          message: "等待创作并发额度",
+          detail: "对话任务已入队，等待可用额度",
+        }
+      : {
+          message: "等待创作并发额度",
+          detail: "图片任务已入队，等待可用额度",
+        };
+  }
+
   if (turn.mode === "chat") {
     return {
       message: "等待对话回复",
@@ -381,6 +394,20 @@ function imageTaskProgressMessage(turn: ImageTurn, elapsedSeconds = 0) {
   };
 }
 
+function imageTaskLoadingDetail(turn: ImageTurn, fallbackDetail: string) {
+  const counts = getImageTurnLoadingCounts(turn);
+  if (turn.mode === "chat") {
+    return fallbackDetail;
+  }
+  if (counts.queued > 0) {
+    return `${fallbackDetail}；还有 ${counts.queued} 张图片排队中`;
+  }
+  if (counts.running > 0) {
+    return `${fallbackDetail}；还有 ${counts.running} 张图片处理中`;
+  }
+  return "图片结果已返回，正在确认任务状态";
+}
+
 function imageTaskBatchId(turnId: string, imageIndex: number) {
   return `${turnId}-task-${Math.floor(imageIndex / IMAGE_TASK_IMAGE_COUNT)}`;
 }
@@ -400,6 +427,7 @@ function imageDataIndexForTask(images: StoredImage[], imageIndex: number) {
 const STORED_IMAGE_FIELDS: Array<keyof StoredImage> = [
   "id",
   "taskId",
+  "taskStatus",
   "status",
   "path",
   "visibility",
@@ -419,6 +447,17 @@ function updateStoredImage(image: StoredImage, updates: Partial<StoredImage>): S
   return STORED_IMAGE_FIELDS.every((field) => image[field] === next[field]) ? image : next;
 }
 
+function creationTaskImageStatus(task: CreationTask, dataIndex = 0): "queued" | "running" | "success" | undefined {
+  const outputStatus = task.output_statuses?.[dataIndex];
+  if (outputStatus === "queued" || outputStatus === "running" || outputStatus === "success") {
+    return outputStatus;
+  }
+  if (task.status === "queued" || task.status === "running" || task.status === "success") {
+    return task.status;
+  }
+  return undefined;
+}
+
 function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex = 0, fallbackVisibility?: ImageVisibility): StoredImage {
   const taskVisibility = task.visibility || fallbackVisibility || image.visibility || "private";
   const successUpdates = (item: CreationTaskDataItem) => {
@@ -426,6 +465,7 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
     const height = positiveDimension(item.height);
     return {
       taskId: task.id,
+      taskStatus: "success" as const,
       status: "success" as const,
       b64_json: item.b64_json,
       url: item.url,
@@ -444,6 +484,7 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
     if (task.output_type === "text") {
       return updateStoredImage(image, {
         taskId: task.id,
+        taskStatus: "success",
         status: "message",
         text_response: task.data?.[dataIndex]?.text_response || task.error || "",
         b64_json: undefined,
@@ -459,12 +500,14 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
       if (dataIndex > 0 && image.taskId !== image.id) {
         return updateStoredImage(image, {
           taskId: image.id,
+          taskStatus: "queued",
           status: "loading",
           error: undefined,
         });
       }
       return updateStoredImage(image, {
         taskId: task.id,
+        taskStatus: "success",
         status: "error",
         error: `未返回第 ${dataIndex + 1} 张图片数据`,
       });
@@ -472,10 +515,25 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
     return updateStoredImage(image, successUpdates(item));
   }
 
+  if (task.status === "queued" || task.status === "running") {
+    const item = task.data?.[dataIndex];
+    if (item?.b64_json || item?.url) {
+      return updateStoredImage(image, successUpdates(item));
+    }
+    return updateStoredImage(image, {
+      taskId: task.id,
+      taskStatus: creationTaskImageStatus(task, dataIndex) || (task.status === "queued" ? "queued" : "running"),
+      status: "loading",
+      text_response: undefined,
+      error: undefined,
+    });
+  }
+
   if (task.status === "error") {
     if (task.output_type === "text") {
       return updateStoredImage(image, {
         taskId: task.id,
+        taskStatus: "success",
         status: "message",
         text_response: task.error || "",
         b64_json: undefined,
@@ -492,6 +550,7 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
     }
     return updateStoredImage(image, {
       taskId: task.id,
+      taskStatus: undefined,
       status: "error",
       text_response: undefined,
       error: formatCreationTaskErrorMessage(task.error || "生成失败"),
@@ -505,6 +564,7 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
     }
     return updateStoredImage(image, {
       taskId: task.id,
+      taskStatus: undefined,
       status: "cancelled",
       error: task.error || "任务已终止",
     });
@@ -512,10 +572,15 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
 
   return updateStoredImage(image, {
     taskId: task.id,
+    taskStatus: creationTaskImageStatus(task, dataIndex) || "queued",
     status: "loading",
     text_response: undefined,
     error: undefined,
   });
+}
+
+function isActiveCreationTask(task: CreationTask) {
+  return task.status === "queued" || task.status === "running";
 }
 
 function sleep(ms: number) {
@@ -660,13 +725,16 @@ function formatCreationTaskError(error: unknown, fallback = "生成图片失败"
 }
 
 function deriveTurnStatus(turn: ImageTurn): Pick<ImageTurn, "status" | "error"> {
-  const loadingCount = turn.images.filter((image) => image.status === "loading").length;
+  const loadingCounts = getImageTurnLoadingCounts(turn);
   const failedCount = turn.images.filter((image) => image.status === "error").length;
   const successCount = turn.images.filter((image) => image.status === "success").length;
   const cancelledCount = turn.images.filter((image) => image.status === "cancelled").length;
   const messageCount = turn.images.filter((image) => image.status === "message").length;
-  if (loadingCount > 0) {
-    return { status: turn.status === "queued" ? "queued" : "generating", error: undefined };
+  if (loadingCounts.running > 0) {
+    return { status: "generating", error: undefined };
+  }
+  if (loadingCounts.queued > 0) {
+    return { status: "queued", error: undefined };
   }
   if (failedCount > 0) {
     return { status: "error", error: buildTurnOutcomeMessage(successCount, failedCount, cancelledCount) };
@@ -681,6 +749,10 @@ function deriveTurnStatus(turn: ImageTurn): Pick<ImageTurn, "status" | "error"> 
     return { status: "message", error: undefined };
   }
   return { status: "queued", error: undefined };
+}
+
+function deriveTurnStatusFromTaskMap(turn: ImageTurn, images: StoredImage[]): Pick<ImageTurn, "status" | "error"> {
+  return deriveTurnStatus({ ...turn, images });
 }
 
 function isTurnInProgress(turn: ImageTurn) {
@@ -784,7 +856,7 @@ async function syncConversationCreationTasks(items: ImageConversation[]) {
         return turn;
       }
       changed = true;
-      const derived = deriveTurnStatus({ ...turn, images });
+      const derived = deriveTurnStatusFromTaskMap(turn, images);
       const nextTurn = {
         ...turn,
         ...derived,
@@ -1805,10 +1877,16 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
               const taskImage = image.taskId === taskId ? image : { ...image, taskId };
               return task ? taskDataToStoredImage(taskImage, task, imageDataIndexForTask(turn.images, imageIndex), turn.visibility) : image;
             });
-            const derived = deriveTurnStatus({ ...turn, status: "generating", images });
+            const derived = deriveTurnStatusFromTaskMap(turn, images);
+            const currentCounts = getImageTurnLoadingCounts(turn);
+            const nextCounts = getImageTurnLoadingCounts({ images });
             const nextTurn = {
               ...turn,
               ...derived,
+              processingStartedAt:
+                nextCounts.running > 0 && currentCounts.running === 0
+                  ? new Date().toISOString()
+                  : turn.processingStartedAt,
               images,
             };
             if (isTurnInProgress(turn) && !isTurnInProgress(nextTurn)) {
@@ -1840,7 +1918,6 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
                     ...turn,
                     status: "generating",
                     error: undefined,
-                    processingStartedAt: turn.processingStartedAt || turn.createdAt,
                     images: turn.images.map((image, imageIndex) =>
                       image.status === "loading"
                         ? {
@@ -1946,8 +2023,11 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
           detail: activeTurn.mode === "chat" ? "对话任务正在入队" : `${pendingTaskGroups.length} 个图片任务正在入队`,
         });
         const submitted = await Promise.all(pendingTaskGroups.map(submitTaskGroup));
+        let activeTaskIds = new Set(submitted.filter(isActiveCreationTask).map((task) => task.id));
         await applyTasks(submitted);
-        updateTurnProgress(conversationId, activeTurn.id, imageTaskProgressMessage(activeTurn));
+        const submittedStatus =
+          submitted.length > 0 && submitted.every((task) => task.status === "queued") ? "queued" : "generating";
+        updateTurnProgress(conversationId, activeTurn.id, imageTaskProgressMessage({ ...activeTurn, status: submittedStatus }));
 
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
@@ -1959,7 +2039,8 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
               ) || [],
             ),
           );
-          if (loadingTaskIds.length === 0) {
+          const pollingTaskIds = Array.from(new Set([...loadingTaskIds, ...activeTaskIds]));
+          if (pollingTaskIds.length === 0) {
             break;
           }
 
@@ -1968,16 +2049,15 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
             progressSnapshot && Number.isFinite(progressSnapshot.startedAt)
               ? Math.max(0, Math.floor((Date.now() - progressSnapshot.startedAt) / 1000))
               : Math.max(0, Math.floor((Date.now() - activeTurnStartedAt) / 1000));
-          const progressCopy = imageTaskProgressMessage(activeTurn, elapsedSeconds);
+          const progressTurn = latestTurn ?? activeTurn;
+          const progressCopy = imageTaskProgressMessage(progressTurn, elapsedSeconds);
           updateTurnProgress(conversationId, activeTurn.id, {
             message: progressCopy.message,
-            detail:
-              activeTurn.mode === "chat"
-                ? progressCopy.detail
-                : `${progressCopy.detail}；还有 ${loadingTaskIds.length} 张图片处理中`,
+            detail: imageTaskLoadingDetail(progressTurn, progressCopy.detail),
           });
           await sleep(2000);
-          const taskList = await fetchCreationTasks(loadingTaskIds);
+          const taskList = await fetchCreationTasks(pollingTaskIds);
+          activeTaskIds = new Set(taskList.items.filter(isActiveCreationTask).map((task) => task.id));
           if (taskList.items.length > 0) {
             await applyTasks(taskList.items);
           }
@@ -2202,11 +2282,12 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
               if (turn.id !== turnId) {
                 return turn;
               }
-              const images = turn.images.map((image, index) =>
+              const images: StoredImage[] = turn.images.map((image, index) =>
                 index === imageIndex
                   ? {
                       ...image,
                       taskId: retryTaskId,
+                      taskStatus: "queued" as const,
                       status: "loading" as const,
                       b64_json: undefined,
                       url: undefined,
@@ -2225,7 +2306,7 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
               return {
                 ...turn,
                 ...derived,
-                processingStartedAt: now,
+                processingStartedAt: undefined,
                 images,
               };
             }),
@@ -2284,12 +2365,13 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
               count: imageCount,
               status: "queued",
               error: undefined,
-              processingStartedAt: now,
-              images: Array.from({ length: imageCount }, (_, index) => {
+              processingStartedAt: undefined,
+              images: Array.from({ length: imageCount }, (_, index): StoredImage => {
                 const imageId = `${turn.id}-${regenerationId}-${index}`;
                 return {
                   id: imageId,
                   taskId: imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
+                  taskStatus: "queued" as const,
                   status: "loading" as const,
                   visibility,
                 };
@@ -2411,12 +2493,13 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
               ...baseTurn,
               status: "queued" as const,
               error: undefined,
-              processingStartedAt: now,
-              images: Array.from({ length: imageCount }, (_, index) => {
+              processingStartedAt: undefined,
+              images: Array.from({ length: imageCount }, (_, index): StoredImage => {
                 const imageId = `${turn.id}-${regenerationId}-${index}`;
                 return {
                   id: imageId,
                   taskId: imageTaskBatchId(`${turn.id}-${regenerationId}`, index),
+                  taskStatus: "queued" as const,
                   status: "loading" as const,
                   visibility: baseTurn.mode === "chat" ? undefined : baseTurn.visibility,
                 };
@@ -2533,17 +2616,17 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
         outputFormat: effectiveOutputFormat,
         outputCompression: effectiveImageMode === "chat" ? undefined : effectiveOutputCompression,
         visibility: effectiveImageMode === "chat" ? "private" : defaultImageVisibility,
-        images: Array.from({ length: requestedCount }, (_, index) => {
+        images: Array.from({ length: requestedCount }, (_, index): StoredImage => {
           const imageId = `${turnId}-${index}`;
           return {
             id: imageId,
             taskId: imageTaskBatchId(turnId, index),
+            taskStatus: "queued" as const,
             status: "loading" as const,
             visibility: effectiveImageMode === "chat" ? undefined : defaultImageVisibility,
           };
         }),
         createdAt: now,
-        processingStartedAt: now,
         status: "queued",
       };
 

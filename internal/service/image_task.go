@@ -23,6 +23,9 @@ const (
 	TaskStatusCancelled = "cancelled"
 
 	defaultImageTaskTimeout = 5 * time.Minute
+
+	imageOutputCallbackPayloadKey     = "image_output_callback"
+	imageOutputSlotAcquirerPayloadKey = "image_output_slot_acquirer"
 )
 
 type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
@@ -49,14 +52,14 @@ type ImageTaskService struct {
 	edit                ImageTaskHandler
 	chat                ImageTaskHandler
 	retentionGetter     func() int
-	concurrentLimit     func() int
 	taskTimeoutGetter   func() time.Duration
 	userConcurrentLimit func() int
 	userRPMLimit        func() int
-	runningImages       int
 	tasks               map[string]map[string]any
 	cancels             map[string]context.CancelFunc
 	ownerSubmitTimes    map[string][]time.Time
+	ownerRunningUnits   map[string]int
+	creationUnitCond    *sync.Cond
 }
 
 type ImageTaskLimitError struct {
@@ -76,15 +79,13 @@ func NewStoredImageTaskService(path string, backend storage.Backend, generation 
 }
 
 func newImageTaskService(path string, store storage.JSONDocumentBackend, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
-	s := &ImageTaskService{path: path, store: store, docName: "image_tasks.json", generation: generation, edit: edit, chat: chat, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}, ownerSubmitTimes: map[string][]time.Time{}}
+	s := &ImageTaskService{path: path, store: store, docName: "image_tasks.json", generation: generation, edit: edit, chat: chat, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}, ownerSubmitTimes: map[string][]time.Time{}, ownerRunningUnits: map[string]int{}}
+	s.creationUnitCond = sync.NewCond(&s.mu)
 	if len(limitGetters) > 0 {
-		s.concurrentLimit = limitGetters[0]
+		s.userConcurrentLimit = limitGetters[0]
 	}
 	if len(limitGetters) > 1 {
-		s.userConcurrentLimit = limitGetters[1]
-	}
-	if len(limitGetters) > 2 {
-		s.userRPMLimit = limitGetters[2]
+		s.userRPMLimit = limitGetters[1]
 	}
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 	s.mu.Lock()
@@ -287,6 +288,9 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 	taskCtx, cancel := context.WithCancel(context.Background())
 	outputFormat := NormalizeImageOutputFormat(util.Clean(payload["output_format"]))
 	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": outputFormat, "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
+	if mode == "generate" || mode == "edit" {
+		task["output_statuses"] = initialImageOutputStatuses(count)
+	}
 	if SupportsImageOutputCompression(outputFormat) {
 		if compression, ok := normalizedImageOutputCompressionValue(payload["output_compression"]); ok {
 			task["output_compression"] = compression
@@ -304,17 +308,6 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 
 func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identity Identity, payload map[string]any) {
 	defer s.removeTaskCancel(key)
-	if isImageTaskMode(mode) {
-		slots, ok := s.acquireImageSlots(ctx, imageTaskCount(payload))
-		if !ok {
-			s.updateActiveTask(key, map[string]any{"status": TaskStatusCancelled, "error": "任务已终止", "data": []any{}})
-			return
-		}
-		defer s.releaseImageSlots(slots)
-	}
-	if !s.updateActiveTask(key, map[string]any{"status": TaskStatusRunning, "error": ""}) {
-		return
-	}
 	runCtx, cancel := context.WithTimeout(ctx, s.taskTimeout())
 	defer cancel()
 
@@ -323,6 +316,48 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		handler = s.edit
 	} else if mode == "chat" {
 		handler = s.chat
+	}
+	if mode == "generate" || mode == "edit" {
+		payload[imageOutputCallbackPayloadKey] = func(data []map[string]any) {
+			if len(data) == 0 {
+				return
+			}
+			s.updateImageTaskPartialData(key, data)
+		}
+		payload[imageOutputSlotAcquirerPayloadKey] = func(ctx context.Context, index int) (func(), error) {
+			release, err := s.AcquireCreationUnit(ctx, identity)
+			if err != nil {
+				return nil, err
+			}
+			if !s.ensureTaskRunning(key) {
+				release()
+				return nil, context.Canceled
+			}
+			if !s.markImageOutputStatus(key, index, "running") {
+				release()
+				return nil, context.Canceled
+			}
+			return release, nil
+		}
+	} else if mode == "chat" {
+		release, err := s.AcquireCreationUnit(runCtx, identity)
+		if err != nil {
+			status := TaskStatusError
+			message := err.Error()
+			if ctx.Err() != nil {
+				status = TaskStatusCancelled
+				message = "任务已终止"
+			} else if runCtx.Err() == context.DeadlineExceeded {
+				message = "图片生成超时，请稍后重试或降低分辨率"
+			}
+			s.updateActiveTask(key, map[string]any{"status": status, "error": message, "data": []any{}})
+			return
+		}
+		if !s.ensureTaskRunning(key) {
+			release()
+			return
+		}
+		defer release()
 	}
 	result, err := handler(runCtx, identity, payload)
 	if err != nil {
@@ -358,60 +393,22 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		return
 	}
 	updates := map[string]any{"status": TaskStatusSuccess, "data": data, "error": ""}
+	if mode == "generate" || mode == "edit" {
+		statuses := initialImageOutputStatuses(taskCount(mode, payload))
+		for index, item := range data {
+			if index >= len(statuses) {
+				break
+			}
+			if hasImageTaskOutputData(item) {
+				statuses[index] = "success"
+			}
+		}
+		updates["output_statuses"] = statuses
+	}
 	if outputType != "" {
 		updates["output_type"] = outputType
 	}
 	s.updateActiveTask(key, updates)
-}
-
-func (s *ImageTaskService) acquireImageSlots(ctx context.Context, requested int) (int, bool) {
-	if requested < 1 {
-		requested = 1
-	}
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		limit := s.imageConcurrentLimit()
-		slots := requested
-		if slots > limit {
-			slots = limit
-		}
-		s.mu.Lock()
-		if s.runningImages+slots <= limit {
-			s.runningImages += slots
-			s.mu.Unlock()
-			return slots, true
-		}
-		s.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return 0, false
-		case <-ticker.C:
-		}
-	}
-}
-
-func (s *ImageTaskService) releaseImageSlots(slots int) {
-	if slots < 1 {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.runningImages -= slots
-	if s.runningImages < 0 {
-		s.runningImages = 0
-	}
-}
-
-func (s *ImageTaskService) imageConcurrentLimit() int {
-	limit := 4
-	if s.concurrentLimit != nil {
-		limit = s.concurrentLimit()
-	}
-	if limit < 1 {
-		return 1
-	}
-	return limit
 }
 
 func (s *ImageTaskService) taskTimeout() time.Duration {
@@ -425,17 +422,11 @@ func (s *ImageTaskService) taskTimeout() time.Duration {
 	return timeout
 }
 
-func (s *ImageTaskService) checkUserTaskLimitsLocked(identity Identity, owner string, requested int, now time.Time) error {
+func (s *ImageTaskService) checkUserTaskLimitsLocked(identity Identity, owner string, _ int, now time.Time) error {
 	if identity.Role != AuthRoleUser {
 		return nil
 	}
-	if requested < 1 {
-		requested = 1
-	}
-	if limit := s.userImageConcurrentLimit(); limit > 0 && s.activeOwnerTaskCountLocked(owner)+requested > limit {
-		return ImageTaskLimitError{Message: fmt.Sprintf("用户并发限制已达到（最多 %d 个任务处理中）", limit)}
-	}
-	if limit := s.userImageRPMLimit(); limit > 0 {
+	if limit := s.userRPMLimitValue(); limit > 0 {
 		cutoff := now.Add(-time.Minute)
 		times := s.ownerSubmitTimes[owner]
 		kept := times[:0]
@@ -453,18 +444,7 @@ func (s *ImageTaskService) checkUserTaskLimitsLocked(identity Identity, owner st
 	return nil
 }
 
-func (s *ImageTaskService) activeOwnerTaskCountLocked(owner string) int {
-	count := 0
-	for _, task := range s.tasks {
-		if task["owner_id"] != owner || !isActiveTaskStatus(util.Clean(task["status"])) {
-			continue
-		}
-		count += storedTaskCount(task)
-	}
-	return count
-}
-
-func (s *ImageTaskService) userImageConcurrentLimit() int {
+func (s *ImageTaskService) userConcurrentLimitValue() int {
 	if s.userConcurrentLimit == nil {
 		return 0
 	}
@@ -475,7 +455,98 @@ func (s *ImageTaskService) userImageConcurrentLimit() int {
 	return limit
 }
 
-func (s *ImageTaskService) userImageRPMLimit() int {
+func (s *ImageTaskService) AcquireCreationUnit(ctx context.Context, identity Identity) (func(), error) {
+	if identity.Role != AuthRoleUser {
+		return noopCreationUnitRelease, nil
+	}
+	owner := ownerID(identity)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		limit := s.userConcurrentLimitValue()
+		if limit <= 0 || s.ownerRunningUnits[owner] < limit {
+			s.ownerRunningUnits[owner]++
+			released := false
+			return func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if released {
+					return
+				}
+				released = true
+				if s.ownerRunningUnits[owner] <= 1 {
+					delete(s.ownerRunningUnits, owner)
+				} else {
+					s.ownerRunningUnits[owner]--
+				}
+				s.creationUnitCond.Broadcast()
+			}, nil
+		}
+		timer := time.AfterFunc(100*time.Millisecond, func() {
+			s.mu.Lock()
+			s.creationUnitCond.Broadcast()
+			s.mu.Unlock()
+		})
+		s.creationUnitCond.Wait()
+		timer.Stop()
+	}
+}
+
+func noopCreationUnitRelease() {}
+
+func (s *ImageTaskService) ensureTaskRunning(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task := s.tasks[key]
+	if task == nil {
+		return false
+	}
+	status := util.Clean(task["status"])
+	if status == TaskStatusRunning {
+		return true
+	}
+	if status != TaskStatusQueued {
+		return false
+	}
+	task["status"] = TaskStatusRunning
+	task["error"] = ""
+	task["updated_at"] = util.NowLocal()
+	_ = s.saveLocked()
+	return true
+}
+
+func (s *ImageTaskService) markImageOutputStatus(key string, index int, status string) bool {
+	if index < 1 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task := s.tasks[key]
+	if task == nil || !isActiveTaskStatus(util.Clean(task["status"])) {
+		return false
+	}
+	count := storedImageOutputCount(task)
+	if index > count {
+		return false
+	}
+	statuses := normalizedImageOutputStatuses(util.Clean(task["mode"]), count, task["output_statuses"])
+	if len(statuses) == 0 {
+		return true
+	}
+	if statuses[index-1] == "success" {
+		return true
+	}
+	statuses[index-1] = status
+	task["output_statuses"] = statuses
+	task["updated_at"] = util.NowLocal()
+	_ = s.saveLocked()
+	return true
+}
+
+func (s *ImageTaskService) userRPMLimitValue() int {
 	if s.userRPMLimit == nil {
 		return 0
 	}
@@ -498,6 +569,32 @@ func (s *ImageTaskService) updateActiveTask(key string, updates map[string]any) 
 	}
 	for k, v := range updates {
 		task[k] = v
+	}
+	task["updated_at"] = util.NowLocal()
+	_ = s.saveLocked()
+	return true
+}
+
+func (s *ImageTaskService) updateImageTaskPartialData(key string, data []map[string]any) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task := s.tasks[key]
+	if task == nil || !isActiveTaskStatus(util.Clean(task["status"])) {
+		return false
+	}
+	count := storedImageOutputCount(task)
+	statuses := normalizedImageOutputStatuses(util.Clean(task["mode"]), count, task["output_statuses"])
+	for index, item := range data {
+		if index >= len(statuses) {
+			break
+		}
+		if hasImageTaskOutputData(item) {
+			statuses[index] = "success"
+		}
+	}
+	task["data"] = cloneTaskData(data)
+	if len(statuses) > 0 {
+		task["output_statuses"] = statuses
 	}
 	task["updated_at"] = util.NowLocal()
 	_ = s.saveLocked()
@@ -545,10 +642,13 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 				normalized["output_compression"] = compression
 			}
 		}
-		if data := util.AsMapSlice(task["data"]); data != nil {
-			normalized["data"] = data
-		}
-		if errText := util.Clean(task["error"]); errText != "" {
+	if data := util.AsMapSlice(task["data"]); data != nil {
+		normalized["data"] = data
+	}
+	if statuses := normalizedImageOutputStatuses(mode, count, task["output_statuses"]); len(statuses) > 0 {
+		normalized["output_statuses"] = statuses
+	}
+	if errText := util.Clean(task["error"]); errText != "" {
 			normalized["error"] = errText
 		}
 		if outputType := util.Clean(task["output_type"]); outputType != "" {
@@ -630,6 +730,9 @@ func publicTask(task map[string]any) map[string]any {
 		}
 	}
 	mergePublicImageToolTaskFields(item, task)
+	if statuses := util.AsStringSlice(task["output_statuses"]); len(statuses) > 0 {
+		item["output_statuses"] = append([]string(nil), statuses...)
+	}
 	if task["data"] != nil {
 		item["data"] = task["data"]
 	}
@@ -688,6 +791,50 @@ func taskCount(mode string, payload map[string]any) int {
 		return 1
 	}
 	return imageTaskCount(payload)
+}
+
+func storedImageOutputCount(task map[string]any) int {
+	return imageTaskCount(task)
+}
+
+func initialImageOutputStatuses(count int) []string {
+	if count < 1 {
+		count = 1
+	}
+	statuses := make([]string, count)
+	for index := range statuses {
+		statuses[index] = "queued"
+	}
+	return statuses
+}
+
+func normalizedImageOutputStatuses(mode string, count int, value any) []string {
+	if mode != "generate" && mode != "edit" {
+		return nil
+	}
+	if count < 1 {
+		count = 1
+	}
+	source := util.AsStringSlice(value)
+	statuses := make([]string, count)
+	for index := range statuses {
+		status := "queued"
+		if index < len(source) {
+			switch source[index] {
+			case "queued", "running", "success":
+				status = source[index]
+			}
+		}
+		statuses[index] = status
+	}
+	return statuses
+}
+
+func hasImageTaskOutputData(item map[string]any) bool {
+	if item == nil {
+		return false
+	}
+	return util.Clean(item["b64_json"]) != "" || util.Clean(item["url"]) != ""
 }
 
 func mergeImageTaskMetadata(payload map[string]any, metadata map[string]any) {
@@ -779,14 +926,6 @@ func normalizedImageOutputCompressionValue(value any) (int, bool) {
 	return compression, true
 }
 
-func storedTaskCount(task map[string]any) int {
-	return taskCount(util.Clean(task["mode"]), task)
-}
-
-func isImageTaskMode(mode string) bool {
-	return mode == "generate" || mode == "edit"
-}
-
 func taskResultData(result map[string]any) []map[string]any {
 	if result == nil {
 		return []map[string]any{}
@@ -795,7 +934,22 @@ func taskResultData(result map[string]any) []map[string]any {
 	if data == nil {
 		return []map[string]any{}
 	}
-	return data
+	return cloneTaskData(data)
+}
+
+func cloneTaskData(items []map[string]any) []map[string]any {
+	if len(items) == 0 {
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			out = append(out, map[string]any{})
+			continue
+		}
+		out = append(out, util.CopyMap(item))
+	}
+	return out
 }
 
 func isActiveTaskStatus(status string) bool {

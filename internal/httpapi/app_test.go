@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -14,9 +15,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"chatgpt2api/internal/backend"
+	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 	"chatgpt2api/internal/version"
@@ -258,6 +262,8 @@ func TestAdminSystemCheckUpdates(t *testing.T) {
 }
 
 func TestPasswordAccountLoginAndRegistrationToggle(t *testing.T) {
+	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
+
 	app := newTestApp(t)
 	defer app.Close()
 
@@ -275,6 +281,7 @@ func TestPasswordAccountLoginAndRegistrationToggle(t *testing.T) {
 	if adminToken == "" || login["role"] != service.AuthRoleAdmin || login["subject_id"] != "admin" {
 		t.Fatalf("admin login body = %#v", login)
 	}
+	assertCreationConcurrentLimit(t, login, 0)
 
 	req = httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"username":"alice","password":"Password123","name":"Alice"}`))
 	res = httptest.NewRecorder()
@@ -308,6 +315,7 @@ func TestPasswordAccountLoginAndRegistrationToggle(t *testing.T) {
 	if registered["role_id"] != service.DefaultManagedRoleID {
 		t.Fatalf("registered role fields = %#v", registered)
 	}
+	assertCreationConcurrentLimit(t, registered, 2)
 
 	req = httptest.NewRequest(http.MethodGet, "/auth/session", nil)
 	req.Header.Set("Authorization", "Bearer "+userToken)
@@ -316,9 +324,16 @@ func TestPasswordAccountLoginAndRegistrationToggle(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("registered session status = %d body = %s", res.Code, res.Body.String())
 	}
+	var session map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &session); err != nil {
+		t.Fatalf("registered session json: %v", err)
+	}
+	assertCreationConcurrentLimit(t, session, 2)
 }
 
 func TestProfileAccountNameAndPasswordUpdates(t *testing.T) {
+	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "3")
+
 	app := newTestApp(t)
 	defer app.Close()
 
@@ -344,6 +359,7 @@ func TestProfileAccountNameAndPasswordUpdates(t *testing.T) {
 	if profile["name"] != "Alice Updated" || profile["subject_id"] != user.ID {
 		t.Fatalf("profile update body = %#v", profile)
 	}
+	assertCreationConcurrentLimit(t, profile, 3)
 
 	req = httptest.NewRequest(http.MethodGet, "/auth/session", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -358,6 +374,7 @@ func TestProfileAccountNameAndPasswordUpdates(t *testing.T) {
 	if profile["name"] != "Alice Updated" {
 		t.Fatalf("session did not reflect updated name: %#v", profile)
 	}
+	assertCreationConcurrentLimit(t, profile, 3)
 
 	req = httptest.NewRequest(http.MethodPost, "/api/profile/password", strings.NewReader(`{"current_password":"wrong-password","new_password":"NewPassword123"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -394,6 +411,7 @@ func TestProfileAccountNameAndPasswordUpdates(t *testing.T) {
 	if profile["name"] != "Alice Updated" || profile["subject_id"] != user.ID {
 		t.Fatalf("new password login body = %#v", profile)
 	}
+	assertCreationConcurrentLimit(t, profile, 3)
 }
 
 func TestCreationTaskFailureWritesCallLog(t *testing.T) {
@@ -503,6 +521,173 @@ func TestRunLoggedImageTaskLogsTextOutputAsFailure(t *testing.T) {
 	detail := util.StringMap(item["detail"])
 	if detail["outcome"] != "failed" || util.ToInt(detail["status"], 0) != http.StatusBadGateway {
 		t.Fatalf("failure log detail = %#v", detail)
+	}
+}
+
+func TestDirectImageGenerationUsesCreationLimiter(t *testing.T) {
+	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
+	app := newTestApp(t)
+	defer app.Close()
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "image-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+
+	app.engine.ImageTokenProvider = func(context.Context) (string, error) {
+		return "test-token", nil
+	}
+	app.engine.ImageClientFactory = func(string) *backend.Client {
+		return nil
+	}
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	release := make(chan struct{})
+	app.engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		out := make(chan protocol.ImageOutput)
+		errCh := make(chan error, 1)
+		go func() {
+			defer close(out)
+			defer close(errCh)
+			mu.Lock()
+			active++
+			if active > maxActive {
+				maxActive = active
+			}
+			mu.Unlock()
+			select {
+			case <-release:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+			out <- protocol.ImageOutput{
+				Kind:    "result",
+				Model:   request.Model,
+				Index:   index,
+				Total:   total,
+				Created: int64(index),
+				Data:    []map[string]any{{"url": fmt.Sprintf("https://example.test/%d.png", index)}},
+			}
+			mu.Lock()
+			active--
+			mu.Unlock()
+			errCh <- nil
+		}()
+		return out, errCh
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":3,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.Handler().ServeHTTP(res, req)
+	}()
+
+	waitForHTTPTestCondition(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return maxActive >= 2
+	})
+	time.Sleep(120 * time.Millisecond)
+	mu.Lock()
+	gotMaxActive := maxActive
+	mu.Unlock()
+	if gotMaxActive != 2 {
+		t.Fatalf("max concurrent direct image outputs = %d, want 2", gotMaxActive)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct image generation request did not finish")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("direct image generation status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestDirectImageGenerationDoesNotLimitAdminToken(t *testing.T) {
+	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
+	app := newTestApp(t)
+	defer app.Close()
+
+	app.engine.ImageTokenProvider = func(context.Context) (string, error) {
+		return "test-token", nil
+	}
+	app.engine.ImageClientFactory = func(string) *backend.Client {
+		return nil
+	}
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	release := make(chan struct{})
+	app.engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		out := make(chan protocol.ImageOutput)
+		errCh := make(chan error, 1)
+		go func() {
+			defer close(out)
+			defer close(errCh)
+			mu.Lock()
+			active++
+			if active > maxActive {
+				maxActive = active
+			}
+			mu.Unlock()
+			select {
+			case <-release:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+			out <- protocol.ImageOutput{
+				Kind:    "result",
+				Model:   request.Model,
+				Index:   index,
+				Total:   total,
+				Created: int64(index),
+				Data:    []map[string]any{{"url": fmt.Sprintf("https://example.test/%d.png", index)}},
+			}
+			mu.Lock()
+			active--
+			mu.Unlock()
+			errCh <- nil
+		}()
+		return out, errCh
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":3,"response_format":"url"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.Handler().ServeHTTP(res, req)
+	}()
+
+	waitForHTTPTestCondition(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return maxActive >= 3
+	})
+	mu.Lock()
+	gotMaxActive := maxActive
+	mu.Unlock()
+	if gotMaxActive != 3 {
+		t.Fatalf("max concurrent admin image outputs = %d, want 3", gotMaxActive)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("admin image generation request did not finish")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin image generation status = %d body = %s", res.Code, res.Body.String())
 	}
 }
 
@@ -2233,6 +2418,14 @@ func findResponseCookie(res *http.Response, name string) *http.Cookie {
 	return nil
 }
 
+func assertCreationConcurrentLimit(t *testing.T, payload map[string]any, want int) {
+	t.Helper()
+	got, ok := payload["creation_concurrent_limit"].(float64)
+	if !ok || got != float64(want) {
+		t.Fatalf("creation_concurrent_limit = %#v, want %d in %#v", payload["creation_concurrent_limit"], want, payload)
+	}
+}
+
 func findLogByDetail(items []map[string]any, key, value string) map[string]any {
 	return findLogByDetails(items, map[string]any{key: value})
 }
@@ -2269,6 +2462,18 @@ func adminAuthHeader(t *testing.T, app *App) string {
 		t.Fatalf("admin LoginPassword() identity=%#v token=%q", identity, token)
 	}
 	return "Bearer " + token
+}
+
+func waitForHTTPTestCondition(t *testing.T, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for condition")
 }
 
 func newTestApp(t *testing.T) *App {

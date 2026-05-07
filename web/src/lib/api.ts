@@ -195,7 +195,6 @@ export type SettingsConfig = {
   base_url?: string;
   registration_enabled?: boolean;
   refresh_account_interval_minute?: number | string;
-  image_concurrent_limit?: number | string;
   image_task_timeout_seconds?: number | string;
   user_default_concurrent_limit?: number | string;
   user_default_rpm_limit?: number | string;
@@ -348,6 +347,7 @@ export type CreationTask = {
   created_at: string;
   updated_at: string;
   data?: CreationTaskData[];
+  output_statuses?: ("queued" | "running" | "success")[];
   error?: string;
   output_type?: "text";
   visibility?: ImageVisibility;
@@ -383,6 +383,7 @@ export type LoginResponse = {
   provider?: string;
   credential_id?: string;
   credential_name?: string;
+  creation_concurrent_limit: number;
   menu_paths?: string[];
   api_permissions?: string[];
   menus?: PermissionMenu[];

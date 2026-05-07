@@ -51,26 +51,29 @@ type Engine struct {
 	ResponseContexts  *ResponseContextStore
 }
 
+type ImageOutputSlotAcquirer func(context.Context, int) (func(), error)
+
 type ConversationRequest struct {
-	Model             string
-	Prompt            string
-	Messages          []map[string]any
-	Images            []string
-	InputImageMask    string
-	N                 int
-	Size              string
-	Quality           string
-	Background        string
-	Moderation        string
-	Style             string
-	OutputFormat      string
-	OutputCompression *int
-	PartialImages     *int
-	ResponseFormat    string
-	BaseURL           string
-	OwnerID           string
-	OwnerName         string
-	MessageAsError    bool
+	Model                  string
+	Prompt                 string
+	Messages               []map[string]any
+	Images                 []string
+	InputImageMask         string
+	N                      int
+	Size                   string
+	Quality                string
+	Background             string
+	Moderation             string
+	Style                  string
+	OutputFormat           string
+	OutputCompression      *int
+	PartialImages          *int
+	ResponseFormat         string
+	BaseURL                string
+	OwnerID                string
+	OwnerName              string
+	MessageAsError         bool
+	AcquireImageOutputSlot ImageOutputSlotAcquirer
 }
 
 func (r ConversationRequest) Normalized() ConversationRequest {
@@ -189,6 +192,13 @@ type ImageOutput struct {
 	Text              string
 	UpstreamEventType string
 	Data              []map[string]any
+}
+
+type ImageOutputProgressCallback func([]map[string]any)
+
+type indexedImageOutputData struct {
+	index int
+	data  []map[string]any
 }
 
 type ImageGenerationError struct {
@@ -471,6 +481,13 @@ func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request Convers
 			wg.Add(1)
 			go func(index int) {
 				defer wg.Done()
+				releaseSlot, err := request.acquireImageOutputSlot(ctx, index)
+				if err != nil {
+					cancel()
+					resultCh <- imageRunResult{lastError: err.Error(), err: err}
+					return
+				}
+				defer releaseSlot()
 				result := e.runSingleImageOutput(ctx, out, request, index)
 				if result.err != nil {
 					cancel()
@@ -509,6 +526,22 @@ func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request Convers
 	}()
 	return out, errCh
 }
+
+func (r ConversationRequest) acquireImageOutputSlot(ctx context.Context, index int) (func(), error) {
+	if r.AcquireImageOutputSlot == nil {
+		return noopImageOutputSlotRelease, nil
+	}
+	release, err := r.AcquireImageOutputSlot(ctx, index)
+	if err != nil {
+		return nil, err
+	}
+	if release == nil {
+		return noopImageOutputSlotRelease, nil
+	}
+	return release, nil
+}
+
+func noopImageOutputSlotRelease() {}
 
 func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutput, request ConversationRequest, index int) imageRunResult {
 	result := imageRunResult{}
@@ -758,12 +791,12 @@ func isFinalImageTextEvent(event backend.ResponsesImageEvent) bool {
 }
 
 func (e *Engine) CollectImageOutputs(outputs <-chan ImageOutput, errCh <-chan error) (map[string]any, error) {
+	return e.CollectImageOutputsWithProgress(outputs, errCh, nil)
+}
+
+func (e *Engine) CollectImageOutputsWithProgress(outputs <-chan ImageOutput, errCh <-chan error, onProgress ImageOutputProgressCallback) (map[string]any, error) {
 	var created int64
-	type indexedData struct {
-		index int
-		data  []map[string]any
-	}
-	var results []indexedData
+	var results []indexedImageOutputData
 	message := ""
 	var progress []string
 	for output := range outputs {
@@ -778,22 +811,19 @@ func (e *Engine) CollectImageOutputs(outputs <-chan ImageOutput, errCh <-chan er
 		case "message":
 			message = output.Text
 		case "result":
-			results = append(results, indexedData{index: output.Index, data: output.Data})
+			results = append(results, indexedImageOutputData{index: output.Index, data: output.Data})
+			if onProgress != nil {
+				onProgress(indexedImageDataWithPlaceholders(results))
+			}
 		}
 	}
 	streamErr := <-errCh
 	if created == 0 {
 		created = time.Now().Unix()
 	}
-	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].index == results[j].index {
-			return i < j
-		}
-		return results[i].index < results[j].index
-	})
-	data := make([]map[string]any, 0)
-	for _, item := range results {
-		data = append(data, item.data...)
+	data := denseIndexedImageData(results)
+	if streamErr != nil && onProgress != nil {
+		data = indexedImageDataWithPlaceholders(results)
 	}
 	result := map[string]any{"created": created, "data": data}
 	if len(data) == 0 {
@@ -811,6 +841,60 @@ func (e *Engine) CollectImageOutputs(outputs <-chan ImageOutput, errCh <-chan er
 		return result, streamErr
 	}
 	return result, nil
+}
+
+func denseIndexedImageData(results []indexedImageOutputData) []map[string]any {
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].index == results[j].index {
+			return i < j
+		}
+		return results[i].index < results[j].index
+	})
+	data := make([]map[string]any, 0)
+	for _, item := range results {
+		data = append(data, cloneImageOutputData(item.data)...)
+	}
+	return data
+}
+
+func indexedImageDataWithPlaceholders(results []indexedImageOutputData) []map[string]any {
+	maxIndex := 0
+	for _, item := range results {
+		if item.index > maxIndex {
+			maxIndex = item.index
+		}
+	}
+	if maxIndex < 1 {
+		return nil
+	}
+	data := make([]map[string]any, maxIndex)
+	for i := range data {
+		data[i] = map[string]any{}
+	}
+	for _, item := range results {
+		if item.index < 1 || len(item.data) == 0 {
+			continue
+		}
+		cloned := cloneImageOutputData(item.data)
+		data[item.index-1] = cloned[0]
+		data = append(data, cloned[1:]...)
+	}
+	return data
+}
+
+func cloneImageOutputData(items []map[string]any) []map[string]any {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			out = append(out, map[string]any{})
+			continue
+		}
+		out = append(out, util.CopyMap(item))
+	}
+	return out
 }
 
 func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseFormat, baseURL, ownerID, ownerName string, created int64, message string) map[string]any {

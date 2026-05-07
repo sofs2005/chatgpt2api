@@ -21,6 +21,7 @@ export type StoredAuthSession = {
   subjectId: string;
   name: string;
   provider?: string;
+  creationConcurrentLimit: number;
   menuPaths: string[];
   apiPermissions: string[];
   menus: AuthMenuItem[];
@@ -83,7 +84,8 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
   const candidate = value as Partial<StoredAuthSession>;
   const key = String(candidate.key || fallbackKey || "").trim();
   const role = candidate.role === "admin" || candidate.role === "user" ? candidate.role : null;
-  if (!key || !role) {
+  const creationConcurrentLimit = Number(candidate.creationConcurrentLimit);
+  if (!key || !role || !Number.isFinite(creationConcurrentLimit) || creationConcurrentLimit < 0) {
     return null;
   }
 
@@ -95,6 +97,7 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
     subjectId: String(candidate.subjectId || "").trim(),
     name: String(candidate.name || "").trim(),
     provider: String(candidate.provider || "").trim(),
+    creationConcurrentLimit,
     menuPaths: normalizeStringList(candidate.menuPaths),
     apiPermissions: normalizeStringList(candidate.apiPermissions),
     menus: normalizeMenus(candidate.menus),

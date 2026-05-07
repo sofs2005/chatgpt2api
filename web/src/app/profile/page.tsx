@@ -87,6 +87,13 @@ function sessionRoleLabel(session: StoredAuthSession) {
   return session.roleName || "普通用户";
 }
 
+function creationConcurrentLimitLabel(session: StoredAuthSession) {
+  if (session.role === "admin" || session.creationConcurrentLimit === 0) {
+    return "不限制";
+  }
+  return `${session.creationConcurrentLimit} 个`;
+}
+
 function maskKey(hasKey: boolean) {
   return hasKey ? "sk-••••••••••••••••••••••••••••••••" : "未生成";
 }
@@ -350,6 +357,7 @@ function ProfileContent({ session }: { session: StoredAuthSession }) {
               <InfoRow label="用户 ID" value={currentSession.subjectId} code />
               <InfoRow label="登录来源" value={providerLabel(currentSession.provider)} />
               <InfoRow label="角色 ID" value={currentSession.roleId || currentSession.role} code />
+              <InfoRow label="创作并发额度" value={creationConcurrentLimitLabel(currentSession)} />
             </CardContent>
           </Card>
 

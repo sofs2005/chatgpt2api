@@ -202,19 +202,18 @@ function AccountMenu({
             </div>
           </div>
 
-          <Link
-            to={profileNavItem.href}
-            className={cn(
-              "flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition hover:bg-accent hover:text-accent-foreground",
-              profileActive ? "bg-[#edf4ff] text-[#1456f0] dark:bg-sky-950/30 dark:text-sky-300" : "text-foreground",
-            )}
-            onClick={() => setOpen(false)}
-          >
-            <UserCircle2 className="size-4" />
-            个人中心
-          </Link>
-
           <div className="grid grid-cols-2 gap-2">
+            <Link
+              to={profileNavItem.href}
+              className={cn(
+                "col-span-2 flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition hover:bg-accent hover:text-accent-foreground",
+                profileActive ? "bg-[#edf4ff] text-[#1456f0] dark:bg-sky-950/30 dark:text-sky-300" : "text-foreground",
+              )}
+              onClick={() => setOpen(false)}
+            >
+              <UserCircle2 className="size-4" />
+              个人中心
+            </Link>
             <a
               href="https://t.me/+YBR7t_CPOYBkYzU1"
               target="_blank"

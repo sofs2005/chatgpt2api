@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { verifySession } from "@/lib/api";
-import { clearVerifiedAuthSession, setVerifiedAuthSession } from "@/lib/session";
+import { authSessionFromLoginResponse, clearVerifiedAuthSession, setVerifiedAuthSession } from "@/lib/session";
 import { getDefaultRouteForSession } from "@/store/auth";
 
 function fragmentParams() {
@@ -66,18 +66,7 @@ export default function LinuxDoCallbackPage() {
 
       try {
         const data = await verifySession(key);
-        const session = {
-          key,
-          role: data.role,
-          roleId: data.role_id,
-          roleName: data.role_name,
-          subjectId: data.subject_id,
-          name: data.name,
-          provider: data.provider,
-          menuPaths: data.menu_paths || [],
-          apiPermissions: data.api_permissions || [],
-          menus: data.menus || [],
-        };
+        const session = authSessionFromLoginResponse(data, key);
         await setVerifiedAuthSession(session);
         toast.success("登录成功");
         const redirect = sanitizeRedirectPath(params.get("redirect")) || getDefaultRouteForSession(session);

@@ -7,8 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"chatgpt2api/internal/util"
 )
 
 func TestImageTaskServiceIdempotencyOwnerIsolationAndCompletion(t *testing.T) {
@@ -249,7 +252,7 @@ func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
 		handlerCalls <- payload
 		return map[string]any{"output_type": "text", "data": []map[string]any{{"text_response": "chat response"}}}, nil
 	}
-	svc := NewImageTaskService(path, imageHandler, imageHandler, chatHandler, func() int { return 30 }, func() int { return 0 })
+	svc := NewImageTaskService(path, imageHandler, imageHandler, chatHandler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 	messages := []map[string]any{{"role": "user", "content": "hello"}}
 
@@ -279,7 +282,7 @@ func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
 	}
 }
 
-func TestImageTaskServiceLimitsConcurrentImageSlots(t *testing.T) {
+func TestImageTaskServiceDoesNotLimitGlobalImageSlots(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	started := make(chan string, 2)
 	release := make(chan struct{})
@@ -288,70 +291,231 @@ func TestImageTaskServiceLimitsConcurrentImageSlots(t *testing.T) {
 		<-release
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 }, func() int { return 2 })
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
-	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "first", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "first", "gpt-image-2", "1024x1024", "high", "https://base.test", 4, nil); err != nil {
 		t.Fatalf("SubmitGeneration(first) error = %v", err)
 	}
 	if got := waitForStartedTask(t, started); got != "first" {
 		t.Fatalf("started task = %q, want first", got)
 	}
-	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-2", "second", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-2", "second", "gpt-image-2", "1024x1024", "high", "https://base.test", 4, nil); err != nil {
 		t.Fatalf("SubmitGeneration(second) error = %v", err)
 	}
-
-	time.Sleep(350 * time.Millisecond)
-	if got := svc.ListTasks(identity, []string{"task-2"}); got["items"].([]map[string]any)[0]["status"] != TaskStatusQueued {
-		t.Fatalf("second task should stay queued while first holds image slots: %#v", got)
-	}
-	select {
-	case prompt := <-started:
-		t.Fatalf("second task started before slots were released: %s", prompt)
-	default:
-	}
-
-	close(release)
 	if got := waitForStartedTask(t, started); got != "second" {
-		t.Fatalf("started task after release = %q, want second", got)
+		t.Fatalf("second task should not wait for global image slots, started = %q", got)
 	}
+	close(release)
 	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
 	waitForTaskStatus(t, svc, identity, "task-2", TaskStatusSuccess)
 }
 
-func TestImageTaskServiceLimitsUserDefaultConcurrentImages(t *testing.T) {
+func TestImageTaskServicePublishesPartialImageDataWhileRunning(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
-	started := make(chan string, 2)
+	partialPublished := make(chan struct{})
 	release := make(chan struct{})
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
-		started <- payload["prompt"].(string)
-		<-release
-		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
-	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 }, func() int { return 8 }, func() int { return 2 }, nil)
-	alice := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
-	bob := Identity{ID: "bob", Name: "Bob", Role: AuthRoleUser}
-
-	if _, err := svc.SubmitGeneration(context.Background(), alice, "task-1", "first", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
-		t.Fatalf("SubmitGeneration(first) error = %v", err)
-	}
-	if got := waitForStartedTask(t, started); got != "first" {
-		t.Fatalf("started task = %q, want first", got)
-	}
-	if _, err := svc.SubmitGeneration(context.Background(), alice, "task-2", "second", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err == nil {
-		t.Fatal("SubmitGeneration(second) error = nil, want user limit")
-	} else {
-		var limitErr ImageTaskLimitError
-		if !errors.As(err, &limitErr) {
-			t.Fatalf("SubmitGeneration(second) error = %T %v, want ImageTaskLimitError", err, err)
+		callback, ok := payload[imageOutputCallbackPayloadKey].(func([]map[string]any))
+		if !ok {
+			return nil, errors.New("image output callback missing")
 		}
+		callback([]map[string]any{
+			{},
+			{"url": "https://example.test/second.png"},
+		})
+		close(partialPublished)
+		<-release
+		return map[string]any{"data": []map[string]any{
+			{"url": "https://example.test/first.png"},
+			{"url": "https://example.test/second.png"},
+		}}, nil
 	}
-	if _, err := svc.SubmitGeneration(context.Background(), bob, "task-1", "bob", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
-		t.Fatalf("SubmitGeneration(bob) should use an independent limit: %v", err)
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
 	}
+	select {
+	case <-partialPublished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for partial task data")
+	}
+	waitForTaskData(t, svc, identity, "task-1", func(data []map[string]any) bool {
+		return len(data) == 2 && len(data[0]) == 0 && data[1]["url"] == "https://example.test/second.png"
+	})
 	close(release)
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
+}
+
+func TestImageTaskServiceLimitsUserDefaultConcurrentCreationUnits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	startedImages := make(chan int, 3)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	activeImages := 0
+	maxActiveImages := 0
+	imageHandler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		acquire, ok := payload["image_output_slot_acquirer"].(func(context.Context, int) (func(), error))
+		if !ok {
+			return nil, errors.New("image output slot acquirer missing")
+		}
+		count := imageTaskCount(payload)
+		errCh := make(chan error, count)
+		var wg sync.WaitGroup
+		for index := 1; index <= count; index++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				releaseSlot, err := acquire(ctx, index)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				defer releaseSlot()
+				mu.Lock()
+				activeImages++
+				if activeImages > maxActiveImages {
+					maxActiveImages = activeImages
+				}
+				mu.Unlock()
+				startedImages <- index
+				select {
+				case <-release:
+				case <-ctx.Done():
+					errCh <- ctx.Err()
+				}
+				mu.Lock()
+				activeImages--
+				mu.Unlock()
+			}(index)
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			if err != nil {
+				return nil, err
+			}
+		}
+		data := make([]map[string]any, 0, count)
+		for index := 1; index <= count; index++ {
+			data = append(data, map[string]any{"url": "https://example.test/image.png"})
+		}
+		return map[string]any{"data": data}, nil
+	}
+	chatHandler := func(context.Context, Identity, map[string]any) (map[string]any, error) {
+		return map[string]any{"output_type": "text", "data": []map[string]any{{"text_response": "chat response"}}}, nil
+	}
+	svc := NewImageTaskService(path, imageHandler, imageHandler, chatHandler, func() int { return 30 }, func() int { return 2 })
+	alice := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+
+	if _, err := svc.SubmitGeneration(context.Background(), alice, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 3, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	seen := map[int]bool{}
+	seen[waitForStartedImageIndex(t, startedImages)] = true
+	seen[waitForStartedImageIndex(t, startedImages)] = true
+	if len(seen) != 2 {
+		t.Fatalf("started image indexes = %#v, want two distinct images", seen)
+	}
+	select {
+	case index := <-startedImages:
+		t.Fatalf("third image output started before a user slot was released: %d", index)
+	case <-time.After(120 * time.Millisecond):
+	}
+	mu.Lock()
+	gotMaxActive := maxActiveImages
+	mu.Unlock()
+	if gotMaxActive != 2 {
+		t.Fatalf("max active image outputs = %d, want 2", gotMaxActive)
+	}
+	waitForTaskStatus(t, svc, alice, "task-1", TaskStatusRunning)
+	waitForTaskOutputStatusCounts(t, svc, alice, "task-1", map[string]int{"running": 2, "queued": 1})
+	close(release)
+	seen[waitForStartedImageIndex(t, startedImages)] = true
 	waitForTaskStatus(t, svc, alice, "task-1", TaskStatusSuccess)
-	waitForTaskStatus(t, svc, bob, "task-1", TaskStatusSuccess)
+	if len(seen) != 3 {
+		t.Fatalf("started image indexes after release = %#v, want three images", seen)
+	}
+
+	path = filepath.Join(t.TempDir(), "image_tasks.json")
+	started := make(chan string, 3)
+	releaseImage := make(chan struct{})
+	releaseChat := make(chan struct{})
+	imageHandler = func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		acquire, ok := payload["image_output_slot_acquirer"].(func(context.Context, int) (func(), error))
+		if !ok {
+			return nil, errors.New("image output slot acquirer missing")
+		}
+		count := imageTaskCount(payload)
+		errCh := make(chan error, count)
+		var wg sync.WaitGroup
+		for index := 1; index <= count; index++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				releaseSlot, err := acquire(ctx, index)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				defer releaseSlot()
+				started <- "image"
+				select {
+				case <-releaseImage:
+				case <-ctx.Done():
+					errCh <- ctx.Err()
+				}
+			}(index)
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			if err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/first.png"}, {"url": "https://example.test/second.png"}}}, nil
+	}
+	chatHandler = func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		started <- "chat"
+		select {
+		case <-releaseChat:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return map[string]any{"output_type": "text", "data": []map[string]any{{"text_response": "chat response"}}}, nil
+	}
+	svc = NewImageTaskService(path, imageHandler, imageHandler, chatHandler, func() int { return 30 }, func() int { return 2 })
+	messages := []map[string]any{{"role": "user", "content": "hello"}}
+
+	if _, err := svc.SubmitEdit(context.Background(), alice, "edit-1", "edit", "gpt-image-2", "1024x1024", "high", "https://base.test", []any{"image"}, 2, nil); err != nil {
+		t.Fatalf("SubmitEdit(edit-1) error = %v", err)
+	}
+	if got := waitForStartedTask(t, started); got != "image" {
+		t.Fatalf("started task = %q, want image", got)
+	}
+	if got := waitForStartedTask(t, started); got != "image" {
+		t.Fatalf("started task = %q, want image", got)
+	}
+	if _, err := svc.SubmitChat(context.Background(), alice, "chat-1", "hello", "auto", messages); err != nil {
+		t.Fatalf("SubmitChat(chat-1) error = %v", err)
+	}
+	waitForTaskStatus(t, svc, alice, "chat-1", TaskStatusQueued)
+	select {
+	case item := <-started:
+		t.Fatalf("chat task started before an image slot was released: %s", item)
+	case <-time.After(120 * time.Millisecond):
+	}
+	close(releaseImage)
+	if got := waitForStartedTask(t, started); got != "chat" {
+		t.Fatalf("started task = %q, want chat", got)
+	}
+	waitForTaskStatus(t, svc, alice, "chat-1", TaskStatusRunning)
+	close(releaseChat)
+	waitForTaskStatus(t, svc, alice, "edit-1", TaskStatusSuccess)
+	waitForTaskStatus(t, svc, alice, "chat-1", TaskStatusSuccess)
 }
 
 func TestImageTaskServiceLimitsUserDefaultRPM(t *testing.T) {
@@ -359,7 +523,7 @@ func TestImageTaskServiceLimitsUserDefaultRPM(t *testing.T) {
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 }, func() int { return 8 }, nil, func() int { return 1 })
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 }, nil, func() int { return 1 })
 	user := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
 	admin := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
 
@@ -383,45 +547,6 @@ func TestImageTaskServiceLimitsUserDefaultRPM(t *testing.T) {
 	}
 	waitForTaskStatus(t, svc, admin, "task-1", TaskStatusSuccess)
 	waitForTaskStatus(t, svc, admin, "task-2", TaskStatusSuccess)
-}
-
-func TestImageTaskServiceCancelsQueuedTask(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
-	started := make(chan string, 2)
-	release := make(chan struct{})
-	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
-		started <- payload["prompt"].(string)
-		<-release
-		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
-	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 }, func() int { return 1 })
-	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
-
-	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "first", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
-		t.Fatalf("SubmitGeneration(first) error = %v", err)
-	}
-	if got := waitForStartedTask(t, started); got != "first" {
-		t.Fatalf("started task = %q, want first", got)
-	}
-	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-2", "second", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
-		t.Fatalf("SubmitGeneration(second) error = %v", err)
-	}
-
-	cancelled, err := svc.CancelTask(identity, "task-2")
-	if err != nil {
-		t.Fatalf("CancelTask() error = %v", err)
-	}
-	if cancelled["status"] != TaskStatusCancelled {
-		t.Fatalf("cancelled task status = %#v", cancelled)
-	}
-	close(release)
-	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
-	waitForTaskStatus(t, svc, identity, "task-2", TaskStatusCancelled)
-	select {
-	case prompt := <-started:
-		t.Fatalf("cancelled queued task still started: %s", prompt)
-	default:
-	}
 }
 
 func TestImageTaskServiceCancelsRunningTask(t *testing.T) {
@@ -572,6 +697,17 @@ func waitForStartedTask(t *testing.T, started <-chan string) string {
 	return ""
 }
 
+func waitForStartedImageIndex(t *testing.T, started <-chan int) int {
+	t.Helper()
+	select {
+	case index := <-started:
+		return index
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for image output to start")
+	}
+	return 0
+}
+
 func failingImageTaskHandler(context.Context, Identity, map[string]any) (map[string]any, error) {
 	return nil, errors.New("unexpected handler call")
 }
@@ -588,4 +724,47 @@ func waitForTaskStatus(t *testing.T, svc *ImageTaskService, identity Identity, t
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("task %s did not reach status %s", taskID, want)
+}
+
+func waitForTaskData(t *testing.T, svc *ImageTaskService, identity Identity, taskID string, ok func([]map[string]any) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got := svc.ListTasks(identity, []string{taskID})
+		items := got["items"].([]map[string]any)
+		if len(items) == 1 {
+			if data, _ := items[0]["data"].([]map[string]any); ok(data) {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not publish expected data", taskID)
+}
+
+func waitForTaskOutputStatusCounts(t *testing.T, svc *ImageTaskService, identity Identity, taskID string, want map[string]int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got := svc.ListTasks(identity, []string{taskID})
+		items := got["items"].([]map[string]any)
+		if len(items) == 1 {
+			counts := map[string]int{}
+			for _, status := range util.AsStringSlice(items[0]["output_statuses"]) {
+				counts[status]++
+			}
+			matches := true
+			for status, count := range want {
+				if counts[status] != count {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("task %s output status counts did not reach %#v", taskID, want)
 }

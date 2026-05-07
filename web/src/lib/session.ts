@@ -22,6 +22,7 @@ export function authSessionFromLoginResponse(data: LoginResponse, key: string): 
     subjectId: data.subject_id,
     name: data.name,
     provider: data.provider,
+    creationConcurrentLimit: data.creation_concurrent_limit,
     menuPaths: data.menu_paths || [],
     apiPermissions: data.api_permissions || [],
     menus: data.menus || [],

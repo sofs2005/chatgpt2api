@@ -144,9 +144,6 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore(
     (state) => state.setRefreshAccountIntervalMinute,
   );
-  const setImageConcurrentLimit = useSettingsStore(
-    (state) => state.setImageConcurrentLimit,
-  );
   const setImageTaskTimeoutSeconds = useSettingsStore(
     (state) => state.setImageTaskTimeoutSeconds,
   );
@@ -235,7 +232,7 @@ export function ConfigCard() {
         <section className={configSectionClassName}>
           <SectionHeading
             title="基础参数"
-            tip="账号刷新间隔单位分钟；图片访问地址是图片结果访问前缀；并发生成张数控制后台生成槽位；任务超时时间单位秒；图片自动清理会删除指定天数前的本地图片。"
+            tip="账号刷新间隔单位分钟；图片访问地址是图片结果访问前缀；任务超时时间单位秒；图片自动清理会删除指定天数前的本地图片。"
           />
           <div className="grid gap-3 sm:grid-cols-2">
             <Field className={configFieldClassName}>
@@ -261,19 +258,6 @@ export function ConfigCard() {
                 onChange={(event) => setBaseUrl(event.target.value)}
                 placeholder="https://example.com"
                 className={settingsInputClassName}
-              />
-            </Field>
-            <Field className={configFieldClassName}>
-              <ConfigFieldLabel htmlFor="settings-image-concurrent-limit">
-                并发生成张数
-              </ConfigFieldLabel>
-              <NumberInputWithUnit
-                id="settings-image-concurrent-limit"
-                min={1}
-                value={config?.image_concurrent_limit || ""}
-                onChange={setImageConcurrentLimit}
-                placeholder="4"
-                unit="张"
               />
             </Field>
             <Field className={configFieldClassName}>
@@ -309,12 +293,12 @@ export function ConfigCard() {
         <section className={configSectionClassName}>
           <SectionHeading
             title="用户默认限制"
-            tip="限制普通用户创建图片任务的默认并发和速率，管理员不受影响；0 表示不限制。"
+            tip="限制普通用户创作并发额度和速率；图片生成/编辑按请求张数计入，聊天任务按 1 个计入；管理员不受影响；0 表示不限制。"
           />
           <div className="grid gap-3 sm:grid-cols-2">
             <Field className={configFieldClassName}>
               <ConfigFieldLabel htmlFor="settings-user-default-concurrent-limit">
-                用户默认并发
+                创作并发额度
               </ConfigFieldLabel>
               <NumberInputWithUnit
                 id="settings-user-default-concurrent-limit"

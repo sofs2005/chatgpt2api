@@ -13,7 +13,6 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 	unsetEnv(t, "CHATGPT2API_BASE_URL")
 	unsetEnv(t, "CHATGPT2API_PROXY")
 	unsetEnv(t, "CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE")
-	unsetEnv(t, "CHATGPT2API_IMAGE_CONCURRENT_LIMIT")
 	unsetEnv(t, "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS")
 	unsetEnv(t, "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT")
 	unsetEnv(t, "CHATGPT2API_USER_DEFAULT_RPM_LIMIT")
@@ -50,6 +49,9 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 		t.Fatalf("BaseURL() = %q", store.BaseURL())
 	}
 	assertConfigValue(t, got, "registration_enabled", true)
+	if _, ok := got["image_concurrent_limit"]; ok {
+		t.Fatalf("removed image_concurrent_limit leaked in config response: %#v", got)
+	}
 
 	envData, err := os.ReadFile(filepath.Join(root, ".env"))
 	if err != nil {
@@ -60,7 +62,6 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_BASE_URL=https://example.test/root/",
 		"CHATGPT2API_PROXY=http://127.0.0.1:8080",
 		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE=7",
-		"CHATGPT2API_IMAGE_CONCURRENT_LIMIT=3",
 		"CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS=420",
 		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT=2",
 		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT=30",
@@ -72,6 +73,9 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 		if !strings.Contains(envText, want) {
 			t.Fatalf(".env missing %q in:\n%s", want, envText)
 		}
+	}
+	if strings.Contains(envText, "CHATGPT2API_IMAGE_CONCURRENT_LIMIT") {
+		t.Fatalf(".env persisted removed image concurrent limit:\n%s", envText)
 	}
 }
 
@@ -239,7 +243,6 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_BASE_URL=https://old.example/root",
 		"CHATGPT2API_PROXY=http://127.0.0.1:8080",
 		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE=5",
-		"CHATGPT2API_IMAGE_CONCURRENT_LIMIT=4",
 		"CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS=300",
 		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT=2",
 		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT=30",
@@ -257,7 +260,6 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	t.Setenv("CHATGPT2API_BASE_URL", "https://old.example/root")
 	t.Setenv("CHATGPT2API_PROXY", "http://127.0.0.1:8080")
 	t.Setenv("CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE", "5")
-	t.Setenv("CHATGPT2API_IMAGE_CONCURRENT_LIMIT", "4")
 	t.Setenv("CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS", "300")
 	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
 	t.Setenv("CHATGPT2API_USER_DEFAULT_RPM_LIMIT", "30")
@@ -275,7 +277,6 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"base_url":                          "https://new.example/root/",
 		"proxy":                             "http://127.0.0.1:9090",
 		"refresh_account_interval_minute":   9,
-		"image_concurrent_limit":            6,
 		"image_task_timeout_seconds":        480,
 		"user_default_concurrent_limit":     3,
 		"user_default_rpm_limit":            45,
@@ -292,7 +293,6 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	assertConfigValue(t, got, "base_url", "https://new.example/root")
 	assertConfigValue(t, got, "proxy", "http://127.0.0.1:9090")
 	assertConfigValue(t, got, "refresh_account_interval_minute", 9)
-	assertConfigValue(t, got, "image_concurrent_limit", 6)
 	assertConfigValue(t, got, "image_task_timeout_seconds", 480)
 	assertConfigValue(t, got, "user_default_concurrent_limit", 3)
 	assertConfigValue(t, got, "user_default_rpm_limit", 45)
@@ -308,7 +308,6 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_BASE_URL":                          "https://new.example/root/",
 		"CHATGPT2API_PROXY":                             "http://127.0.0.1:9090",
 		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE":   "9",
-		"CHATGPT2API_IMAGE_CONCURRENT_LIMIT":            "6",
 		"CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS":        "480",
 		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT":     "3",
 		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT":            "45",

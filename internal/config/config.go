@@ -22,7 +22,6 @@ var settingEnvKeys = map[string]string{
 	"base_url":                          "CHATGPT2API_BASE_URL",
 	"proxy":                             "CHATGPT2API_PROXY",
 	"refresh_account_interval_minute":   "CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE",
-	"image_concurrent_limit":            "CHATGPT2API_IMAGE_CONCURRENT_LIMIT",
 	"image_task_timeout_seconds":        "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS",
 	"user_default_concurrent_limit":     "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT",
 	"user_default_rpm_limit":            "CHATGPT2API_USER_DEFAULT_RPM_LIMIT",
@@ -203,14 +202,6 @@ func (s *Store) LogRetentionDays() int {
 	return value
 }
 
-func (s *Store) ImageConcurrentLimit() int {
-	value := intSetting(s.settingValue("image_concurrent_limit", 4), 4)
-	if value < 1 {
-		return 1
-	}
-	return value
-}
-
 func (s *Store) ImageTaskTimeoutSeconds() int {
 	return normalizeImageTaskTimeoutSeconds(s.settingValue("image_task_timeout_seconds", defaultImageTaskTimeoutSeconds))
 }
@@ -382,8 +373,8 @@ func (s *Store) Get() map[string]any {
 	s.mu.RLock()
 	data := util.CopyMap(s.data)
 	s.mu.RUnlock()
+	delete(data, "image_concurrent_limit")
 	data["refresh_account_interval_minute"] = s.RefreshAccountIntervalMinute()
-	data["image_concurrent_limit"] = s.ImageConcurrentLimit()
 	data["image_task_timeout_seconds"] = s.ImageTaskTimeoutSeconds()
 	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
 	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
@@ -431,6 +422,7 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 		}
 		next[key] = value
 	}
+	delete(next, "image_concurrent_limit")
 	if value, ok := next["login_page_image_mode"]; ok {
 		next["login_page_image_mode"] = normalizeLoginPageImageMode(value)
 	}

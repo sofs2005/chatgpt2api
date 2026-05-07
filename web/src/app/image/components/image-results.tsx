@@ -12,7 +12,15 @@ import type { ImageVisibility } from "@/lib/api";
 import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
 import { formatBase64ImageFileSize, formatImageFileSize } from "@/lib/image-size";
 import { cn } from "@/lib/utils";
-import type { ImageConversation, ImageTurn, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
+import {
+  getImageTurnLoadingPhase,
+  getStoredImageLoadingPhase,
+  type ImageConversation,
+  type ImageTurn,
+  type ImageTurnStatus,
+  type StoredImage,
+  type StoredReferenceImage,
+} from "@/store/image-conversations";
 import { imageTurnStartedAtTimestamp, type ImageTurnProgress } from "@/store/image-turn-progress";
 
 export type ImageLightboxItem = {
@@ -428,14 +436,23 @@ export function ImageResults({
         const outcomeLabel = getTurnOutcomeLabel(successCount, failedCount, cancelledCount);
         const showResultSummary = turn.mode !== "chat" && (visualImages.length > 0 || turnBusy);
         const resultSizeLabel = getTurnResultSizeLabel(turn, imageDimensions);
-        const progressStartedAt =
-          progress && Number.isFinite(progress.startedAt)
-            ? progress.startedAt
-            : imageTurnStartedAtTimestamp(turn.processingStartedAt, turn.createdAt);
-        const elapsedSeconds = Math.max(0, Math.floor((progressNow - progressStartedAt) / 1000));
-        const elapsedClock = turnBusy ? formatElapsedClock(elapsedSeconds) : "";
+        const loadingPhase = getImageTurnLoadingPhase(turn);
+        const isWaitingForQuota = loadingPhase === "queued";
+        const isRunning = loadingPhase === "running";
+        const elapsedSeconds = isRunning
+          ? Math.max(
+              0,
+              Math.floor((progressNow - imageTurnStartedAtTimestamp(turn.processingStartedAt, turn.createdAt)) / 1000),
+            )
+          : 0;
+        const elapsedClock = isRunning ? formatElapsedClock(elapsedSeconds) : "";
         const progressMessage =
-          progress?.message || (turn.status === "queued" ? "等待前序任务" : turnBusy ? "正在处理图片" : "");
+          progress?.message ||
+          (isWaitingForQuota
+            ? "等待创作并发额度"
+            : turnBusy
+              ? "正在处理图片"
+              : "");
         const requestedSizeLabel = getRequestedSizeLabel(turn);
         const routeDetail = IMAGE_MODEL_ROUTE_DETAILS[turn.model];
         const longTaskHint = getLongTaskHint(turn, elapsedSeconds);
@@ -840,6 +857,13 @@ export function ImageResults({
                       );
                     }
 
+                    const imageLoadingPhase = getStoredImageLoadingPhase(image);
+                    const imageBusyLabel = imageLoadingPhase === "queued"
+                      ? "等待创作并发额度..."
+                      : imageLoadingPhase === "running"
+                        ? "正在处理图片..."
+                        : "";
+
                     return (
                       <div
                         key={image.id}
@@ -847,7 +871,7 @@ export function ImageResults({
                       >
                         <div className="flex h-full flex-col items-center justify-center gap-2 px-5 py-5 text-center text-stone-500">
                           <div className="rounded-full bg-white p-3 shadow-sm">
-                            {turn.status === "queued" ? (
+                            {imageLoadingPhase === "queued" ? (
                               <Clock3 className="size-5" />
                             ) : (
                               <LoaderCircle className="size-5 animate-spin" />
@@ -855,16 +879,14 @@ export function ImageResults({
                           </div>
                           <p className="text-sm">
                             {turn.mode === "chat"
-                              ? turn.status === "queued"
-                                ? "已加入当前对话队列..."
+                              ? imageLoadingPhase === "queued"
+                                ? "等待创作并发额度..."
                                 : "正在等待回复..."
-                              : turn.status === "queued"
-                                ? "已加入当前对话队列..."
-                                : "正在处理图片..."}
+                              : imageBusyLabel}
                           </p>
-                          {elapsedClock ? (
+                          {imageLoadingPhase === "running" ? (
                             <p className="min-w-[7.5rem] rounded-full bg-white/70 px-2.5 py-1 font-mono text-xs tabular-nums text-stone-400">
-                              已等待 {elapsedClock}
+                              已运行 {elapsedClock}
                             </p>
                           ) : null}
                         </div>

@@ -419,6 +419,75 @@ func TestStreamImageOutputsWithPoolRunsRequestedImagesConcurrently(t *testing.T)
 	}
 }
 
+func TestStreamImageOutputsWithPoolHonorsImageOutputSlotAcquirer(t *testing.T) {
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	release := make(chan struct{})
+	slots := make(chan struct{}, 2)
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput)
+		errCh := make(chan error, 1)
+		go func() {
+			defer close(out)
+			defer close(errCh)
+			mu.Lock()
+			active++
+			if active > maxActive {
+				maxActive = active
+			}
+			mu.Unlock()
+			<-release
+			out <- ImageOutput{
+				Kind:    "result",
+				Model:   request.Model,
+				Index:   index,
+				Total:   total,
+				Created: int64(index),
+				Data:    []map[string]any{{"url": imageURLForIndex(index)}},
+			}
+			mu.Lock()
+			active--
+			mu.Unlock()
+			errCh <- nil
+		}()
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{
+		Model: "gpt-image-2",
+		N:     3,
+		AcquireImageOutputSlot: func(ctx context.Context, index int) (func(), error) {
+			select {
+			case slots <- struct{}{}:
+				return func() { <-slots }, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	})
+
+	time.Sleep(120 * time.Millisecond)
+	mu.Lock()
+	gotActive := maxActive
+	mu.Unlock()
+	if gotActive != 2 {
+		t.Fatalf("max concurrent image workers = %d, want 2", gotActive)
+	}
+
+	close(release)
+	for range outputs {
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamImageOutputsWithPool() err = %v", err)
+	}
+}
+
 func TestStreamImageOutputsWithPoolDoesNotRotateOnGenericUnauthorized(t *testing.T) {
 	usedTokens := []string(nil)
 	engine := &Engine{

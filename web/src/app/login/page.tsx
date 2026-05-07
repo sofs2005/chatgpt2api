@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import { fetchAuthProviders, login, registerAccount } from "@/lib/api";
-import { setVerifiedAuthSession } from "@/lib/session";
+import { authSessionFromLoginResponse, setVerifiedAuthSession } from "@/lib/session";
 import {
   applyColorTheme,
   getPreferredColorTheme,
@@ -96,21 +96,8 @@ export default function LoginPage() {
       if (!token) {
         throw new Error("登录会话签发失败");
       }
-      const session = {
-        key: token,
-        role: data.role,
-        roleId: data.role_id,
-        roleName: data.role_name,
-        subjectId: data.subject_id,
-        name: data.name,
-        provider: data.provider,
-        menuPaths: data.menu_paths || [],
-        apiPermissions: data.api_permissions || [],
-        menus: data.menus || [],
-      };
-      await setVerifiedAuthSession({
-        ...session,
-      });
+      const session = authSessionFromLoginResponse(data, token);
+      await setVerifiedAuthSession(session);
       toast.success(isRegisterMode ? "注册成功" : "登录成功");
       navigate(getDefaultRouteForSession(session), { replace: true });
     } catch (error) {

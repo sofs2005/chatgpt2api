@@ -110,7 +110,6 @@ func NewApp() (*App, error) {
 			return app.runLoggedChatTask(ctx, identity, payload)
 		},
 		cfg.ImageRetentionDays,
-		cfg.ImageConcurrentLimit,
 		cfg.UserDefaultConcurrentLimit,
 		cfg.UserDefaultRPMLimit,
 	)
@@ -167,6 +166,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
+	a.attachCreationTaskLimiter(body, identity)
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
@@ -198,6 +198,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
+	a.attachCreationTaskLimiter(body, identity)
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
@@ -220,6 +221,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
+	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate)
@@ -237,6 +239,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
+	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleResponsesScoped(r.Context(), body, identityScope(identity))
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate)
@@ -415,25 +418,33 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (a *App) writeLoginResponse(w http.ResponseWriter, identity service.Identity, token string) {
 	permissions := a.identityPermissions(identity)
 	payload := map[string]any{
-		"ok":              true,
-		"version":         version.Get(),
-		"token":           token,
-		"role":            identity.Role,
-		"role_id":         identity.RoleID,
-		"role_name":       identity.RoleName,
-		"subject_id":      identity.ID,
-		"name":            identity.Name,
-		"provider":        identity.Provider,
-		"credential_id":   identity.CredentialID,
-		"credential_name": identity.CredentialName,
-		"menu_paths":      permissions.MenuPaths,
-		"api_permissions": permissions.APIPermissions,
-		"menus":           service.FilterMenuPermissions(permissions.MenuPaths),
+		"ok":                        true,
+		"version":                   version.Get(),
+		"token":                     token,
+		"role":                      identity.Role,
+		"role_id":                   identity.RoleID,
+		"role_name":                 identity.RoleName,
+		"subject_id":                identity.ID,
+		"name":                      identity.Name,
+		"provider":                  identity.Provider,
+		"credential_id":             identity.CredentialID,
+		"credential_name":           identity.CredentialName,
+		"creation_concurrent_limit": a.identityCreationConcurrentLimit(identity),
+		"menu_paths":                permissions.MenuPaths,
+		"api_permissions":           permissions.APIPermissions,
+		"menus":                     service.FilterMenuPermissions(permissions.MenuPaths),
 	}
 	if token == "" {
 		delete(payload, "token")
 	}
 	util.WriteJSON(w, http.StatusOK, payload)
+}
+
+func (a *App) identityCreationConcurrentLimit(identity service.Identity) int {
+	if identity.Role != service.AuthRoleUser {
+		return 0
+	}
+	return a.config.UserDefaultConcurrentLimit()
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -1329,6 +1340,15 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	}
 	a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "success", http.StatusOK, "", urls)
 	return result, nil
+}
+
+func (a *App) attachCreationTaskLimiter(body map[string]any, identity service.Identity) {
+	if a == nil || a.tasks == nil || body == nil {
+		return
+	}
+	body[protocol.ImageOutputSlotAcquirerPayloadKey] = func(ctx context.Context, index int) (func(), error) {
+		return a.tasks.AcquireCreationUnit(ctx, identity)
+	}
 }
 
 func (a *App) runLoggedChatTask(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {

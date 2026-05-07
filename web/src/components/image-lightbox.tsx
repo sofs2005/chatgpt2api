@@ -11,6 +11,8 @@ import { cn } from "@/lib/utils";
 type LightboxImage = {
   id: string;
   src: string;
+  fileName?: string;
+  outputFormat?: string;
   sizeLabel?: string;
   dimensions?: string;
 };
@@ -26,6 +28,38 @@ type ImageLightboxProps = {
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.25;
+
+function normalizeImageExtension(value?: string) {
+  const extension = String(value || "").toLowerCase().trim().replace(/^image\//, "").replace(/^\./, "");
+  if (extension === "jpg" || extension === "jpeg") {
+    return "jpg";
+  }
+  if (extension === "png" || extension === "webp") {
+    return extension;
+  }
+  return "";
+}
+
+function imageExtensionFromSrc(src: string) {
+  const dataUrlFormat = src.match(/^data:image\/([^;,]+)/i)?.[1];
+  if (dataUrlFormat) {
+    return normalizeImageExtension(dataUrlFormat);
+  }
+  const urlExtension = src.split(/[?#]/, 1)[0]?.match(/\.([a-z0-9]+)$/i)?.[1];
+  return normalizeImageExtension(urlExtension);
+}
+
+function imageDownloadName(image: LightboxImage, blobType?: string) {
+  if (image.fileName) {
+    return image.fileName;
+  }
+  const extension =
+    normalizeImageExtension(image.outputFormat) ||
+    normalizeImageExtension(blobType) ||
+    imageExtensionFromSrc(image.src) ||
+    "png";
+  return `image-${image.id}.${extension}`;
+}
 
 export function ImageLightbox({
   images,
@@ -106,10 +140,12 @@ export function ImageLightbox({
     const download = async () => {
       let href = current.src;
       let objectURL = "";
+      let blobType = "";
 
       if (shouldUseAuthenticatedImageFallback(current.src)) {
         try {
           const blob = await fetchAuthenticatedImageBlob(current.src);
+          blobType = blob.type;
           objectURL = URL.createObjectURL(blob);
           href = objectURL;
         } catch {
@@ -119,7 +155,7 @@ export function ImageLightbox({
 
       const link = document.createElement("a");
       link.href = href;
-      link.download = `image-${current.id}.png`;
+      link.download = imageDownloadName(current, blobType);
       link.click();
 
       if (objectURL) {

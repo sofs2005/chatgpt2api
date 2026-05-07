@@ -233,6 +233,36 @@ func TestRefreshAccountStateMarksUnauthorizedInitAsInvalid(t *testing.T) {
 	}
 }
 
+func TestApplyAccountErrorMessageDoesNotMarkGenericUnauthorizedAsInvalid(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	message, handled := accounts.ApplyAccountErrorMessage("token-1", "image_stream", "auth_chat_requirements failed: status=401, body={\"detail\":\"challenge_required\"}")
+	if handled {
+		t.Fatalf("handled = true message = %q, want generic unauthorized ignored", message)
+	}
+	account := accounts.GetAccount("token-1")
+	if account["status"] != "正常" || account["quota"] != 5 {
+		t.Fatalf("account = %#v, want unchanged normal account", account)
+	}
+}
+
+func TestApplyAccountErrorMessageDoesNotMarkGenericTooManyRequestsAsLimited(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5, "image_quota_unknown": true})
+
+	message, handled := accounts.ApplyAccountErrorMessage("token-1", "image_stream", "auth_chat_requirements failed: status=429, body={\"detail\":\"too many requests\"}")
+	if handled {
+		t.Fatalf("handled = true message = %q, want generic upstream 429 ignored", message)
+	}
+	account := accounts.GetAccount("token-1")
+	if account["status"] != "正常" || account["quota"] != 5 || account["image_quota_unknown"] != true {
+		t.Fatalf("account = %#v, want unchanged normal account", account)
+	}
+}
+
 func TestRefreshAccountsMarksRateLimitedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

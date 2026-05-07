@@ -4,7 +4,6 @@ import {
   Bot,
   Check,
   ChevronDown,
-  CircleHelp,
   Image as ImageIcon,
   ImagePlus,
   MessageCircle,
@@ -49,9 +48,13 @@ import {
 import {
   IMAGE_MODEL_ROUTE_DETAILS,
   IMAGE_OUTPUT_FORMAT_OPTIONS,
+  supportsImageOutputControls,
+  supportsImageOutputCompression,
+  supportsStructuredImageParameters,
+  usesCodexImageRoute,
+  usesOfficialImageRoute,
   type ImageModel,
   type ImageOutputFormat,
-  type ImageQuality,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -67,11 +70,8 @@ type ImageComposerProps = {
   imageCustomRatio: string;
   imageCustomWidth: string;
   imageCustomHeight: string;
-  imageQuality: ImageQuality;
-  imageQualityOptions: ReadonlyArray<{ value: ImageQuality; label: string; description: string }>;
   imageOutputFormat: ImageOutputFormat;
   imageOutputCompression: string;
-  imageOutputHint: ReactNode;
   highResolutionHint?: ReactNode;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
@@ -86,7 +86,6 @@ type ImageComposerProps = {
   onImageCustomRatioChange: (value: string) => void;
   onImageCustomWidthChange: (value: string) => void;
   onImageCustomHeightChange: (value: string) => void;
-  onImageQualityChange: (value: ImageQuality) => void;
   onImageOutputFormatChange: (value: ImageOutputFormat) => void;
   onImageOutputCompressionChange: (value: string) => void;
   onSubmit: () => void | Promise<void>;
@@ -241,16 +240,18 @@ function ImageSizePreviewPanel({
   label,
   detail,
   highResolution,
+  officialRoute,
 }: {
   label: string;
   detail: string;
   highResolution: boolean;
+  officialRoute: boolean;
 }) {
   return (
     <div className="col-span-2 rounded-xl border border-[#e5e7eb] bg-[#f8fafc] px-3 py-1 dark:border-border dark:bg-background/50 sm:col-span-3">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <span className="shrink-0 text-[11px] font-medium text-[#45515e] dark:text-muted-foreground">
-          计算后分辨率
+          {officialRoute ? "构图偏好" : "计算后分辨率"}
         </span>
         <span
           className={cn(
@@ -285,11 +286,8 @@ export function ImageComposer({
   imageCustomRatio,
   imageCustomWidth,
   imageCustomHeight,
-  imageQuality,
-  imageQualityOptions,
   imageOutputFormat,
   imageOutputCompression,
-  imageOutputHint,
   highResolutionHint,
   referenceImages,
   textareaRef,
@@ -304,7 +302,6 @@ export function ImageComposer({
   onImageCustomRatioChange,
   onImageCustomWidthChange,
   onImageCustomHeightChange,
-  onImageQualityChange,
   onImageOutputFormatChange,
   onImageOutputCompressionChange,
   onSubmit,
@@ -317,8 +314,6 @@ export function ImageComposer({
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [isAspectRatioMenuOpen, setIsAspectRatioMenuOpen] = useState(false);
   const [isResolutionMenuOpen, setIsResolutionMenuOpen] = useState(false);
-  const [isQualityMenuOpen, setIsQualityMenuOpen] = useState(false);
-  const [isOutputHintOpen, setIsOutputHintOpen] = useState(false);
   const [isImageSettingsOpen, setIsImageSettingsOpen] = useState(false);
   const [promptAreaHeight, setPromptAreaHeight] = useState(PROMPT_AREA_DEFAULT_HEIGHT);
   const [isPromptAreaResizing, setIsPromptAreaResizing] = useState(false);
@@ -340,69 +335,76 @@ export function ImageComposer({
       : IMAGE_ASPECT_RATIO_OPTIONS.find((option) => option.value === imageAspectRatio)?.label || "Auto";
   const imageResolutionLabel =
     IMAGE_RESOLUTION_OPTIONS.find((option) => option.value === imageResolution)?.label || "Auto";
-  const imageQualityLabel =
-    imageQualityOptions.find((option) => option.value === imageQuality)?.label || imageQuality;
-  const compressionDisabled = imageOutputFormat === "png";
-  const supportsQuality = imageQualityOptions.length > 0;
+  const compressionSupported = supportsImageOutputCompression(imageOutputFormat);
+  const compressionDisabled = !compressionSupported;
+  const officialImageRoute = usesOfficialImageRoute(imageModel);
+  const structuredImageParameters = supportsStructuredImageParameters(imageModel);
+  const outputControlsSupported = supportsImageOutputControls(imageModel);
+  const availableImageSizeModeOptions = structuredImageParameters
+    ? IMAGE_SIZE_MODE_OPTIONS
+    : IMAGE_SIZE_MODE_OPTIONS.filter((option) => option.value !== "custom");
+  const effectiveImageSizeMode = structuredImageParameters || imageSizeMode !== "custom" ? imageSizeMode : "auto";
+  const effectiveImageResolution = structuredImageParameters ? imageResolution : "auto";
   const submitLabel = composerMode === "chat" ? "发送对话" : referenceImages.length > 0 ? "编辑图片" : "生成图片";
   const computedImageSize = useMemo(
     () =>
       buildImageSize({
-        mode: imageSizeMode,
+        mode: effectiveImageSizeMode,
         aspectRatio: imageAspectRatio,
-        resolution: imageResolution,
+        resolution: effectiveImageResolution,
         customRatio: imageCustomRatio,
         customWidth: imageCustomWidth,
         customHeight: imageCustomHeight,
       }),
-    [imageAspectRatio, imageCustomHeight, imageCustomRatio, imageCustomWidth, imageResolution, imageSizeMode],
+    [effectiveImageResolution, effectiveImageSizeMode, imageAspectRatio, imageCustomHeight, imageCustomRatio, imageCustomWidth],
   );
   const activeImageAspectRatio = getActiveImageAspectRatio({
     aspectRatio: imageAspectRatio,
     customRatio: imageCustomRatio,
   });
   const isCustomRatioInvalid =
-    imageSizeMode === "ratio" && imageAspectRatio === CUSTOM_IMAGE_ASPECT_RATIO && !parseImageRatio(imageCustomRatio);
+    effectiveImageSizeMode === "ratio" && imageAspectRatio === CUSTOM_IMAGE_ASPECT_RATIO && !parseImageRatio(imageCustomRatio);
   const sizePreviewLabel = computedImageSize
     ? formatImageSizeDisplay(computedImageSize)
-    : imageSizeMode === "auto" || (imageSizeMode === "ratio" && imageResolution === "auto" && !isCustomRatioInvalid)
+    : effectiveImageSizeMode === "auto" || (effectiveImageSizeMode === "ratio" && effectiveImageResolution === "auto" && !isCustomRatioInvalid)
       ? "Auto"
       : "尺寸无效";
   const sizeIsHighResolution = Boolean(computedImageSize && isHighResolutionImageSize(computedImageSize));
   const sizeRequirementLabel = computedImageSize ? getImageSizeRequirementLabel(computedImageSize) : "Auto";
   const sizePreviewDetail =
-    imageSizeMode === "ratio"
+    effectiveImageSizeMode === "ratio"
       ? isCustomRatioInvalid
         ? "比例需要填写为宽:高"
-        : imageResolution === "auto"
+        : effectiveImageResolution === "auto"
           ? activeImageAspectRatio
-            ? `将按 ${activeImageAspectRatio} 比例下发`
-            : "Auto 比例将交给模型决定"
+            ? officialImageRoute
+              ? `将把 ${activeImageAspectRatio} 写入提示词作为构图偏好`
+              : `将按 ${activeImageAspectRatio} 比例下发`
+            : officialImageRoute
+              ? "不写入固定比例，交给官方链路决定"
+              : "Auto 比例将交给模型决定"
           : computedImageSize
-            ? `将下发计算后的 ${formatImageSizeDisplay(computedImageSize)}，${sizeRequirementLabel}`
+            ? officialImageRoute
+              ? `将把 ${formatImageSizeDisplay(computedImageSize)} 作为提示词构图偏好，实际像素以结果为准`
+              : `将下发计算后的 ${formatImageSizeDisplay(computedImageSize)}，${sizeRequirementLabel}`
             : "比例需要填写为宽:高"
-      : imageSizeMode === "custom"
+      : effectiveImageSizeMode === "custom"
         ? computedImageSize
-          ? `已按链路限制校准为 ${formatImageSizeDisplay(computedImageSize)}，${sizeRequirementLabel}`
+          ? structuredImageParameters
+            ? `已按链路限制校准为 ${formatImageSizeDisplay(computedImageSize)}，${sizeRequirementLabel}`
+            : "官方链路不支持手动宽高"
           : "宽高需要填写正整数"
-        : "不会强制指定尺寸";
+        : officialImageRoute
+          ? "不写入尺寸提示，实际像素由官方返回决定"
+          : "不会强制指定尺寸";
 
   useEffect(() => {
     if (composerMode === "chat") {
       setIsImageSettingsOpen(false);
       setIsAspectRatioMenuOpen(false);
       setIsResolutionMenuOpen(false);
-      setIsQualityMenuOpen(false);
-      setIsOutputHintOpen(false);
     }
   }, [composerMode]);
-
-  useEffect(() => {
-    if (!supportsQuality) {
-      setIsQualityMenuOpen(false);
-      setIsOutputHintOpen(false);
-    }
-  }, [supportsQuality]);
 
   useEffect(() => {
     if (!isModelMenuOpen) {
@@ -595,8 +597,6 @@ export function ImageComposer({
     if (!open) {
       setIsAspectRatioMenuOpen(false);
       setIsResolutionMenuOpen(false);
-      setIsQualityMenuOpen(false);
-      setIsOutputHintOpen(false);
     }
   };
 
@@ -776,7 +776,6 @@ export function ImageComposer({
                       setIsModelMenuOpen((open) => !open);
                       setIsAspectRatioMenuOpen(false);
                       setIsResolutionMenuOpen(false);
-                      setIsQualityMenuOpen(false);
                     }}
                     aria-expanded={isModelMenuOpen}
                     aria-label={`选择模型，当前 ${imageModelLabel}`}
@@ -885,17 +884,19 @@ export function ImageComposer({
                           />
                         </div>
                         <div className={imageSettingsFieldClass}>
-                          <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">尺寸</span>
+                          <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">
+                            {officialImageRoute ? "构图" : "尺寸"}
+                          </span>
                           <span className={cn(
                             "min-w-0 truncate text-right text-xs font-semibold dark:text-foreground",
-                            sizeIsHighResolution ? "text-amber-700 dark:text-amber-300" : "text-[#18181b]",
+                            structuredImageParameters && sizeIsHighResolution ? "text-amber-700 dark:text-amber-300" : "text-[#18181b]",
                           )}>
                             {sizePreviewLabel}
                           </span>
                         </div>
                         <div className="col-span-2 grid grid-cols-3 gap-1 rounded-full border border-[#e5e7eb] bg-white p-1 dark:border-border dark:bg-background/70 sm:col-span-3">
-                          {IMAGE_SIZE_MODE_OPTIONS.map((option) => {
-                            const active = option.value === imageSizeMode;
+                          {availableImageSizeModeOptions.map((option) => {
+                            const active = option.value === effectiveImageSizeMode;
                             return (
                               <button
                                 key={option.value}
@@ -908,7 +909,6 @@ export function ImageComposer({
                                   onImageSizeModeChange(option.value);
                                   setIsAspectRatioMenuOpen(false);
                                   setIsResolutionMenuOpen(false);
-                                  setIsQualityMenuOpen(false);
                                 }}
                               >
                                 <span className="truncate">{option.label}</span>
@@ -916,7 +916,7 @@ export function ImageComposer({
                             );
                           })}
                         </div>
-                        {imageSizeMode === "custom" ? (
+                        {effectiveImageSizeMode === "custom" ? (
                           <div className="col-span-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-xl border border-[#e5e7eb] bg-white px-3 py-1 dark:border-border dark:bg-background/70 sm:col-span-3">
                             <label className="min-w-0">
                               <span className="sr-only">手动输入宽度</span>
@@ -945,7 +945,7 @@ export function ImageComposer({
                             </label>
                           </div>
                         ) : null}
-                        {imageSizeMode === "ratio" ? (
+                        {effectiveImageSizeMode === "ratio" ? (
                           <>
                             <div className={imageSettingsFieldClass}>
                               <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">比例</span>
@@ -960,12 +960,12 @@ export function ImageComposer({
                                   setIsModelMenuOpen(false);
                                   if (open) {
                                     setIsResolutionMenuOpen(false);
-                                    setIsQualityMenuOpen(false);
                                   }
                                 }}
                                 onValueChange={onImageAspectRatioChange}
                               />
                             </div>
+                            {structuredImageParameters ? (
                             <div className={imageSettingsFieldClass}>
                               <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">分辨率</span>
                               <ImageSettingsPopoverMenu
@@ -979,7 +979,6 @@ export function ImageComposer({
                                   setIsModelMenuOpen(false);
                                   if (open) {
                                     setIsAspectRatioMenuOpen(false);
-                                    setIsQualityMenuOpen(false);
                                   }
                                 }}
                                 onValueChange={onImageResolutionChange}
@@ -987,6 +986,7 @@ export function ImageComposer({
                                 contentClassName="w-[min(24rem,calc(100vw-2rem))]"
                               />
                             </div>
+                            ) : null}
                             {imageAspectRatio === CUSTOM_IMAGE_ASPECT_RATIO ? (
                               <div
                                 className={cn(
@@ -1012,67 +1012,34 @@ export function ImageComposer({
                               label={sizePreviewLabel}
                               detail={sizePreviewDetail}
                               highResolution={sizeIsHighResolution}
+                              officialRoute={officialImageRoute}
                             />
                           </>
                         ) : null}
-                        {imageSizeMode === "custom" ? (
+                        {effectiveImageSizeMode === "custom" ? (
                           <ImageSizePreviewPanel
                             label={sizePreviewLabel}
                             detail={sizePreviewDetail}
                             highResolution={sizeIsHighResolution}
+                            officialRoute={officialImageRoute}
                           />
                         ) : null}
-                        {imageSizeMode !== "auto" && sizeIsHighResolution && highResolutionHint ? (
+                        {structuredImageParameters && effectiveImageSizeMode !== "auto" && sizeIsHighResolution && highResolutionHint ? (
                           <div className="col-span-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-1.5 text-[11px] leading-5 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200 sm:col-span-3">
                             {highResolutionHint}
                           </div>
                         ) : null}
-                        {supportsQuality ? (
-                          <>
-                            <div className={imageSettingsFieldClass}>
-                              <span className="flex shrink-0 items-center gap-1 font-medium text-[#45515e] dark:text-muted-foreground">
-                                质量
-                                <Popover open={isOutputHintOpen} onOpenChange={setIsOutputHintOpen}>
-                                  <PopoverTrigger asChild>
-                                    <button
-                                      type="button"
-                                      className="inline-flex size-4 shrink-0 items-center justify-center text-[#8e8e93] transition hover:text-[#45515e] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:text-muted-foreground dark:hover:text-foreground"
-                                      aria-label="查看图片输出说明"
-                                    >
-                                      <CircleHelp className="size-3.5" />
-                                    </button>
-                                  </PopoverTrigger>
-                                  <PopoverContent
-                                    align="center"
-                                    side="top"
-                                    sideOffset={6}
-                                    className="z-[120] w-[min(calc(100vw-2rem),20rem)] rounded-xl border-[#e5e7eb] bg-white px-4 py-3 text-xs leading-6 text-[#45515e] shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] dark:border-border dark:bg-card dark:text-muted-foreground dark:shadow-[0_24px_80px_-28px_rgba(0,0,0,0.72)]"
-                                    onOpenAutoFocus={(event) => event.preventDefault()}
-                                  >
-                                    {imageOutputHint}
-                                  </PopoverContent>
-                                </Popover>
-                              </span>
-                              <ImageSettingsPopoverMenu
-                                label="质量"
-                                value={imageQuality}
-                                valueLabel={imageQualityLabel}
-                                options={imageQualityOptions}
-                                open={isQualityMenuOpen}
-                                onOpenChange={(open) => {
-                                  setIsQualityMenuOpen(open);
-                                  setIsModelMenuOpen(false);
-                                  if (open) {
-                                    setIsAspectRatioMenuOpen(false);
-                                    setIsResolutionMenuOpen(false);
-                                  }
-                                }}
-                                onValueChange={onImageQualityChange}
-                                triggerTitle={imageQualityOptions.find((option) => option.value === imageQuality)?.description}
-                              />
-                            </div>
-                          </>
+                        {officialImageRoute ? (
+                          <p className="col-span-2 rounded-xl border border-sky-100 bg-sky-50 px-3 py-1.5 text-[11px] leading-5 text-sky-900 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-100 sm:col-span-3">
+                            官方链路只会把比例写入提示词作为构图偏好，不会下发 1080P / 2K / 4K 或质量参数；格式由后端在保存结果时处理，压缩率仅适用于 JPEG。
+                          </p>
+                        ) : usesCodexImageRoute(imageModel) ? (
+                          <p className="col-span-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-1.5 text-[11px] leading-5 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200 sm:col-span-3">
+                            Codex 链路会把尺寸、格式和 JPEG 压缩率作为上游工具参数提交；后端只保存上游返回的图片，不做格式二次转换。Free 账号会被上游拒绝。
+                          </p>
                         ) : null}
+                        {outputControlsSupported ? (
+                        <>
                         <div className={imageSettingsFieldClass}>
                           <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">格式</span>
                           <Select
@@ -1080,7 +1047,7 @@ export function ImageComposer({
                             onValueChange={(value) => {
                               const nextFormat = value as ImageOutputFormat;
                               onImageOutputFormatChange(nextFormat);
-                              if (nextFormat === "png") {
+                              if (!supportsImageOutputCompression(nextFormat)) {
                                 onImageOutputCompressionChange("");
                               }
                             }}
@@ -1117,7 +1084,7 @@ export function ImageComposer({
                             imageSettingsFieldClass,
                             compressionDisabled && "opacity-55",
                           )}
-                          title={compressionDisabled ? "PNG 不支持压缩率参数" : "JPEG / WebP 压缩率，0-100"}
+                          title={compressionDisabled ? "只有 JPEG 支持压缩率参数" : "JPEG 压缩率，0-100"}
                         >
                           <span className="shrink-0 font-medium text-[#45515e] dark:text-muted-foreground">压缩率</span>
                           <Input
@@ -1135,9 +1102,13 @@ export function ImageComposer({
                         </label>
                         <p className="col-span-2 px-1 text-[11px] leading-5 text-[#8e8e93] dark:text-muted-foreground sm:col-span-3">
                           {compressionDisabled
-                            ? "PNG 会忽略压缩率参数。结果卡会显示实际上游返回的格式、尺寸和文件大小。"
-                            : "JPEG / WebP 会下发 output_compression；实际格式以结果卡显示为准。"}
+                            ? "PNG 和 WebP 不接收压缩率。结果卡会显示实际保存后的格式、尺寸和文件大小。"
+                            : officialImageRoute
+                              ? "JPEG 压缩率由后端保存结果时应用；实际上游返回格式不受此项控制。"
+                              : "JPEG 压缩率会作为 Codex 上游工具参数提交；后端不再二次转换格式。"}
                         </p>
+                        </>
+                        ) : null}
                       </div>
                     </PopoverContent>
                   </Popover>

@@ -269,6 +269,26 @@ func TestResponseImageGenerationRequestMapsTextModelToOfficialImageFlow(t *testi
 	if request.OutputFormat != "webp" {
 		t.Fatalf("output format = %q, want webp", request.OutputFormat)
 	}
+	if request.OutputCompression != nil {
+		t.Fatalf("output compression = %#v, want nil for webp", request.OutputCompression)
+	}
+}
+
+func TestResponseImageGenerationRequestKeepsJPEGOutputCompression(t *testing.T) {
+	body := map[string]any{
+		"model": "gpt-5.5",
+		"input": "生成封面",
+		"tools": []any{
+			map[string]any{"type": "image_generation", "output_format": "jpeg", "output_compression": 37},
+		},
+	}
+	request, _, err := ResponseImageGenerationRequest(body, "linuxdo:1", nil)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
+	}
+	if request.OutputFormat != "jpeg" {
+		t.Fatalf("output format = %q, want jpeg", request.OutputFormat)
+	}
 	if request.OutputCompression == nil || *request.OutputCompression != 37 {
 		t.Fatalf("output compression = %#v, want 37", request.OutputCompression)
 	}
@@ -318,16 +338,65 @@ func TestResponseImageGenerationRequestPreservesOfficialToolOptions(t *testing.T
 	}
 }
 
-func TestCodexImageModelUsesResponsesRouteAndCodexToolModel(t *testing.T) {
+func TestCodexImageModelStillUsesSeparateCodexImageRoute(t *testing.T) {
 	request := ConversationRequest{Model: "codex-gpt-image-2"}
 	if !request.UsesResponsesImageRoute() {
-		t.Fatal("codex-gpt-image-2 should use Codex Responses route")
+		t.Fatal("codex-gpt-image-2 should still use the dedicated responses image route")
 	}
-	if got := responsesImageToolModel(request.Model); got != "gpt-5.4-mini" {
-		t.Fatalf("responsesImageToolModel(%q) = %q, want gpt-5.4-mini", request.Model, got)
+}
+
+func TestResponseImageGenerationRequestKeepsPreviousContextOutOfOfficialPrompt(t *testing.T) {
+	previous := ResponseContext{
+		Messages: []map[string]any{
+			{"role": "assistant", "content": "Generated image: 白猫坐在窗边"},
+			{"role": "user", "content": "把它改成夜晚"},
+		},
 	}
-	if got := responsesImageToolModel("gpt-image-2"); got != "" {
-		t.Fatalf("responsesImageToolModel(gpt-image-2) = %q, want omitted official tool model", got)
+	body := map[string]any{
+		"model": "gpt-5.5",
+		"input": "把它改成蓝色",
+		"tools": []any{
+			map[string]any{"type": "image_generation", "model": "gpt-image-2", "size": "16:9", "quality": "high"},
+		},
+	}
+
+	request, prompt, err := ResponseImageGenerationRequest(body, "admin", &previous)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
+	}
+	if prompt != "把它改成蓝色" {
+		t.Fatalf("prompt = %q, want 当前输入原文", prompt)
+	}
+	if len(request.Messages) == 0 {
+		t.Fatal("request.Messages should keep response context for storage/continuation bookkeeping")
+	}
+	finalPrompt := buildResponsesImagePrompt(request.Prompt, request.Size, request.Model)
+	for _, unwanted := range []string{"历史上下文", "当前请求:", "白猫坐在窗边", "画质使用 High 档"} {
+		if strings.Contains(finalPrompt, unwanted) {
+			t.Fatalf("official image prompt unexpectedly contains %q: %s", unwanted, finalPrompt)
+		}
+	}
+	if !strings.Contains(finalPrompt, "16:9 横屏构图") {
+		t.Fatalf("finalPrompt missing size hint: %s", finalPrompt)
+	}
+}
+
+func TestBuildResponsesImagePromptKeepsOfficialRouteCloseToRawPrompt(t *testing.T) {
+	prompt := buildResponsesImagePrompt("画一张产品照片", "16:9", "gpt-image-2")
+	if !strings.Contains(prompt, "16:9 横屏构图") {
+		t.Fatalf("buildResponsesImagePrompt() missing size hint: %s", prompt)
+	}
+	for _, unwanted := range []string{"画质使用", "透明背景", "整体风格偏向", "历史上下文", "当前请求:"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("buildResponsesImagePrompt() unexpectedly contains %q: %s", unwanted, prompt)
+		}
+	}
+}
+
+func TestBuildResponsesImagePromptLeavesCodexPromptUntouched(t *testing.T) {
+	const raw = "画一张产品照片"
+	if prompt := buildResponsesImagePrompt(raw, "16:9", "codex-gpt-image-2"); prompt != raw {
+		t.Fatalf("buildResponsesImagePrompt() = %q, want %q", prompt, raw)
 	}
 }
 
@@ -347,7 +416,7 @@ func TestResponseImageGenerationRequestAcceptsCodexImageToolAlias(t *testing.T) 
 		t.Fatalf("request model = %q, want codex-gpt-image-2", request.Model)
 	}
 	if !request.UsesResponsesImageRoute() {
-		t.Fatal("codex-gpt-image-2 responses image_generation request should use Responses route")
+		t.Fatal("codex-gpt-image-2 image_generation request should use the dedicated responses image route")
 	}
 }
 
@@ -531,6 +600,13 @@ func TestApplyImageOutputOptionsToRequest(t *testing.T) {
 	pngRequest = pngRequest.Normalized()
 	if pngRequest.OutputFormat != "png" || pngRequest.OutputCompression != nil {
 		t.Fatalf("png output options = %#v/%#v, want png/nil", pngRequest.OutputFormat, pngRequest.OutputCompression)
+	}
+
+	webpRequest := ConversationRequest{}
+	applyImageOutputOptionsToRequest(&webpRequest, ImageOutputOptions{Format: "webp", Compression: ptrInt(25)})
+	webpRequest = webpRequest.Normalized()
+	if webpRequest.OutputFormat != "webp" || webpRequest.OutputCompression != nil {
+		t.Fatalf("webp output options = %#v/%#v, want webp/nil", webpRequest.OutputFormat, webpRequest.OutputCompression)
 	}
 }
 

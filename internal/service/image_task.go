@@ -285,9 +285,12 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 		return nil, err
 	}
 	taskCtx, cancel := context.WithCancel(context.Background())
-	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": NormalizeImageOutputFormat(util.Clean(payload["output_format"])), "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
-	if compression, ok := normalizedImageOutputCompressionValue(payload["output_compression"]); ok {
-		task["output_compression"] = compression
+	outputFormat := NormalizeImageOutputFormat(util.Clean(payload["output_format"]))
+	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": outputFormat, "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
+	if SupportsImageOutputCompression(outputFormat) {
+		if compression, ok := normalizedImageOutputCompressionValue(payload["output_compression"]); ok {
+			task["output_compression"] = compression
+		}
 	}
 	mergePublicImageToolTaskFields(task, payload)
 	s.tasks[key] = task
@@ -535,9 +538,12 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 		}
 		count := taskCount(mode, task)
 		visibility, _ := NormalizeImageVisibility(util.Clean(task["visibility"]))
-		normalized := map[string]any{"id": id, "owner_id": owner, "status": status, "mode": mode, "model": firstNonEmpty(util.Clean(task["model"]), util.ImageModelAuto), "size": util.Clean(task["size"]), "quality": util.Clean(task["quality"]), "output_format": NormalizeImageOutputFormat(util.Clean(task["output_format"])), "visibility": visibility, "count": count, "created_at": firstNonEmpty(util.Clean(task["created_at"]), util.NowLocal()), "updated_at": firstNonEmpty(util.Clean(task["updated_at"]), util.Clean(task["created_at"]), util.NowLocal())}
-		if compression, ok := normalizedImageOutputCompressionValue(task["output_compression"]); ok {
-			normalized["output_compression"] = compression
+		outputFormat := NormalizeImageOutputFormat(util.Clean(task["output_format"]))
+		normalized := map[string]any{"id": id, "owner_id": owner, "status": status, "mode": mode, "model": firstNonEmpty(util.Clean(task["model"]), util.ImageModelAuto), "size": util.Clean(task["size"]), "quality": util.Clean(task["quality"]), "output_format": outputFormat, "visibility": visibility, "count": count, "created_at": firstNonEmpty(util.Clean(task["created_at"]), util.NowLocal()), "updated_at": firstNonEmpty(util.Clean(task["updated_at"]), util.Clean(task["created_at"]), util.NowLocal())}
+		if SupportsImageOutputCompression(outputFormat) {
+			if compression, ok := normalizedImageOutputCompressionValue(task["output_compression"]); ok {
+				normalized["output_compression"] = compression
+			}
 		}
 		if data := util.AsMapSlice(task["data"]); data != nil {
 			normalized["data"] = data
@@ -618,8 +624,10 @@ func publicTask(task map[string]any) map[string]any {
 	if format := NormalizeImageOutputFormat(util.Clean(task["output_format"])); format != "" {
 		item["output_format"] = format
 	}
-	if compression, ok := normalizedImageOutputCompressionValue(task["output_compression"]); ok {
-		item["output_compression"] = compression
+	if SupportsImageOutputCompression(util.Clean(item["output_format"])) {
+		if compression, ok := normalizedImageOutputCompressionValue(task["output_compression"]); ok {
+			item["output_compression"] = compression
+		}
 	}
 	mergePublicImageToolTaskFields(item, task)
 	if task["data"] != nil {
@@ -700,7 +708,7 @@ func mergeImageOutputOptions(payload map[string]any, options ImageOutputOptions)
 		return
 	}
 	payload["output_format"] = format
-	if format == "png" || options.Compression == nil {
+	if !SupportsImageOutputCompression(format) || options.Compression == nil {
 		delete(payload, "output_compression")
 		return
 	}
@@ -751,6 +759,10 @@ func NormalizeImageOutputFormat(format string) string {
 	default:
 		return "png"
 	}
+}
+
+func SupportsImageOutputCompression(format string) bool {
+	return NormalizeImageOutputFormat(format) == "jpeg"
 }
 
 func normalizedImageOutputCompressionValue(value any) (int, bool) {

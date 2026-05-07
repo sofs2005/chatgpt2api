@@ -78,190 +78,130 @@ func TestApplyBrowserFingerprintPreservesAccountProfile(t *testing.T) {
 	}
 }
 
-func TestBuildResponsesImageRequestPreservesStructuredToolFields(t *testing.T) {
-	request := ResponsesImageRequest{
-		Prompt:            "生成封面",
-		Model:             "gpt-image-2",
-		Size:              "2048x2048",
-		Quality:           "high",
-		Background:        "transparent",
-		OutputFormat:      "webp",
-		OutputCompression: ptrInt(37),
-		PartialImages:     ptrInt(2),
-		InputImages: []ResponsesInputImage{
-			{Data: []byte("png-bytes"), ContentType: "image/png"},
+func TestOfficialImageHeadersIncludeSentinelAndConduitTokens(t *testing.T) {
+	client := &Client{
+		BaseURL:     "https://chatgpt.com",
+		AccessToken: "token-1",
+		userAgent:   browserUserAgent,
+		deviceID:    "device-1",
+		sessionID:   "session-1",
+		fp: map[string]string{
+			"user-agent":                  browserUserAgent,
+			"sec-ch-ua":                   browserSecCHUA,
+			"sec-ch-ua-arch":              browserSecCHUAArch,
+			"sec-ch-ua-bitness":           browserSecCHUABitness,
+			"sec-ch-ua-full-version":      browserSecCHUAFullVersion,
+			"sec-ch-ua-full-version-list": browserSecCHUAFullVersionList,
+			"sec-ch-ua-mobile":            browserSecCHUAMobile,
+			"sec-ch-ua-platform":          browserSecCHUAPlatform,
+			"sec-ch-ua-platform-version":  browserSecCHUAPlatformVersion,
 		},
-		InputImageMask: &ResponsesInputImage{Data: []byte("mask-bytes"), ContentType: "image/png"},
 	}
-
-	payload, err := buildResponsesImagePayload(request)
-	if err != nil {
-		t.Fatalf("buildResponsesImagePayload() error = %v", err)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(payload, &body); err != nil {
-		t.Fatalf("payload json error = %v", err)
-	}
-
-	if body["model"] != ResponsesImageMainModel {
-		t.Fatalf("main model = %#v, want %q", body["model"], ResponsesImageMainModel)
-	}
-	tool := body["tools"].([]any)[0].(map[string]any)
-	for key, want := range map[string]any{
-		"type":               "image_generation",
-		"action":             "edit",
-		"size":               "2048x2048",
-		"quality":            "high",
-		"background":         "transparent",
-		"output_format":      "webp",
-		"output_compression": float64(37),
-		"partial_images":     float64(2),
+	headers := client.officialImageHeaders(officialImageStreamPath, ChatRequirements{
+		Token:          "req-token",
+		ProofToken:     "proof-token",
+		TurnstileToken: "turn-token",
+		SOToken:        "so-token",
+	}, "conduit-token", "text/event-stream")
+	for key, want := range map[string]string{
+		"Authorization": "Bearer token-1",
+		"OpenAI-Sentinel-Chat-Requirements-Token": "req-token",
+		"OpenAI-Sentinel-Proof-Token":             "proof-token",
+		"OpenAI-Sentinel-Turnstile-Token":         "turn-token",
+		"OpenAI-Sentinel-SO-Token":                "so-token",
+		"X-Conduit-Token":                         "conduit-token",
+		"Accept":                                  "text/event-stream",
+		"Content-Type":                            "application/json",
+		"X-OpenAI-Target-Path":                    officialImageStreamPath,
 	} {
-		if got := tool[key]; got != want {
-			t.Fatalf("tool[%s] = %#v, want %#v in %#v", key, got, want, tool)
+		if got := headers[key]; got != want {
+			t.Fatalf("headers[%s] = %q, want %q", key, got, want)
 		}
 	}
-	if _, ok := tool["model"]; ok {
-		t.Fatalf("tool model = %#v, want omitted for official gpt-image-2 route", tool["model"])
-	}
-	mask := tool["input_image_mask"].(map[string]any)
-	if got := mask["image_url"].(string); !strings.HasPrefix(got, "data:image/png;base64,") {
-		t.Fatalf("mask image_url = %q", got)
-	}
-	input := body["input"].([]any)[0].(map[string]any)
-	content := input["content"].([]any)
-	if len(content) != 2 || content[0].(map[string]any)["type"] != "input_text" || content[1].(map[string]any)["type"] != "input_image" {
-		t.Fatalf("input content = %#v", content)
+	if headers["X-Oai-Turn-Trace-Id"] == "" {
+		t.Fatalf("X-Oai-Turn-Trace-Id missing in %#v", headers)
 	}
 }
 
-func TestBuildResponsesImageRequestMapsCodexAliasToCodexToolModel(t *testing.T) {
-	payload, err := buildResponsesImagePayload(ResponsesImageRequest{
-		Prompt: "生成封面",
-		Model:  "codex-gpt-image-2",
-	})
-	if err != nil {
-		t.Fatalf("buildResponsesImagePayload() error = %v", err)
+func TestBuildOfficialImagePromptOnlyAddsSizeHint(t *testing.T) {
+	prompt := buildOfficialImagePrompt("画一张城市封面", "16:9")
+	if !strings.Contains(prompt, "16:9 横屏构图") {
+		t.Fatalf("buildOfficialImagePrompt() missing size hint: %s", prompt)
 	}
-	var body map[string]any
-	if err := json.Unmarshal(payload, &body); err != nil {
-		t.Fatalf("payload json error = %v", err)
-	}
-	if body["model"] != ResponsesImageMainModel {
-		t.Fatalf("main model = %#v, want %q", body["model"], ResponsesImageMainModel)
-	}
-	tool := body["tools"].([]any)[0].(map[string]any)
-	if got := tool["model"]; got != ResponsesImageCodexToolModel {
-		t.Fatalf("tool model = %#v, want %q in %#v", got, ResponsesImageCodexToolModel, tool)
+	for _, unwanted := range []string{"High 档", "透明背景", "anime", "阶段性预览", "WebP"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("buildOfficialImagePrompt() unexpectedly contains %q: %s", unwanted, prompt)
+		}
 	}
 }
 
-func TestBuildResponsesImageRequestNormalizesToolSize(t *testing.T) {
-	tests := []struct {
-		name string
-		size string
-		want any
-	}{
-		{name: "auto omitted", size: "auto", want: nil},
-		{name: "square aspect ratio becomes codex size", size: "1:1", want: "1024x1024"},
-		{name: "landscape aspect ratio becomes codex size", size: "3:2", want: "1536x1024"},
-		{name: "portrait aspect ratio becomes codex size", size: "2:3", want: "1024x1536"},
-		{name: "x separated ratio becomes codex size", size: "16x9", want: "1536x864"},
-		{name: "1080p tier becomes valid multiple", size: "1080x1080", want: "1088x1088"},
-		{name: "oversized dimensions are clamped", size: "8192x8192", want: "2880x2880"},
-		{name: "unknown size omitted", size: "poster", want: nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			payload, err := buildResponsesImagePayload(ResponsesImageRequest{
-				Prompt: "生成封面",
-				Size:   tt.size,
-			})
-			if err != nil {
-				t.Fatalf("buildResponsesImagePayload() error = %v", err)
-			}
-			var body map[string]any
-			if err := json.Unmarshal(payload, &body); err != nil {
-				t.Fatalf("payload json error = %v", err)
-			}
-			tool := body["tools"].([]any)[0].(map[string]any)
-			if got := tool["size"]; got != tt.want {
-				t.Fatalf("tool size = %#v, want %#v in %#v", got, tt.want, tool)
-			}
-		})
-	}
-}
-
-func TestNormalizeResponsesImageToolModel(t *testing.T) {
-	tests := []struct {
-		name  string
+func TestOfficialImageModelSlug(t *testing.T) {
+	for _, tt := range []struct {
 		model string
 		want  string
 	}{
-		{name: "empty official default is omitted", model: "", want: ""},
-		{name: "auto official default is omitted", model: "auto", want: ""},
-		{name: "gpt image 2 official default is omitted", model: "gpt-image-2", want: ""},
-		{name: "codex alias maps to codex model", model: "codex-gpt-image-2", want: ResponsesImageCodexToolModel},
-		{name: "explicit codex upstream model is preserved", model: "gpt-5.4-mini", want: "gpt-5.4-mini"},
-		{name: "unknown values are omitted", model: "unknown", want: ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := normalizeResponsesImageToolModel(tt.model); got != tt.want {
-				t.Fatalf("normalizeResponsesImageToolModel(%q) = %q, want %q", tt.model, got, tt.want)
-			}
-		})
+		{model: "", want: "auto"},
+		{model: "auto", want: "auto"},
+		{model: "gpt-image-2", want: "gpt-5-5"},
+		{model: "codex-gpt-image-2", want: "codex-gpt-image-2"},
+		{model: "gpt-5.5", want: "auto"},
+	} {
+		if got := officialImageModelSlug(tt.model); got != tt.want {
+			t.Fatalf("officialImageModelSlug(%q) = %q, want %q", tt.model, got, tt.want)
+		}
 	}
 }
 
-func TestResponsesImageHeadersUseCodexRoute(t *testing.T) {
-	client := &Client{AccessToken: "token-1", fp: map[string]string{}, userAgent: browserUserAgent, sessionID: "session-1"}
-	headers, err := client.responsesImageHeaders("acct-1")
+func TestStreamResponsesImageUsesOfficialPrepareAndConversationRoutes(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
 	if err != nil {
-		t.Fatalf("responsesImageHeaders() error = %v", err)
+		t.Fatalf("decode png: %v", err)
 	}
-	if headers["Authorization"] != "Bearer token-1" {
-		t.Fatalf("Authorization = %q", headers["Authorization"])
-	}
-	if headers["Chatgpt-Account-Id"] != "acct-1" {
-		t.Fatalf("Chatgpt-Account-Id = %q", headers["Chatgpt-Account-Id"])
-	}
-	if headers["Originator"] != "codex-tui" || headers["Accept"] != "text/event-stream" {
-		t.Fatalf("codex headers = %#v", headers)
-	}
-	if !strings.Contains(headers["User-Agent"], "codex-tui/0.128.0") || !strings.Contains(headers["User-Agent"], "iTerm.app") {
-		t.Fatalf("User-Agent = %q, want Codex TUI user agent", headers["User-Agent"])
-	}
-	if headers["Session_id"] == "" {
-		t.Fatalf("Session_id missing in %#v", headers)
-	}
-}
-
-func TestStreamResponsesImageUsesCodexResponsesRouteForCodexModel(t *testing.T) {
-	imageB64 := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
-	var seenPath string
-	var seenToolModel any
-	var seenUserAgent string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenPath = r.URL.Path
-		seenUserAgent = r.Header.Get("User-Agent")
-		if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
-			t.Errorf("Authorization = %q, want Bearer token-1", got)
+	var seenPaths []string
+	var prepareBody map[string]any
+	var streamBody map[string]any
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPaths = append(seenPaths, r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImagePreparePath:
+			if err := json.NewDecoder(r.Body).Decode(&prepareBody); err != nil {
+				t.Fatalf("decode prepare body: %v", err)
+			}
+			if got := r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token"); got != "req-token" {
+				t.Fatalf("prepare requirements token = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImageStreamPath:
+			if err := json.NewDecoder(r.Body).Decode(&streamBody); err != nil {
+				t.Fatalf("decode stream body: %v", err)
+			}
+			if got := r.Header.Get("X-Conduit-Token"); got != "conduit-token" {
+				t.Fatalf("stream conduit token = %q", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"server_ste_metadata\",\"metadata\":{\"tool_invoked\":true,\"turn_use_case\":\"image gen\"},\"conversation_id\":\"conv-1\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-1\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_abc"}]}}}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/file_abc/download":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_abc.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/file_abc.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		if got := r.Header.Get("Chatgpt-Account-Id"); got != "acct-1" {
-			t.Errorf("Chatgpt-Account-Id = %q, want acct-1", got)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode request body: %v", err)
-		} else {
-			tool := body["tools"].([]any)[0].(map[string]any)
-			seenToolModel = tool["model"]
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"` + imageB64 + `","output_format":"png"}}
-
-`))
 	}))
 	defer server.Close()
 
@@ -273,28 +213,208 @@ func TestStreamResponsesImageUsesCodexResponsesRouteForCodexModel(t *testing.T) 
 			"token-1": {"chatgpt_account_id": "acct-1"},
 		},
 	}
+	client.fp = client.buildFingerprint()
+	client.applyBrowserFingerprint()
+	client.userAgent = client.fp["user-agent"]
+	client.deviceID = client.fp["oai-device-id"]
+	client.sessionID = client.fp["oai-session-id"]
+
 	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
-		Prompt: "生成封面",
-		Model:  "codex-gpt-image-2",
+		Prompt:        "生成封面",
+		Model:         "gpt-image-2",
+		Size:          "16:9",
+		Quality:       "high",
+		Background:    "transparent",
+		Style:         "anime",
+		Moderation:    "low",
+		PartialImages: ptrInt(2),
+		OutputFormat:  "webp",
 	})
-	var gotResult string
+	var results []ResponsesImageEvent
 	for event := range events {
-		gotResult = event.Result
+		if event.Result != "" {
+			results = append(results, event)
+		}
 	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("StreamResponsesImage() error = %v", err)
 	}
-	if seenPath != codexResponsesPath {
-		t.Fatalf("path = %q, want %q", seenPath, codexResponsesPath)
+	if len(results) != 1 {
+		t.Fatalf("result events = %#v", results)
 	}
-	if seenToolModel != ResponsesImageCodexToolModel {
-		t.Fatalf("tool model = %#v, want %q", seenToolModel, ResponsesImageCodexToolModel)
+	if results[0].ConversationID != "conv-1" {
+		t.Fatalf("conversation id = %q, want conv-1", results[0].ConversationID)
 	}
-	if !strings.Contains(seenUserAgent, "codex-tui/0.128.0") {
-		t.Fatalf("User-Agent = %q, want Codex TUI", seenUserAgent)
+	if results[0].Result != png1x1 {
+		t.Fatalf("result = %q, want %q", results[0].Result, png1x1)
 	}
-	if gotResult != imageB64 {
-		t.Fatalf("result = %q, want %q", gotResult, imageB64)
+	if prepareBody["model"] != "gpt-5-5" {
+		t.Fatalf("prepare model = %#v, want gpt-5-5", prepareBody["model"])
+	}
+	if streamBody["model"] != "gpt-5-5" {
+		t.Fatalf("stream model = %#v, want gpt-5-5", streamBody["model"])
+	}
+	messages := streamBody["messages"].([]any)
+	message := messages[0].(map[string]any)
+	content := message["content"].(map[string]any)
+	if content["content_type"] != "text" {
+		t.Fatalf("content_type = %#v, want text", content["content_type"])
+	}
+	parts := content["parts"].([]any)
+	if len(parts) != 1 || !strings.Contains(parts[0].(string), "16:9 横屏构图") {
+		t.Fatalf("parts = %#v, want prompt with size hint", parts)
+	}
+	for _, unwanted := range []string{"High 档", "透明背景", "anime", "阶段性预览", "WebP"} {
+		if strings.Contains(parts[0].(string), unwanted) {
+			t.Fatalf("prompt unexpectedly contains %q: %s", unwanted, parts[0].(string))
+		}
+	}
+	if len(seenPaths) < 6 {
+		t.Fatalf("seen paths too short: %#v", seenPaths)
+	}
+}
+
+func TestStreamResponsesImageDoesNotTreatQueuedAssistantNoticeAsFinalText(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	var server *httptest.Server
+	pollCount := 0
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImagePreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImageStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"title_generation\",\"title\":\"正在处理图片\",\"conversation_id\":\"conv-queued\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"v\":{\"message\":{\"author\":{\"role\":\"assistant\"},\"content\":{\"content_type\":\"text\",\"parts\":[\"正在处理图片 目前有很多人在创建图片，因此可能需要一点时间。图片准备好后我们会通知你。\"]}}},\"conversation_id\":\"conv-queued\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-queued\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-queued":
+			pollCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_ready"}]}}}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/file_ready/download":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_ready.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/file_ready.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{
+		BaseURL:     server.URL,
+		AccessToken: "token-1",
+		httpClient:  server.Client(),
+		lookup: testAccountLookup{
+			"token-1": {"chatgpt_account_id": "acct-1"},
+		},
+	}
+	client.fp = client.buildFingerprint()
+	client.applyBrowserFingerprint()
+	client.userAgent = client.fp["user-agent"]
+	client.deviceID = client.fp["oai-device-id"]
+	client.sessionID = client.fp["oai-session-id"]
+
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt: "生成封面",
+		Model:  "gpt-image-2",
+	})
+	var results []ResponsesImageEvent
+	var texts []string
+	for event := range events {
+		if strings.TrimSpace(event.Text) != "" {
+			texts = append(texts, event.Text)
+		}
+		if event.Result != "" {
+			results = append(results, event)
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamResponsesImage() error = %v", err)
+	}
+	if pollCount == 0 {
+		t.Fatal("expected conversation polling after queued assistant notice")
+	}
+	if len(results) != 1 || results[0].Result != png1x1 {
+		t.Fatalf("results = %#v, want one final image result", results)
+	}
+}
+
+func TestBuildResponsesImagePayloadSendsCompressionOnlyForJPEG(t *testing.T) {
+	compression := 37
+	jpegPayload, err := buildResponsesImagePayload(ResponsesImageRequest{
+		Prompt:            "生成封面",
+		Model:             "codex-gpt-image-2",
+		OutputFormat:      "jpeg",
+		OutputCompression: &compression,
+	})
+	if err != nil {
+		t.Fatalf("buildResponsesImagePayload(jpeg) error = %v", err)
+	}
+	var jpegBody map[string]any
+	if err := json.Unmarshal(jpegPayload, &jpegBody); err != nil {
+		t.Fatalf("Unmarshal(jpeg) error = %v", err)
+	}
+	jpegTools := jpegBody["tools"].([]any)
+	jpegTool := jpegTools[0].(map[string]any)
+	if jpegTool["output_compression"] != float64(37) {
+		t.Fatalf("jpeg output_compression = %#v, want 37", jpegTool["output_compression"])
+	}
+
+	webpPayload, err := buildResponsesImagePayload(ResponsesImageRequest{
+		Prompt:            "生成封面",
+		Model:             "codex-gpt-image-2",
+		OutputFormat:      "webp",
+		OutputCompression: &compression,
+	})
+	if err != nil {
+		t.Fatalf("buildResponsesImagePayload(webp) error = %v", err)
+	}
+	var webpBody map[string]any
+	if err := json.Unmarshal(webpPayload, &webpBody); err != nil {
+		t.Fatalf("Unmarshal(webp) error = %v", err)
+	}
+	webpTools := webpBody["tools"].([]any)
+	webpTool := webpTools[0].(map[string]any)
+	if _, ok := webpTool["output_compression"]; ok {
+		t.Fatalf("webp tool should not include output_compression: %#v", webpTool)
+	}
+}
+
+func TestShouldTreatOfficialImageEventAsFinalText(t *testing.T) {
+	toolFalse := false
+	toolTrue := true
+	tests := []struct {
+		name  string
+		event ResponsesImageEvent
+		want  bool
+	}{
+		{name: "blocked text", event: ResponsesImageEvent{Text: "blocked", Blocked: true}, want: true},
+		{name: "explicit no tool", event: ResponsesImageEvent{Text: "denied", ToolInvoked: &toolFalse, TurnUseCase: "multimodal"}, want: true},
+		{name: "text use case", event: ResponsesImageEvent{Text: "plain text", ToolInvoked: &toolTrue, TurnUseCase: "text"}, want: true},
+		{name: "queued notice still pending", event: ResponsesImageEvent{Text: "正在处理图片", ToolInvoked: nil, TurnUseCase: ""}, want: false},
+		{name: "image result present", event: ResponsesImageEvent{Text: "ignored", Result: "b64"}, want: false},
+		{name: "empty text", event: ResponsesImageEvent{Text: "", ToolInvoked: &toolFalse}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldTreatOfficialImageEventAsFinalText(tt.event); got != tt.want {
+				t.Fatalf("shouldTreatOfficialImageEventAsFinalText(%#v) = %v, want %v", tt.event, got, tt.want)
+			}
+		})
 	}
 }
 

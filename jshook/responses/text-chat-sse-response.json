@@ -1,0 +1,372 @@
+[
+  {
+    "type": "resume_conversation_token",
+    "kind": "topic",
+    "token": "REDACTED_CONDUIT_JWT",
+    "conversation_id": "REDACTED"
+  },
+  {
+    "message": {
+      "id": "494ea313-52a0-4848-97b4-5f8a6acdf9c6",
+      "author": {
+        "role": "system",
+        "name": null,
+        "metadata": {}
+      },
+      "create_time": null,
+      "update_time": null,
+      "content": {
+        "content_type": "text",
+        "parts": [
+          ""
+        ]
+      },
+      "status": "finished_successfully",
+      "end_turn": true,
+      "weight": 0.0,
+      "metadata": {
+        "model_switcher_deny": [],
+        "is_visually_hidden_from_conversation": true
+      },
+      "recipient": "all",
+      "channel": null
+    },
+    "conversation_id": "REDACTED",
+    "error": null,
+    "error_code": null
+  },
+  {
+    "message": {
+      "id": "bf104515-d84a-47a9-b54e-b3066690681c",
+      "author": {
+        "role": "system",
+        "name": null,
+        "metadata": {}
+      },
+      "create_time": null,
+      "update_time": null,
+      "content": {
+        "content_type": "text",
+        "parts": [
+          ""
+        ]
+      },
+      "status": "finished_successfully",
+      "end_turn": true,
+      "weight": 0.0,
+      "metadata": {
+        "rebase_developer_message": true,
+        "model_switcher_deny": [],
+        "is_visually_hidden_from_conversation": true
+      },
+      "recipient": "all",
+      "channel": null
+    },
+    "conversation_id": "REDACTED",
+    "error": null,
+    "error_code": null
+  },
+  {
+    "message": {
+      "id": "48653900-2364-4fc8-9753-b7ecf6d65fdf",
+      "author": {
+        "role": "user",
+        "name": null,
+        "metadata": {}
+      },
+      "create_time": 1778123679.1409001,
+      "update_time": null,
+      "content": {
+        "content_type": "text",
+        "parts": [
+          "Hello, just say 'hi' back"
+        ]
+      },
+      "status": "finished_successfully",
+      "end_turn": null,
+      "weight": 1.0,
+      "metadata": {
+        "request_id": "a157e3ac-8c0d-4451-baf8-b6e7e353977d",
+        "message_source": null,
+        "turn_exchange_id": "ef90a81a-8dc5-4d1f-b35d-fb6f6adecaae",
+        "resolved_model_slug": "i-5-mini-m",
+        "model_switcher_deny": []
+      },
+      "recipient": "all",
+      "channel": null
+    },
+    "conversation_id": "REDACTED",
+    "error": null,
+    "error_code": null
+  },
+  {
+    "type": "input_message",
+    "input_message": {
+      "id": "48653900-2364-4fc8-9753-b7ecf6d65fdf",
+      "author": {
+        "role": "user",
+        "name": null,
+        "metadata": {}
+      },
+      "create_time": 1778123679.1409001,
+      "update_time": null,
+      "content": {
+        "content_type": "text",
+        "parts": [
+          "Hello, just say 'hi' back"
+        ]
+      },
+      "status": "finished_successfully",
+      "end_turn": null,
+      "weight": 1.0,
+      "metadata": {
+        "request_id": "a157e3ac-8c0d-4451-baf8-b6e7e353977d",
+        "message_source": null,
+        "turn_exchange_id": "ef90a81a-8dc5-4d1f-b35d-fb6f6adecaae",
+        "turn_trace_id": "63bc71e1-a8c1-4189-8312-8007436ab66f",
+        "useragent": {
+          "client_type": "web",
+          "is_mobile": false,
+          "is_mobile_app": false,
+          "is_desktop_app": false,
+          "is_native_app": false,
+          "is_native_app_apple": false,
+          "is_mobile_app_ios": false,
+          "is_desktop_app_macos": false,
+          "is_aura_app_macos": false,
+          "is_aura_web": false,
+          "is_sora_ios": false,
+          "is_agora_ios": false,
+          "is_agora_android": false,
+          "is_desktop_app_windows": false,
+          "is_electron_app": false,
+          "is_mobile_app_android": false,
+          "is_mobile_web": false,
+          "is_mobile_web_ios": false,
+          "is_mobile_web_android": false,
+          "is_ios": false,
+          "is_android": false,
+          "is_macos": false,
+          "is_windows": true,
+          "is_linux": false,
+          "is_chatgpt_client": false,
+          "is_moshi_client": false,
+          "is_sora_client": false,
+          "is_agora_client": false,
+          "is_browserbased_app": true,
+          "is_chatgpt_api": false,
+          "is_slack": false,
+          "is_chatkit_web": false,
+          "is_chatkit_synthetic": false,
+          "is_kakao_talk": false,
+          "is_codex_desktop": false,
+          "is_offline_caching": false,
+          "app_version": null,
+          "build_number": null,
+          "user_agent": "mozilla/5.0 (windows nt 10.0; win64; x64) applewebkit/537.36 (khtml, like gecko) chrome/143.0.0.0 safari/537.36 edg/143.0.0.0",
+          "app_environment": null,
+          "os_version": null,
+          "device_model": null,
+          "user_client_type": "desktop_web"
+        },
+        "paragen_stream_type": "default",
+        "resolved_model_slug": "i-5-mini-m",
+        "parent_id": "bf104515-d84a-47a9-b54e-b3066690681c"
+      },
+      "recipient": "all",
+      "channel": null
+    },
+    "conversation_id": "REDACTED"
+  },
+  {
+    "message": {
+      "id": "78b4b63c-7019-473d-8aeb-b87baf5117ef",
+      "author": {
+        "role": "assistant",
+        "name": null,
+        "metadata": {}
+      },
+      "create_time": 1778123680.3946254,
+      "update_time": null,
+      "content": {
+        "content_type": "model_editable_context",
+        "model_set_context": "",
+        "repository": null,
+        "repo_summary": null,
+        "structured_context": null
+      },
+      "status": "finished_successfully",
+      "end_turn": null,
+      "weight": 1.0,
+      "metadata": {
+        "search_result_groups": [],
+        "request_id": "a157e3ac-8c0d-4451-baf8-b6e7e353977d",
+        "message_type": "next",
+        "turn_exchange_id": "ef90a81a-8dc5-4d1f-b35d-fb6f6adecaae",
+        "model_slug": "gpt-5-5",
+        "default_model_slug": "auto",
+        "can_save": false,
+        "parent_id": "48653900-2364-4fc8-9753-b7ecf6d65fdf",
+        "model_switcher_deny": []
+      },
+      "recipient": "all",
+      "channel": null
+    },
+    "conversation_id": "REDACTED",
+    "error": null,
+    "error_code": null
+  },
+  {
+    "message": {
+      "id": "f2ff4c8b-e16b-4b01-989c-78b66143bb70",
+      "author": {
+        "role": "assistant",
+        "name": null,
+        "metadata": {}
+      },
+      "create_time": 1778123680.411785,
+      "update_time": null,
+      "content": {
+        "content_type": "text",
+        "parts": [
+          ""
+        ]
+      },
+      "status": "in_progress",
+      "end_turn": null,
+      "weight": 1.0,
+      "metadata": {
+        "citations": [],
+        "content_references": [],
+        "story_events": [],
+        "resolved_model_slug": "i-5-mini-m",
+        "request_id": "a157e3ac-8c0d-4451-baf8-b6e7e353977d",
+        "message_type": "next",
+        "turn_exchange_id": "ef90a81a-8dc5-4d1f-b35d-fb6f6adecaae",
+        "model_slug": "gpt-5-5",
+        "default_model_slug": "auto",
+        "parent_id": "78b4b63c-7019-473d-8aeb-b87baf5117ef",
+        "model_switcher_deny": []
+      },
+      "recipient": "all",
+      "channel": null
+    },
+    "conversation_id": "REDACTED",
+    "error": null,
+    "error_code": null
+  },
+  {
+    "type": "message_marker",
+    "conversation_id": "REDACTED",
+    "message_id": "f2ff4c8b-e16b-4b01-989c-78b66143bb70",
+    "marker": "user_visible_token",
+    "event": "first"
+  },
+  {
+    "message": {
+      "id": "f2ff4c8b-e16b-4b01-989c-78b66143bb70",
+      "author": {
+        "role": "assistant",
+        "name": null,
+        "metadata": {}
+      },
+      "create_time": 1778123680.411785,
+      "update_time": null,
+      "content": {
+        "content_type": "text",
+        "parts": [
+          "Hi! 👋"
+        ]
+      },
+      "status": "finished_successfully",
+      "end_turn": true,
+      "weight": 1.0,
+      "metadata": {
+        "finish_details": {
+          "type": "stop",
+          "stop_tokens": [
+            200002
+          ]
+        },
+        "is_complete": true,
+        "citations": [],
+        "content_references": [],
+        "story_events": [],
+        "resolved_model_slug": "i-5-mini-m",
+        "search_result_groups": [],
+        "request_id": "a157e3ac-8c0d-4451-baf8-b6e7e353977d",
+        "message_type": "next",
+        "turn_exchange_id": "ef90a81a-8dc5-4d1f-b35d-fb6f6adecaae",
+        "model_slug": "gpt-5-5",
+        "default_model_slug": "auto",
+        "can_save": true,
+        "parent_id": "78b4b63c-7019-473d-8aeb-b87baf5117ef",
+        "model_switcher_deny": []
+      },
+      "recipient": "all",
+      "channel": null
+    },
+    "conversation_id": "REDACTED",
+    "error": null,
+    "error_code": null
+  },
+  {
+    "type": "message_marker",
+    "conversation_id": "REDACTED",
+    "message_id": "f2ff4c8b-e16b-4b01-989c-78b66143bb70",
+    "marker": "last_token",
+    "event": "last"
+  },
+  {
+    "type": "title_generation",
+    "title": "Hi Response",
+    "conversation_id": "REDACTED"
+  },
+  {
+    "type": "server_ste_metadata",
+    "metadata": {
+      "conduit_prewarmed": false,
+      "plan_type": "plus",
+      "plan_type_bucket": "paid",
+      "user_agent": "web_desktop",
+      "service": null,
+      "tool_name": null,
+      "tool_invoked": false,
+      "fast_convo": true,
+      "warmup_state": "new",
+      "is_first_turn": true,
+      "cluster_region": "newzealandnorth",
+      "model_slug": "i-5-mini-m",
+      "region": null,
+      "is_multimodal": null,
+      "did_auto_switch_to_reasoning": false,
+      "auto_switcher_race_winner": null,
+      "is_autoswitcher_enabled": false,
+      "is_search": null,
+      "did_prompt_contain_image": false,
+      "search_tool_call_count": null,
+      "search_tool_query_types": null,
+      "message_id": "48653900-2364-4fc8-9753-b7ecf6d65fdf",
+      "request_id": "a157e3ac-8c0d-4451-baf8-b6e7e353977d",
+      "turn_exchange_id": "ef90a81a-8dc5-4d1f-b35d-fb6f6adecaae",
+      "turn_trace_id": "63bc71e1-a8c1-4189-8312-8007436ab66f",
+      "a32e6ebcb": 1,
+      "resume_with_websockets": true,
+      "low_turn_topic_ttl": false,
+      "streaming_async_status": false,
+      "replace_stream_status": true,
+      "temporal_conversation_turn": false,
+      "pro_mode_turn_topic_streaming": true,
+      "turn_use_case": "text",
+      "turn_mode": "default"
+    },
+    "conversation_id": "REDACTED"
+  },
+  {
+    "type": "message_stream_complete",
+    "conversation_id": "REDACTED"
+  },
+  {
+    "type": "done"
+  }
+]

@@ -7,7 +7,7 @@ import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
 import type { ImagePromptPreset } from "@/app/image/image-presets";
 import { formatImageSizeDisplay, getImageSizeRequirementLabel, isHighResolutionImageSize } from "@/app/image/image-options";
-import { IMAGE_MODEL_ROUTE_DETAILS } from "@/lib/api";
+import { IMAGE_MODEL_ROUTE_DETAILS, supportsImageOutputCompression } from "@/lib/api";
 import type { ImageVisibility } from "@/lib/api";
 import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
 import { formatBase64ImageFileSize, formatImageFileSize } from "@/lib/image-size";
@@ -18,6 +18,8 @@ import { imageTurnStartedAtTimestamp, type ImageTurnProgress } from "@/store/ima
 export type ImageLightboxItem = {
   id: string;
   src: string;
+  fileName?: string;
+  outputFormat?: string;
   sizeLabel?: string;
   dimensions?: string;
 };
@@ -150,14 +152,30 @@ function blurFocusedElementInContainer(container: HTMLElement) {
   }
 }
 
-function imageExtension(outputFormat?: string) {
-  return outputFormat === "jpeg" ? "jpg" : outputFormat || "png";
+function imageExtensionFromSrc(src?: string) {
+  const dataUrlFormat = src?.match(/^data:image\/([^;,]+)/i)?.[1];
+  const urlFormat = src?.split(/[?#]/, 1)[0]?.match(/\.([a-z0-9]+)$/i)?.[1];
+  const format = String(dataUrlFormat || urlFormat || "").toLowerCase();
+  if (format === "jpg" || format === "jpeg") {
+    return "jpg";
+  }
+  if (format === "png" || format === "webp") {
+    return format;
+  }
+  return "";
 }
 
-function buildDownloadName(createdAt: string, turnId: string, index: number, outputFormat?: string) {
+function imageExtension(outputFormat?: string, src?: string) {
+  if (outputFormat === "jpeg") {
+    return "jpg";
+  }
+  return outputFormat || imageExtensionFromSrc(src) || "png";
+}
+
+function buildDownloadName(createdAt: string, turnId: string, index: number, outputFormat?: string, src?: string) {
   const date = new Date(createdAt);
   const safeIndex = String(index + 1).padStart(2, "0");
-  const extension = imageExtension(outputFormat);
+  const extension = imageExtension(outputFormat, src);
   if (Number.isNaN(date.getTime())) {
     return `chatgpt-image-${turnId.slice(0, 8)}-${safeIndex}.${extension}`;
   }
@@ -364,6 +382,7 @@ export function ImageResults({
         const referenceLightboxImages = turn.referenceImages.map((image, index) => ({
           id: `${turn.id}-reference-${index}`,
           src: image.dataUrl,
+          fileName: image.name,
         }));
         const downloadableImages = turn.images.flatMap((image, index) => {
           const src = image.status === "success" ? getStoredImageSrc(image) : "";
@@ -373,20 +392,22 @@ export function ImageResults({
                   id: image.id,
                   selectionKey: imageSelectionKey(selectedConversation.id, turn.id, image.id),
                   src,
-                  fileName: buildDownloadName(turn.createdAt, turn.id, index, image.outputFormat || turn.outputFormat),
+                  fileName: buildDownloadName(turn.createdAt, turn.id, index, image.outputFormat || turn.outputFormat, src),
                   imageIndex: index,
                 },
               ]
             : [];
         });
         const selectedDownloadableImages = downloadableImages.filter((image) => selectedImageIds[image.selectionKey]);
-        const successfulTurnImages = turn.images.flatMap((image) => {
+        const successfulTurnImages = turn.images.flatMap((image, index) => {
           const src = image.status === "success" ? getStoredImageSrc(image) : "";
           return src
             ? [
                 {
                   id: image.id,
                   src,
+                  fileName: buildDownloadName(turn.createdAt, turn.id, index, image.outputFormat || turn.outputFormat, src),
+                  outputFormat: image.outputFormat || turn.outputFormat,
                   sizeLabel: image.b64_json ? formatBase64ImageFileSize(image.b64_json) : imageSizeLabels[image.id],
                   dimensions: imageDimensions[image.id],
                 },
@@ -578,7 +599,7 @@ export function ImageResults({
                       {turn.outputFormat ? (
                         <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{turn.outputFormat.toUpperCase()}</span>
                       ) : null}
-                      {turn.outputCompression != null && turn.outputFormat && turn.outputFormat !== "png" ? (
+                      {turn.outputCompression != null && turn.outputFormat && supportsImageOutputCompression(turn.outputFormat) ? (
                         <span className="rounded-full bg-[#f0f0f0] px-3 py-1">压缩 {turn.outputCompression}</span>
                       ) : null}
                       {outcomeLabel ? <span className="rounded-full bg-[#f0f0f0] px-3 py-1">{outcomeLabel}</span> : null}

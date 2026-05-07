@@ -1,0 +1,317 @@
+[
+  {
+    "parsed": "v1"
+  },
+  {
+    "type": "resume_conversation_token",
+    "kind": "topic",
+    "token": "REDACTED_CONDUIT_JWT",
+    "conversation_id": "REDACTED"
+  },
+  {
+    "p": "",
+    "o": "add",
+    "v": {
+      "message": {
+        "id": "00d8264e-d805-4b34-adab-139f1487565d",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1778122863.2396352,
+        "update_time": null,
+        "content": {
+          "content_type": "model_editable_context",
+          "model_set_context": "",
+          "repository": null,
+          "repo_summary": null,
+          "structured_context": null
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "search_result_groups": [],
+          "parent_id": "ac9dcaf1-7e12-4641-b437-ac7d80d44b07",
+          "turn_exchange_id": "e4384a4c-d60a-426b-9c5c-0779e15af0af"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "conversation_id": "REDACTED",
+      "error": null,
+      "error_code": null
+    },
+    "c": 0
+  },
+  {
+    "v": {
+      "message": {
+        "id": "14e31c72-aa41-4193-9e07-bd79e8a47057",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1778122863.431463,
+        "update_time": null,
+        "content": {
+          "content_type": "code",
+          "language": "python3",
+          "response_format_name": null,
+          "text": "{\"skipped_mainline\":true}"
+        },
+        "status": "in_progress",
+        "end_turn": false,
+        "weight": 1.0,
+        "metadata": {
+          "parent_id": "00d8264e-d805-4b34-adab-139f1487565d",
+          "turn_exchange_id": "e4384a4c-d60a-426b-9c5c-0779e15af0af"
+        },
+        "recipient": "t2uay3k.sj1i4kz",
+        "channel": null
+      },
+      "conversation_id": "REDACTED",
+      "error": null,
+      "error_code": null
+    },
+    "c": 1
+  },
+  {
+    "p": "/message/status",
+    "o": "replace",
+    "v": "finished_successfully"
+  },
+  {
+    "type": "title_generation",
+    "title": "Zen Garden Visualization",
+    "conversation_id": "REDACTED"
+  },
+  {
+    "type": "message_marker",
+    "conversation_id": "REDACTED",
+    "message_id": "b748516b-91b3-42fa-9e9a-637e8827cc15",
+    "marker": "user_visible_token",
+    "event": "first"
+  },
+  {
+    "p": "",
+    "o": "add",
+    "v": {
+      "message": {
+        "id": "b748516b-91b3-42fa-9e9a-637e8827cc15",
+        "author": {
+          "role": "tool",
+          "name": "t2uay3k.sj1i4kz",
+          "metadata": {}
+        },
+        "create_time": 1778122885.904705,
+        "update_time": null,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "image_asset_pointer",
+              "asset_pointer": "sediment://file_00000000bc987209adba1c148413e076",
+              "size_bytes": 3541231,
+              "width": 1536,
+              "height": 1024,
+              "fovea": null,
+              "metadata": {
+                "dalle": {
+                  "gen_id": "67127a38-fbcc-4c47-8cc9-293b1d550815",
+                  "prompt": "",
+                  "seed": null,
+                  "parent_gen_id": null,
+                  "edit_op": null,
+                  "serialization_title": "DALL-E generation metadata"
+                },
+                "gizmo": null,
+                "generation": {
+                  "gen_id": "67127a38-fbcc-4c47-8cc9-293b1d550815",
+                  "gen_size": "smimage",
+                  "gen_size_v2": "16",
+                  "seed": null,
+                  "parent_gen_id": null,
+                  "height": 1024,
+                  "width": 1536,
+                  "transparent_background": false,
+                  "serialization_title": "Image Generation metadata",
+                  "orientation": "landscape"
+                },
+                "container_pixel_height": 1024,
+                "container_pixel_width": 1536,
+                "emu_omit_glimpse_image": null,
+                "emu_patches_override": null,
+                "lpe_keep_patch_ijhw": null,
+                "lpe_delta_encoding_channel": null,
+                "sanitized": false,
+                "asset_pointer_link": null,
+                "watermarked_asset_pointer": null,
+                "is_no_auth_placeholder": null
+              }
+            }
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 0.0,
+        "metadata": {
+          "image_gen_title": "樱花庭院的宁静时刻",
+          "turn_exchange_id": "e4384a4c-d60a-426b-9c5c-0779e15af0af",
+          "parent_id": "14e31c72-aa41-4193-9e07-bd79e8a47057"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "conversation_id": "REDACTED",
+      "error": null,
+      "error_code": null
+    },
+    "c": 2
+  },
+  {
+    "v": {
+      "message": {
+        "id": "e9e7cedd-73dc-417b-9d46-fa04ee31b2c9",
+        "author": {
+          "role": "tool",
+          "name": "t2uay3k.sj1i4kz",
+          "metadata": {}
+        },
+        "create_time": 1778122885.91177,
+        "update_time": null,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "You are responding immediately after an image generation result.\n\nWrite 1–2 short sentences.\n\nSentence 1:\nBriefly describe the image in a warm, natural, understated way.\n\nSentence 2:\nAsk ONE small, specific question only if it lead to a more personalized version of this image (not a new direction).\n\nA good question:\n- asks one small, specific detail about the user that would tailor the image to their style, vibe, and interests\n- is easy to answer in a few words.\n\nDo not:\n- ask for multiple details\n- give options\n- ask generic or abstract questions\n- ask for sensitive personal info or identity information\n- suggest a new scene or concept\n\nWhen the user replies, treat their answer as instructions to edit this image."
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": false,
+        "weight": 1.0,
+        "metadata": {
+          "parent_id": "b748516b-91b3-42fa-9e9a-637e8827cc15",
+          "turn_exchange_id": "e4384a4c-d60a-426b-9c5c-0779e15af0af"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "conversation_id": "REDACTED",
+      "error": null,
+      "error_code": null
+    },
+    "c": 3
+  },
+  {
+    "type": "message_marker",
+    "conversation_id": "REDACTED",
+    "message_id": "e64d05e6-6040-42b6-9ba6-77266a4ea419",
+    "marker": "final_channel_token",
+    "event": "first"
+  },
+  {
+    "v": {
+      "message": {
+        "id": "e64d05e6-6040-42b6-9ba6-77266a4ea419",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1778122885.901095,
+        "update_time": null,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "This image captures a peaceful Japanese zen garden at golden hour, with cherry blossoms gently drifting over a raked gravel and stone landscape.  \n\nWould you like the pond to have a stronger reflection of the blossoms for a more dreamy effect?"
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 1.0,
+        "metadata": {
+          "finish_details": {
+            "type": "stop",
+            "stop_tokens": [
+              200002
+            ]
+          },
+          "is_complete": true,
+          "citations": [],
+          "content_references": [],
+          "story_events": [],
+          "resolved_model_slug": "i-5-mini-m",
+          "parent_id": "e9e7cedd-73dc-417b-9d46-fa04ee31b2c9",
+          "turn_exchange_id": "e4384a4c-d60a-426b-9c5c-0779e15af0af"
+        },
+        "recipient": "all",
+        "channel": "final"
+      },
+      "conversation_id": "REDACTED",
+      "error": null,
+      "error_code": null
+    },
+    "c": 4
+  },
+  {
+    "type": "message_marker",
+    "conversation_id": "REDACTED",
+    "message_id": "e64d05e6-6040-42b6-9ba6-77266a4ea419",
+    "marker": "last_token",
+    "event": "last"
+  },
+  {
+    "type": "title_generation",
+    "title": "Zen Garden Imagery",
+    "conversation_id": "REDACTED"
+  },
+  {
+    "type": "server_ste_metadata",
+    "metadata": {
+      "conduit_prewarmed": false,
+      "plan_type": "plus",
+      "plan_type_bucket": "paid",
+      "user_agent": "web_desktop",
+      "service": null,
+      "tool_name": null,
+      "tool_invoked": false,
+      "fast_convo": true,
+      "warmup_state": "rewarm",
+      "is_first_turn": null,
+      "cluster_region": "japanwest",
+      "model_slug": "i-5-mini-m",
+      "region": null,
+      "is_multimodal": null,
+      "did_auto_switch_to_reasoning": false,
+      "auto_switcher_race_winner": null,
+      "is_autoswitcher_enabled": false,
+      "is_search": null,
+      "did_prompt_contain_image": false,
+      "search_tool_call_count": null,
+      "search_tool_query_types": null,
+      "message_id": "00d8264e-d805-4b34-adab-139f1487565d",
+      "request_id": "007e93cc-b937-4567-9aaf-0195681e0ddd",
+      "turn_exchange_id": "e4384a4c-d60a-426b-9c5c-0779e15af0af",
+      "turn_trace_id": null,
+      "a32e6ebcb": null,
+      "resume_with_websockets": true,
+      "low_turn_topic_ttl": false,
+      "streaming_async_status": false,
+      "replace_stream_status": true,
+      "temporal_conversation_turn": false,
+      "pro_mode_turn_topic_streaming": true,
+      "turn_use_case": "image gen",
+      "turn_mode": "default"
+    },
+    "conversation_id": "REDACTED"
+  },
+  {
+    "type": "message_stream_complete",
+    "conversation_id": "REDACTED"
+  },
+  {
+    "raw": "[DONE]"
+  }
+]

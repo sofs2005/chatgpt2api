@@ -46,15 +46,15 @@ export const IMAGE_MODEL_ROUTE_DETAILS: Partial<Record<
 >> = {
   auto: {
     routeLabel: "官方图片工具",
-    description: "默认等价 gpt-image-2，不向上游透传工具模型。",
+    description: "默认等价 gpt-image-2；比例只作为提示词构图偏好，实际像素由官方返回决定。",
   },
   "gpt-image-2": {
     routeLabel: "官方图片工具",
-    description: "走 Responses image_generation tool 语义。",
+    description: "走官方 f/conversation 图片链路；尺寸只作为构图偏好，格式由后端保存结果时处理。",
   },
   "codex-gpt-image-2": {
     routeLabel: "Codex 链路",
-    description: "使用 Codex TUI 请求头访问 Responses image_generation tool 语义。",
+    description: "走 Codex Responses 图片接口；尺寸、格式和 JPEG 压缩率交给上游工具处理，需要 Plus / Team / Pro 账号。",
   },
 };
 
@@ -74,8 +74,24 @@ export function isChatModel(value: unknown): value is ImageModel {
   return isImageModel(value) && CHAT_MODEL_VALUES.has(value);
 }
 
-export function supportsImageQuality(model: ImageModel) {
-  return model !== CODEX_IMAGE_MODEL;
+export function usesOfficialImageRoute(model: ImageModel) {
+  return model === "auto" || model === "gpt-image-2";
+}
+
+export function usesCodexImageRoute(model: ImageModel) {
+  return model === CODEX_IMAGE_MODEL;
+}
+
+export function supportsStructuredImageParameters(model: ImageModel) {
+  return usesCodexImageRoute(model);
+}
+
+export function supportsImageOutputControls(model: ImageModel) {
+  return usesOfficialImageRoute(model) || usesCodexImageRoute(model);
+}
+
+export function supportsImageQuality(_model: ImageModel) {
+  return false;
 }
 
 export type ImageQuality = "low" | "medium" | "high";
@@ -97,6 +113,10 @@ export function isImageQuality(value: unknown): value is ImageQuality {
 
 export function isImageOutputFormat(value: unknown): value is ImageOutputFormat {
   return typeof value === "string" && IMAGE_OUTPUT_FORMAT_VALUES.has(value);
+}
+
+export function supportsImageOutputCompression(format: ImageOutputFormat) {
+  return format === "jpeg";
 }
 
 export type AuthRole = "admin" | "user";

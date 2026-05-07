@@ -859,8 +859,7 @@ func IsAccountInvalidErrorMessage(message string) bool {
 	return strings.Contains(text, "token_invalidated") ||
 		strings.Contains(text, "token_revoked") ||
 		strings.Contains(text, "authentication token has been invalidated") ||
-		strings.Contains(text, "invalidated oauth token") ||
-		hasAccountHTTPStatus(text, http.StatusUnauthorized)
+		strings.Contains(text, "invalidated oauth token")
 }
 
 func IsAccountRateLimitedErrorMessage(message string) bool {
@@ -868,12 +867,7 @@ func IsAccountRateLimitedErrorMessage(message string) bool {
 	if text == "" || isBootstrapErrorMessage(text) {
 		return false
 	}
-	if hasAccountHTTPStatus(text, http.StatusTooManyRequests) ||
-		strings.Contains(text, "rate_limit") ||
-		strings.Contains(text, "rate limit") ||
-		strings.Contains(text, "too many requests") ||
-		strings.Contains(text, "too_many_requests") ||
-		strings.Contains(text, "insufficient_quota") ||
+	if strings.Contains(text, "insufficient_quota") ||
 		strings.Contains(text, "limit reached") ||
 		strings.Contains(text, "usage limit") ||
 		strings.Contains(text, "image generation limit") ||
@@ -1126,24 +1120,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func hasHTTPStatus(message string, status int) bool {
-	code := fmt.Sprint(status)
-	return strings.Contains(message, "http "+code) ||
-		strings.Contains(message, "status="+code) ||
-		strings.Contains(message, "status: "+code) ||
-		strings.Contains(message, `"status":`+code)
-}
-
-func hasAccountHTTPStatus(message string, status int) bool {
-	if !hasHTTPStatus(message, status) {
-		return false
-	}
-	return strings.Contains(message, "/backend-api/") ||
-		strings.Contains(message, "auth_chat_requirements") ||
-		strings.Contains(message, "authorization") ||
-		strings.Contains(message, "token")
 }
 
 func isBootstrapErrorMessage(message string) bool {

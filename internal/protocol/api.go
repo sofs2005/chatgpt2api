@@ -42,7 +42,7 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
-	if hasOutputCompression {
+	if hasOutputCompression && SupportsImageOutputCompression(outputFormat) {
 		request.OutputCompression = &outputCompression
 	}
 	applyImageToolOptionsToRequest(&request, ImageToolOptionsFromPayload(body))
@@ -84,8 +84,10 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		request.PartialImages = &partialImages
 	}
 	applyImageToolOptionsToRequest(&request, ImageToolOptionsFromPayload(body))
-	if compression, ok := normalizedImageOutputCompression(body["output_compression"]); ok {
-		request.OutputCompression = &compression
+	if SupportsImageOutputCompression(request.OutputFormat) {
+		if compression, ok := normalizedImageOutputCompression(body["output_compression"]); ok {
+			request.OutputCompression = &compression
+		}
 	}
 	request = request.Normalized()
 	outputs, errCh := e.StreamImageOutputsWithPool(ctx, request)
@@ -605,7 +607,7 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 	if hasPartialImages {
 		request.PartialImages = &partialImages
 	}
-	if outputFormat != "png" {
+	if SupportsImageOutputCompression(outputFormat) {
 		if compression, ok := normalizedImageOutputCompression(firstNonNil(tool["output_compression"], body["output_compression"])); ok {
 			request.OutputCompression = &compression
 		}

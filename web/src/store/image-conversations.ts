@@ -10,6 +10,7 @@ import {
   isImageModel,
   isImageOutputFormat,
   isImageQuality,
+  supportsImageOutputCompression,
   type ImageModel,
   type ImageOutputFormat,
   type ImageQuality,
@@ -296,7 +297,10 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     ...(sizeSelection ? { sizeSelection } : {}),
     quality: isImageQuality(turn.quality) ? turn.quality : undefined,
     outputFormat: isImageOutputFormat(turn.outputFormat) ? turn.outputFormat : undefined,
-    outputCompression: normalizeOutputCompression(turn.outputCompression),
+    outputCompression:
+      isImageOutputFormat(turn.outputFormat) && supportsImageOutputCompression(turn.outputFormat)
+        ? normalizeOutputCompression(turn.outputCompression)
+        : undefined,
     visibility,
     images,
     createdAt: String(turn.createdAt || new Date().toISOString()),

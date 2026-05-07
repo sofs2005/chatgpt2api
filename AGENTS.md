@@ -7,7 +7,7 @@ Write for the current API version only. Do not add fallbacks, shims, feature fla
 
 ## Project Structure & Module Organization
 
-This repository is a Go backend with a Vite/React admin UI. The backend entry point is `cmd/chatgpt2api/main.go`; implementation packages live under `internal/` (`httpapi`, `service`, `protocol`, `backend`, `storage`, `config`, and helpers). Frontend source is in `web/src/`, with pages under `web/src/app/`, shared UI in `web/src/components/`, API helpers in `web/src/lib/`, and stores in `web/src/store/`. Screenshots are in `assets/`; operational notes are in `docs/`.
+This repository is a Go backend with a Vite/React admin UI. The backend entry point is `cmd/chatgpt2api/main.go`; implementation packages live under `internal/` (`httpapi`, `service`, `protocol`, `backend`, `storage`, `config`, and helpers). Frontend source is in `web/src/`, with pages under `web/src/app/`, shared UI in `web/src/components/`, API helpers in `web/src/lib/`, and stores in `web/src/store/`. Screenshots are in `assets/`. ChatGPT web reverse-engineering notes live in `jshook/docs/`, with validation scripts and sanitized response samples under `jshook/`.
 
 ## Build, Test, and Development Commands
 
@@ -30,6 +30,14 @@ Admin async creation-task routes use `/api/creation-tasks` as the resource root.
 ## Design Guidelines
 
 For frontend UI and visual design work, consult `DESIGN.md` for the project design system and apply those rules unless the user explicitly requests a different direction.
+
+## jshook Reverse-Engineering Notes
+
+Use `jshook/README.md` as the index for ChatGPT web protocol research. Keep endpoint inventories, content-type mappings, request-flow notes, internal codename mappings, and authenticated API schema notes in `jshook/docs/*.md` rather than duplicating them elsewhere.
+
+Use jshook MCP (Chrome CDP + JS Hook + Network Interception) when fresh browser evidence is needed for ChatGPT web behavior, especially request construction, SSE event shape, frontend function mapping, Statsig gates, PoW/sentinel requirements, and image-generation flows. Treat upstream ChatGPT behavior as time-sensitive: verify with a fresh capture or script run before changing backend protocol code based on these notes.
+
+Keep validation scripts in `jshook/scripts/` and raw or reduced response artifacts in `jshook/responses/`. Do not commit live OAuth tokens, cookies, account identifiers, proxy credentials, private prompts, or reusable CDN/download URLs; redact or regenerate fixtures before saving them. jshook scripts may require authenticated local state and external network access, so they are not part of the default `go test ./...` or frontend build verification unless a task explicitly targets those flows.
 
 ## Testing Guidelines
 

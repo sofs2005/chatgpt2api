@@ -18,6 +18,7 @@
 
 ## 目录
 
+- [快速入口](#快速入口)
 - [项目能力](#项目能力)
 - [快速部署](#快速部署)
 - [升级与在线更新](#升级与在线更新)
@@ -26,8 +27,19 @@
 - [发布流程](#发布流程)
 - [API 接入](#api-接入)
 - [截图](#截图)
-- [规划与状态](#规划与状态)
+- [技术研究文档](#技术研究文档)
 - [社区与鸣谢](#社区与鸣谢)
+
+## 快速入口
+
+| 目标 | 入口 |
+| --- | --- |
+| 立即部署服务 | [快速部署](#快速部署) |
+| 配置管理员、代理、并发、存储 | [配置说明](#配置说明) |
+| 创建 API Token 并调用接口 | [API 接入](#api-接入) |
+| 本地改代码和验证构建 | [本地开发](#本地开发) |
+| 升级 Docker 镜像或 Release 二进制 | [升级与在线更新](#升级与在线更新) |
+| ChatGPT 官网生图协议研究 | [技术研究文档](#技术研究文档) / [jshook 索引](./jshook/README.md) |
 
 ## 项目能力
 
@@ -279,7 +291,7 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 | `CHATGPT2API_PROXY` | 空 | 全局代理，支持 `http`、`https`、`socks5`、`socks5h` |
 | `CHATGPT2API_UPDATE_PROXY_URL` | 空 | 检查更新访问 DockerHub / Release API 的代理；为空时复用全局代理 |
 | `CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE` | `5` | 限流账号检查间隔，单位分钟 |
-| `CHATGPT2API_IMAGE_CONCURRENT_LIMIT` | `4` | 全局同时生成图片任务数量 |
+| `CHATGPT2API_IMAGE_CONCURRENT_LIMIT` | `4` | 全局并发生成图片张数 |
 | `CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS` | `300` | 图片任务超时时间，单位秒 |
 | `CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT` | `0` | 普通用户默认并发限制，`0` 表示不限制 |
 | `CHATGPT2API_USER_DEFAULT_RPM_LIMIT` | `0` | 普通用户默认图片任务 RPM 限制，`0` 表示不限制 |
@@ -310,16 +322,7 @@ STORAGE_BACKEND=postgres
 DATABASE_URL=postgresql://user:password@host:5432/chatgpt2api
 ```
 
-JSON 文件存储迁移到 SQLite：
-
-```bash
-docker compose down
-python3 scripts/migrate-json-to-sqlite.py --data-dir ./data --db ./data/chatgpt2api.db
-# 编辑 .env：STORAGE_BACKEND=sqlite，DATABASE_URL=sqlite:////app/data/chatgpt2api.db
-docker compose up -d
-```
-
-迁移脚本会导入 `data` 下的 JSON 文件、账号和 auth key 数据。历史 `logs.jsonl` 不迁移，新日志会在 SQLite 后端启用后写入数据库。目标库已存在时，脚本会先生成同目录 `.bak-时间戳` 备份。
+新部署默认使用 SQLite，并自动创建 `data/chatgpt2api.db`。如果已有历史 JSON 部署，切换存储后端前请先备份 `data/`，再通过管理端导出号池 Token、切换 `STORAGE_BACKEND=sqlite`、重启服务并重新导入；本仓库当前不提供独立的 JSON 到 SQLite 离线迁移脚本。本地登录用户、角色、API 令牌和设置类 JSON 文档不会自动迁移，切换后需要重新初始化或手动重建。历史 `logs/events.jsonl` 不会自动写入 SQLite，新日志会在数据库后端启用后写入数据库。
 
 ### Linuxdo 登录
 
@@ -502,9 +505,9 @@ curl http://localhost:3000/v1/images/generations \
 | `n` | 生成数量，当前限制为 `1-4` |
 | `response_format` | 默认 `b64_json` |
 
-`gpt-image-2` 走官网图片链路，`codex-gpt-image-2` 走 Codex TUI 风格的 `/backend-api/codex/responses` 链路，`auto` 默认使用官网图片链路。`codex-gpt-image-2` 是本项目的路由别名，上游 payload 会映射为 Codex 可识别的 `tools[0].model=gpt-5.4-mini`。Free 账号不会被本地预先拦截；如果账号没有对应图片工具权限，上游可能直接返回失败。
+`gpt-image-2` 和 `auto` 走 ChatGPT 官网图片工作台的纯协议链路：当前按官网 HAR 实抓对齐到底层 `gpt-5-5` 模型，请求 `/backend-api/f/conversation` 建立 SSE，并从 `role=tool` 且 `async_task_type=image_gen` 的上游消息里提取图片结果。部分会话/续图场景里官网还会补发 `/backend-api/f/conversation/prepare` 获取 `conduit_token`，但不是每次首发生成前都显式出现。`codex-gpt-image-2` 仍保留为独立的 Codex 图片协议模型，继续走 `/backend-api/codex/responses` 路线，用于和官网图片额度区分。Free 账号不会被本地预先拦截；如果账号没有对应图片工具权限，上游可能直接返回失败。
 
-`size` 可以传 `auto`、比例值（如 `1:1`、`16:9`、`9:16`）、分辨率档位（`1080p`、`2k`、`4k`）或显式 `WIDTHxHEIGHT`。后端会在发送 Codex Responses 上游请求前转换为合法的 `WIDTHxHEIGHT` 工具尺寸，并保证边长是 16 的倍数、最长边不超过 3840、宽高比不超过 3:1。
+`size` 可以传 `auto`、比例值（如 `1:1`、`16:9`、`9:16`）、分辨率档位（`1080p`、`2k`、`4k`）或显式 `WIDTHxHEIGHT`。在纯协议工作台链路下，这些信息会作为上游提示词约束参与构图，不再转换为 Codex Responses 专用的工具尺寸字段。
 
 ### `POST /v1/images/edits`
 
@@ -526,7 +529,7 @@ curl http://localhost:3000/v1/images/edits \
 | `n` | 生成数量，当前限制为 `1-4` |
 | `image` | 参考图片，使用 multipart/form-data 上传 |
 
-图片编辑使用同一套模型路由：`gpt-image-2` 对应官网图片链路，`codex-gpt-image-2` 对应 Codex TUI 风格 Responses 链路。
+图片编辑同样按模型分流：`gpt-image-2`、`auto` 走官网图片工作台纯协议链路，`codex-gpt-image-2` 走独立的 Codex 图片协议链路。
 
 ### `POST /v1/chat/completions`
 
@@ -619,11 +622,21 @@ curl http://localhost:3000/v1/responses \
   </tr>
 </table>
 
-## 规划与状态
+## 技术研究文档
 
-- 当前推荐接入路径见上方 API 表格；实验性或历史功能状态以代码实现为准。
-- 更多功能状态见：[功能清单](./docs/feature-status.en.md)。
-- 上游 SSE 相关说明见：[upstream-sse-conversation](./docs/upstream-sse-conversation.md)。
+项目包含对 ChatGPT 官网生图链路的完整逆向分析，详见 `jshook/` 目录：
+
+| 文档 | 说明 |
+| --- | --- |
+| [jshook 总索引](./jshook/README.md) | 按任务、文档、脚本、响应样本组织的完整入口 |
+| [生图链路技术分析](./jshook/docs/ChatGPT-gpt-image-2-generation-pipeline-analysis.md) | 模型路由、Statsig 特性开关、画质控制、改图流程、内部代号等综合分析 |
+| [上游 SSE 协议分析](./jshook/docs/upstream-sse-conversation.md) | ChatGPT 官网 SSE 流式响应的格式与事件序列 |
+| [API 端点清单](./jshook/docs/api-endpoints.md) | 完整的 API 端点列表与请求/响应结构 |
+| [认证 API Schema](./jshook/docs/authenticated-api-schema.md) | 实抓验证的认证生图 API Schema，含 Cloudflare 绕过方案 |
+| [请求完成链路](./jshook/docs/request-completion-flow.md) | OV 函数调用链、Callsite ID、SSE 事件序列 |
+| [内容类型枚举](./jshook/docs/content-type-enum.md) | 前端 zo 枚举还原 |
+| [函数名映射](./jshook/docs/function-mapping.md) | 混淆函数名 → 实际功能对照 |
+| [内部代号词典](./jshook/docs/internal-codenames.md) | 后端暗语/代号含义 |
 
 ## 社区与鸣谢
 
@@ -644,10 +657,10 @@ Telegram 群组：[ChatGPT2API](https://t.me/+YBR7t_CPOYBkYzU1)
 
 感谢所有为本项目做出贡献的开发者：
 
-<a href="https://github.com/basketikun/chatgpt2api/graphs/contributors">
-  <img alt="Contributors" src="https://contrib.rocks/image?repo=basketikun/chatgpt2api" />
+<a href="https://github.com/ZyphrZero/chatgpt2api/graphs/contributors">
+  <img alt="Contributors" src="https://contrib.rocks/image?repo=ZyphrZero/chatgpt2api" />
 </a>
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=basketikun/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=basketikun%2Fchatgpt2api&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=ZyphrZero/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=ZyphrZero%2Fchatgpt2api&type=date&legend=top-left)

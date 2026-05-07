@@ -1,0 +1,28 @@
+{
+  "endpoint": "POST https://chatgpt.com/backend-anon/conversation/init",
+  "response": {
+    "type": "conversation_detail_metadata",
+    "banner_info": null,
+    "blocked_features": [
+      {
+        "name": "image_gen",
+        "resets_after": "2026-06-06T01:48:37.055919+00:00",
+        "resets_after_text": "4周 内",
+        "limit": 0.0,
+        "description": "登录即可免费创建图片。",
+        "title": null,
+        "block_reason": null,
+        "call_to_action": ["authenticate"],
+        "icon_image_url": null
+      }
+    ],
+    "model_limits": [],
+    "limits_progress": [
+      {"feature_name": "file_upload", "remaining": 3, "reset_after": "2026-05-08T01:48:36.043600+00:00"},
+      {"feature_name": "paste_text_to_file", "remaining": 3, "reset_after": "2026-05-08T01:48:36.043624+00:00"},
+      {"feature_name": "dictation", "remaining": 1, "reset_after": "2026-05-14T01:48:36.044099+00:00"}
+    ],
+    "default_model_slug": "auto",
+    "atlas_mode_enabled": null
+  }
+}

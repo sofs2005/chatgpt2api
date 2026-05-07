@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"chatgpt2api/internal/backend"
+	"chatgpt2api/internal/config"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
@@ -42,6 +43,8 @@ type Engine struct {
 	Logger   *service.Logger
 
 	ListModelsFunc func(context.Context) (map[string]any, error)
+
+	ImageCompat config.ImageCompatConfig
 
 	responseContextMu sync.Mutex
 	ResponseContexts  *ResponseContextStore
@@ -421,6 +424,7 @@ func (e *Engine) StreamImageOutputsWithPool(ctx context.Context, request Convers
 				rateLimitedForToken := false
 				rateLimitMessage := ""
 				client := backend.NewClient(token, e.Accounts, e.Proxy)
+				client.ImageCompat = e.ImageCompat
 				outputs, imageErr := e.StreamImageOutputs(ctx, client, request, index, request.N)
 				for output := range outputs {
 					if output.Kind == "message" && service.IsAccountRateLimitedErrorMessage(output.Text) {

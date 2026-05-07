@@ -881,3 +881,28 @@ func removeEmptyDirs(root string) {
 		_ = os.Remove(dir)
 	}
 }
+
+type ImageCompatConfig struct {
+	OfficialMode         bool
+	UseAutoModel         bool
+	UseClientCreatedRoot bool
+	SkipPartialQuery     bool
+	SkipExtraFields      bool
+}
+
+func LoadImageCompatConfig() ImageCompatConfig {
+	cfg := ImageCompatConfig{
+		OfficialMode:         envBool("IMAGE_OFFICIAL_MODE", true),
+		UseAutoModel:         envBool("IMAGE_USE_AUTO_MODEL", true),
+		UseClientCreatedRoot: envBool("IMAGE_USE_CLIENT_CREATED_ROOT", true),
+		SkipPartialQuery:     envBool("IMAGE_SKIP_PARTIAL_QUERY", true),
+		SkipExtraFields:      envBool("IMAGE_SKIP_EXTRA_FIELDS", true),
+	}
+	if cfg.OfficialMode {
+		cfg.UseAutoModel = true
+		cfg.UseClientCreatedRoot = true
+		cfg.SkipPartialQuery = true
+		cfg.SkipExtraFields = true
+	}
+	return cfg
+}

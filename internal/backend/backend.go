@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"chatgpt2api/internal/config"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 )
@@ -61,6 +62,8 @@ type Client struct {
 	sessionID    string
 	powSources   []string
 	powDataBuild string
+
+	ImageCompat config.ImageCompatConfig
 }
 
 type ChatRequirements struct {
@@ -769,12 +772,22 @@ func (c *Client) imageModelSlug(model string) string {
 
 func (c *Client) prepareImageConversation(ctx context.Context, prompt string, reqs ChatRequirements, model string) (string, error) {
 	path := "/backend-api/f/conversation/prepare"
+	parentMessageID := util.NewUUID()
+	if c.ImageCompat.UseClientCreatedRoot {
+		parentMessageID = "client-created-root"
+	}
+	modelField := c.imageModelSlug(model)
+	if c.ImageCompat.UseAutoModel {
+		modelField = "auto"
+	}
 	payload := map[string]any{
-		"action": "next", "fork_from_shared_post": false, "parent_message_id": util.NewUUID(), "model": c.imageModelSlug(model),
+		"action": "next", "fork_from_shared_post": false, "parent_message_id": parentMessageID, "model": modelField,
 		"client_prepare_state": "success", "timezone_offset_min": -480, "timezone": "Asia/Shanghai",
 		"conversation_mode": map[string]any{"kind": "primary_assistant"}, "system_hints": []any{"picture_v2"},
-		"partial_query":      map[string]any{"id": util.NewUUID(), "author": map[string]any{"role": "user"}, "content": map[string]any{"content_type": "text", "parts": []any{prompt}}},
 		"supports_buffering": true, "supported_encodings": []any{"v1"}, "client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
+	}
+	if !c.ImageCompat.SkipPartialQuery {
+		payload["partial_query"] = map[string]any{"id": util.NewUUID(), "author": map[string]any{"role": "user"}, "content": map[string]any{"content_type": "text", "parts": []any{prompt}}}
 	}
 	resp, err := c.postJSON(ctx, path, payload, c.imageHeaders(path, reqs, "", "*/*"), false)
 	if err != nil {
@@ -861,12 +874,23 @@ func (c *Client) startImageGeneration(ctx context.Context, prompt string, reqs C
 		}
 		metadata["attachments"] = attachments
 	}
+	parentMessageID := util.NewUUID()
+	if c.ImageCompat.UseClientCreatedRoot {
+		parentMessageID = "client-created-root"
+	}
+	modelField := c.imageModelSlug(model)
+	if c.ImageCompat.UseAutoModel {
+		modelField = "auto"
+	}
 	payload := map[string]any{
 		"action": "next", "messages": []any{map[string]any{"id": util.NewUUID(), "author": map[string]any{"role": "user"}, "create_time": float64(time.Now().UnixNano()) / 1e9, "content": content, "metadata": metadata}},
-		"parent_message_id": util.NewUUID(), "model": c.imageModelSlug(model), "client_prepare_state": "sent", "timezone_offset_min": -480, "timezone": "Asia/Shanghai",
+		"parent_message_id": parentMessageID, "model": modelField, "client_prepare_state": "sent", "timezone_offset_min": -480, "timezone": "Asia/Shanghai",
 		"conversation_mode": map[string]any{"kind": "primary_assistant"}, "enable_message_followups": true, "system_hints": []any{"picture_v2"}, "supports_buffering": true, "supported_encodings": []any{"v1"},
-		"client_contextual_info":               map[string]any{"is_dark_mode": false, "time_since_loaded": 1200, "page_height": 1072, "page_width": 1724, "pixel_ratio": 1.2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"},
-		"paragen_cot_summary_display_override": "allow", "force_parallel_switch": "auto",
+		"client_contextual_info": map[string]any{"is_dark_mode": false, "time_since_loaded": 1200, "page_height": 1072, "page_width": 1724, "pixel_ratio": 1.2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"},
+	}
+	if !c.ImageCompat.SkipExtraFields {
+		payload["paragen_cot_summary_display_override"] = "allow"
+		payload["force_parallel_switch"] = "auto"
 	}
 	path := "/backend-api/f/conversation"
 	resp, err := c.postJSON(ctx, path, payload, c.imageHeaders(path, reqs, conduitToken, "text/event-stream"), true)

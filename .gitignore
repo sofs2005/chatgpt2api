@@ -4,9 +4,12 @@ dist/
 web_dist
 chatgpt2api.exe
 .omx/
+.codex/
 venv/
 .venv/
 __pycache__/
+docs/
+!jshook/docs/
 
 .idea
 node_modules/

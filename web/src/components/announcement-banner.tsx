@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Bell, Megaphone } from "lucide-react";
 
+import { AnnouncementMarkdown } from "@/components/announcement-markdown";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { fetchVisibleAnnouncements, type Announcement, type AnnouncementTarget } from "@/lib/api";
@@ -80,9 +81,7 @@ export function AnnouncementNotifications({
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold text-stone-900">{announcement.title.trim() || "公告"}</p>
-                  <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-stone-700">
-                    {announcement.content}
-                  </p>
+                  <AnnouncementMarkdown className="mt-1 text-stone-700">{announcement.content}</AnnouncementMarkdown>
                 </div>
               </aside>
             ))}

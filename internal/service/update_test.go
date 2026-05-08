@@ -80,11 +80,26 @@ func TestGoReleaserArchiveDoesNotShipWebDist(t *testing.T) {
 		t.Fatalf("read .goreleaser.yaml: %v", err)
 	}
 	config := string(data)
+	if !strings.Contains(config, "main: ./internal") {
+		t.Fatal(".goreleaser.yaml must build the current internal main package")
+	}
 	if strings.Contains(config, "web_dist") {
 		t.Fatal(".goreleaser.yaml must not ship runtime web_dist assets")
 	}
 	if !strings.Contains(config, "-tags=embed") {
 		t.Fatal(".goreleaser.yaml must build the binary with embedded frontend assets")
+	}
+	if !strings.Contains(config, "- deploy/docker-compose.yml") {
+		t.Fatal(".goreleaser.yaml archive must ship deploy/docker-compose.yml")
+	}
+	if strings.Contains(config, "- docker-compose.yml") {
+		t.Fatal(".goreleaser.yaml archive must not reference root docker-compose.yml")
+	}
+	if !strings.Contains(config, "dockerfile: deploy/Dockerfile.release") {
+		t.Fatal(".goreleaser.yaml Docker images must use deploy/Dockerfile.release")
+	}
+	if strings.Contains(config, "Dockerfile.goreleaser") {
+		t.Fatal(".goreleaser.yaml must not reference Dockerfile.goreleaser")
 	}
 }
 
@@ -104,6 +119,77 @@ func TestGoReleaserBuildTargetsLinuxOnly(t *testing.T) {
 	}
 	if strings.Contains(config, "format_overrides:") {
 		t.Fatal(".goreleaser.yaml must not keep non-Linux archive format overrides")
+	}
+}
+
+func TestReleaseWorkflowUsesSingleGoReleaserConfig(t *testing.T) {
+	if _, err := os.Stat(filepath.Join("..", "..", ".goreleaser.simple.yaml")); !os.IsNotExist(err) {
+		t.Fatal(".goreleaser.simple.yaml must not exist; releases use the main GoReleaser config")
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	workflow := string(data)
+	if strings.Contains(workflow, "simple_release") {
+		t.Fatal("release workflow must not expose a simple_release path")
+	}
+	if strings.Contains(workflow, ".goreleaser.simple.yaml") {
+		t.Fatal("release workflow must not reference .goreleaser.simple.yaml")
+	}
+	if !strings.Contains(workflow, "args: release --clean --skip=validate") {
+		t.Fatal("release workflow must run the main GoReleaser release path")
+	}
+}
+
+func TestRetiredDockerBuildFilesDoNotReturn(t *testing.T) {
+	for _, path := range []string{
+		".dockerignore",
+		"Dockerfile",
+		"Dockerfile.goreleaser",
+		"docker-compose.yml",
+		"docker-compose.build.yml",
+		"docker-compose.local.yml",
+	} {
+		if _, err := os.Stat(filepath.Join("..", "..", path)); !os.IsNotExist(err) {
+			t.Fatalf("%s must not exist; Docker deployment config belongs under deploy/", path)
+		}
+	}
+}
+
+func TestServerSourceDockerBuildFilesStayUnderDeploy(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("deploy", "Dockerfile"),
+		filepath.Join("deploy", "Dockerfile.dockerignore"),
+		filepath.Join("deploy", "docker-build-limited.sh"),
+	} {
+		if _, err := os.Stat(filepath.Join("..", "..", path)); err != nil {
+			t.Fatalf("%s must exist for server-side source builds: %v", path, err)
+		}
+	}
+
+	dockerfileData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("read deploy/Dockerfile: %v", err)
+	}
+	dockerfile := string(dockerfileData)
+	if !strings.Contains(dockerfile, "go build") || !strings.Contains(dockerfile, "./internal") {
+		t.Fatal("deploy/Dockerfile must build the current internal main package")
+	}
+	if strings.Contains(dockerfile, "./cmd/chatgpt2api") || strings.Contains(dockerfile, "COPY cmd ") {
+		t.Fatal("deploy/Dockerfile must not reference the retired cmd/chatgpt2api entrypoint")
+	}
+
+	scriptData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "docker-build-limited.sh"))
+	if err != nil {
+		t.Fatalf("read deploy/docker-build-limited.sh: %v", err)
+	}
+	script := string(scriptData)
+	if !strings.Contains(script, `--file "$repo_root/deploy/Dockerfile"`) {
+		t.Fatal("docker-build-limited.sh must build from deploy/Dockerfile")
+	}
+	if !strings.Contains(script, `-f "$repo_root/deploy/docker-compose.yml"`) {
+		t.Fatal("docker-build-limited.sh must run deploy/docker-compose.yml")
 	}
 }
 

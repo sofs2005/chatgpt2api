@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AnnouncementMarkdown } from "@/components/announcement-markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -263,9 +264,12 @@ export function AnnouncementsCard() {
                           <Badge variant="info">创作台</Badge>
                         ) : null}
                       </div>
-                      <p className="mt-2 line-clamp-2 whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">
+                      <AnnouncementMarkdown
+                        compact
+                        className="mt-2 line-clamp-2 text-sm leading-6 text-muted-foreground"
+                      >
                         {item.content}
-                      </p>
+                      </AnnouncementMarkdown>
                       <div className="mt-2 text-xs text-muted-foreground/80">
                         更新于 {formatDateTime(item.updated_at)}
                       </div>
@@ -344,7 +348,7 @@ export function AnnouncementsCard() {
                 className="min-h-36 bg-background"
               />
               <FieldDescription>
-                保存前会去除首尾空白，内容不能为空。
+                支持 Markdown 链接，例如 [官网](https://example.com)，保存前会去除首尾空白。
               </FieldDescription>
             </Field>
             <div className="grid gap-3 md:grid-cols-3">

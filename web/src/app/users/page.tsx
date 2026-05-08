@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Ban,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   KeyRound,
   LoaderCircle,
   Plus,
@@ -80,6 +82,7 @@ type CreateUserForm = {
 type CreateUserErrors = Partial<Record<"username" | "password" | "confirmPassword", string>>;
 
 const accountUsernamePattern = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
+const userPageSizeOptions = ["10", "20", "50", "100"];
 
 function createEmptyUserForm(roleId = ""): CreateUserForm {
   return {
@@ -288,25 +291,6 @@ function UsageSparkline({ points }: { points?: ManagedUser["usage_curve"] }) {
   );
 }
 
-function userSearchText(user: ManagedUser) {
-  return [
-    user.id,
-    user.username,
-    user.name,
-    user.role_id,
-    user.role_name,
-    user.owner_id,
-    user.owner_name,
-    user.provider,
-    user.linuxdo_level,
-    user.session_id,
-    user.session_name,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}
-
 function roleLabel(user: ManagedUser, roles: ManagedRole[]) {
   const roleID = String(user.role_id || "").trim();
   const role = roles.find((item) => item.id === roleID);
@@ -314,11 +298,16 @@ function roleLabel(user: ManagedUser, roles: ManagedRole[]) {
 }
 
 function UsersContent() {
+  const rolesLoadedRef = useRef(false);
   const [items, setItems] = useState<ManagedUser[]>([]);
   const [roles, setRoles] = useState<ManagedRole[]>([]);
   const [searchText, setSearchText] = useState("");
   const [providerFilter, setProviderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState("20");
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
@@ -330,47 +319,65 @@ function UsersContent() {
   const [selectedRoleId, setSelectedRoleId] = useState("");
   const [isSavingRole, setIsSavingRole] = useState(false);
 
-  const loadUsers = useCallback(async () => {
+  const loadUsers = useCallback(async (overrides: { page?: number; includeRoles?: boolean } = {}) => {
+    const requestedPage = overrides.page ?? page;
+    const includeRoles = overrides.includeRoles ?? !rolesLoadedRef.current;
     setIsLoading(true);
     try {
+      const usersPromise = fetchManagedUsers({
+        page: requestedPage,
+        page_size: pageSize,
+        search: searchText,
+        provider: providerFilter,
+        status: statusFilter,
+      });
       const [usersData, rolesData] = await Promise.all([
-        fetchManagedUsers(),
-        fetchManagedRoles(),
+        usersPromise,
+        includeRoles ? fetchManagedRoles() : Promise.resolve(null),
       ]);
-      const nextRoles = normalizeManagedRoles(rolesData.items);
       setItems(normalizeManagedUsers(usersData.items));
-      setRoles(nextRoles);
-      setCreateForm((current) => ({
-        ...current,
-        role_id: current.role_id || nextRoles[0]?.id || "",
-      }));
+      setTotal(Number.isFinite(usersData.total) ? usersData.total : 0);
+      setTotalPages(Math.max(1, Number.isFinite(usersData.total_pages) ? usersData.total_pages : 1));
+      if (usersData.page && usersData.page !== page) {
+        setPage(usersData.page);
+      }
+      if (rolesData) {
+        rolesLoadedRef.current = true;
+        const nextRoles = normalizeManagedRoles(rolesData.items);
+        setRoles(nextRoles);
+        setCreateForm((current) => ({
+          ...current,
+          role_id: current.role_id || nextRoles[0]?.id || "",
+        }));
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载用户失败");
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [page, pageSize, providerFilter, searchText, statusFilter]);
 
   useEffect(() => {
     void loadUsers();
   }, [loadUsers]);
 
-  const filteredItems = useMemo(() => {
-    const keyword = searchText.trim().toLowerCase();
-    return items.filter((user) => {
-      if (providerFilter !== "all" && user.provider !== providerFilter) {
-        return false;
-      }
-      if (statusFilter === "enabled" && !user.enabled) {
-        return false;
-      }
-      if (statusFilter === "disabled" && user.enabled) {
-        return false;
-      }
-      return !keyword || userSearchText(user).includes(keyword);
-    });
-  }, [items, providerFilter, searchText, statusFilter]);
+  const safePage = Math.min(page, totalPages);
+  const startIndex = total === 0 ? 0 : (safePage - 1) * Number(pageSize) + 1;
+  const endIndex = Math.min(safePage * Number(pageSize), total);
   const hasActiveFilters = searchText.trim() !== "" || providerFilter !== "all" || statusFilter !== "all";
+  const paginationItems = useMemo(() => {
+    const nextItems: (number | "...")[] = [];
+    const start = Math.max(1, safePage - 1);
+    const end = Math.min(totalPages, safePage + 1);
+
+    if (start > 1) nextItems.push(1);
+    if (start > 2) nextItems.push("...");
+    for (let current = start; current <= end; current += 1) nextItems.push(current);
+    if (end < totalPages - 1) nextItems.push("...");
+    if (end < totalPages) nextItems.push(totalPages);
+
+    return nextItems;
+  }, [safePage, totalPages]);
 
   const setItemPending = (id: string, isPending: boolean) => {
     setPendingIds((current) => {
@@ -415,11 +422,15 @@ function UsersContent() {
 
     setIsCreating(true);
     try {
-      const data = await createManagedUser(createUserPayload(createForm));
-      setItems(normalizeManagedUsers(data.items));
+      await createManagedUser(createUserPayload(createForm));
       setCreateForm(createEmptyUserForm(createForm.role_id));
       setCreateErrors({});
       closeCreateDialog(false);
+      if (page === 1) {
+        await loadUsers({ page: 1, includeRoles: false });
+      } else {
+        setPage(1);
+      }
       toast.success("用户已创建");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "创建用户失败");
@@ -431,8 +442,8 @@ function UsersContent() {
   const handleToggle = async (user: ManagedUser) => {
     setItemPending(user.id, true);
     try {
-      const data = await updateManagedUser(user.id, { enabled: !user.enabled });
-      setItems(normalizeManagedUsers(data.items));
+      await updateManagedUser(user.id, { enabled: !user.enabled });
+      await loadUsers({ includeRoles: false });
       toast.success(user.enabled ? "用户已禁用" : "用户已启用");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新用户失败");
@@ -454,10 +465,10 @@ function UsersContent() {
     setIsSavingRole(true);
     setItemPending(user.id, true);
     try {
-      const data = await updateManagedUser(user.id, {
+      await updateManagedUser(user.id, {
         role_id: selectedRoleId,
       });
-      setItems(normalizeManagedUsers(data.items));
+      await loadUsers({ includeRoles: false });
       setRoleUser(null);
       toast.success("角色已保存");
     } catch (error) {
@@ -475,9 +486,14 @@ function UsersContent() {
     const user = deletingUser;
     setItemPending(user.id, true);
     try {
-      const data = await deleteManagedUser(user.id);
-      setItems(normalizeManagedUsers(data.items));
+      await deleteManagedUser(user.id);
       setDeletingUser(null);
+      const nextPage = items.length === 1 && page > 1 ? page - 1 : page;
+      if (nextPage === page) {
+        await loadUsers({ page: nextPage, includeRoles: false });
+      } else {
+        setPage(nextPage);
+      }
       toast.success("用户已删除");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除用户失败");
@@ -509,19 +525,28 @@ function UsersContent() {
         <CardContent className="p-0">
           <div className="flex flex-col gap-3 border-b border-border px-5 py-4">
             <div className="flex items-center justify-between text-sm text-muted-foreground">
-              <span>共 {filteredItems.length} / {items.length} 个用户</span>
+              <span>共 {total} 个用户</span>
             </div>
             <div className="grid gap-2 lg:grid-cols-[minmax(18rem,1fr)_160px_160px_auto]">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={searchText}
-                  onChange={(event) => setSearchText(event.target.value)}
+                  onChange={(event) => {
+                    setSearchText(event.target.value);
+                    setPage(1);
+                  }}
                   placeholder="搜索用户名、用户 ID、owner 或会话"
                   className="h-10 rounded-lg pl-9"
                 />
               </div>
-              <Select value={providerFilter} onValueChange={setProviderFilter}>
+              <Select
+                value={providerFilter}
+                onValueChange={(value) => {
+                  setProviderFilter(value);
+                  setPage(1);
+                }}
+              >
                 <SelectTrigger className="h-10 rounded-lg">
                   <SelectValue />
                 </SelectTrigger>
@@ -531,7 +556,13 @@ function UsersContent() {
                   <SelectItem value="local">本地</SelectItem>
                 </SelectContent>
               </Select>
-              <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <Select
+                value={statusFilter}
+                onValueChange={(value) => {
+                  setStatusFilter(value);
+                  setPage(1);
+                }}
+              >
                 <SelectTrigger className="h-10 rounded-lg">
                   <SelectValue />
                 </SelectTrigger>
@@ -550,6 +581,7 @@ function UsersContent() {
                   setSearchText("");
                   setProviderFilter("all");
                   setStatusFilter("all");
+                  setPage(1);
                 }}
               >
                 <X className="size-4" />
@@ -572,7 +604,7 @@ function UsersContent() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredItems.map((user) => {
+                {items.map((user) => {
                   const isPending = pendingIds.has(user.id);
                   return (
                     <TableRow key={user.id} className="text-muted-foreground">
@@ -689,7 +721,70 @@ function UsersContent() {
               <LoaderCircle className="size-5 animate-spin text-stone-400" />
             </div>
           ) : null}
-          {!isLoading && filteredItems.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">{items.length === 0 ? "暂无用户" : "没有匹配的用户"}</div> : null}
+          {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">{hasActiveFilters ? "没有匹配的用户" : "暂无用户"}</div> : null}
+          <div className="border-t border-border px-4 py-4">
+            <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
+              <div className="shrink-0 text-sm text-muted-foreground">
+                显示第 {startIndex} - {endIndex} 条，共 {total} 条
+              </div>
+              <span className="shrink-0 text-sm leading-none text-muted-foreground">
+                {safePage} / {totalPages} 页
+              </span>
+              <Select
+                value={pageSize}
+                onValueChange={(value) => {
+                  setPageSize(value);
+                  setPage(1);
+                }}
+              >
+                <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {userPageSizeOptions.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {option} / 页
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                size="icon"
+                className="size-10 shrink-0 rounded-lg"
+                disabled={safePage <= 1 || isLoading}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+              >
+                <ChevronLeft className="size-4" />
+              </Button>
+              {paginationItems.map((item, index) =>
+                item === "..." ? (
+                  <span key={`ellipsis-${index}`} className="px-1 text-sm text-muted-foreground">
+                    ...
+                  </span>
+                ) : (
+                  <Button
+                    key={item}
+                    variant={item === safePage ? "default" : "outline"}
+                    className="h-10 min-w-10 shrink-0 rounded-lg px-3"
+                    disabled={isLoading}
+                    onClick={() => setPage(item)}
+                  >
+                    {item}
+                  </Button>
+                ),
+              )}
+              <Button
+                variant="outline"
+                size="icon"
+                className="size-10 shrink-0 rounded-lg"
+                disabled={safePage >= totalPages || isLoading}
+                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              >
+                <ChevronRight className="size-4" />
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

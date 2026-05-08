@@ -40,3 +40,21 @@ jobs:
 
       - name: Test backend
         run: go test ./...
+
+      - name: Validate Docker deployment files
+        run: |
+          test -f deploy/Dockerfile
+          test -f deploy/Dockerfile.release
+          test -f deploy/Dockerfile.dockerignore
+          test -f deploy/docker-compose.yml
+          sh -n deploy/docker-build-limited.sh
+          test ! -e .dockerignore
+          test ! -e Dockerfile
+          test ! -e Dockerfile.goreleaser
+          test ! -e docker-compose.yml
+          test ! -e docker-compose.build.yml
+          test ! -e docker-compose.local.yml
+          test ! -e .goreleaser.simple.yaml
+          CHATGPT2API_ENV_FILE="$PWD/.env.example" \
+          CHATGPT2API_DATA_DIR="$PWD/data" \
+          docker compose -f deploy/docker-compose.yml config >/dev/null

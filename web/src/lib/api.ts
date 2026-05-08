@@ -488,6 +488,22 @@ export type ManagedUser = {
   api_permissions?: string[];
 };
 
+export type ManagedUsersQuery = {
+  page?: number | string;
+  page_size?: number | string;
+  search?: string;
+  provider?: "all" | "local" | "linuxdo" | string;
+  status?: "all" | "enabled" | "disabled" | string;
+};
+
+export type ManagedUsersResponse = {
+  items: ManagedUser[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+};
+
 export type ManagedRole = {
   id: string;
   name: string;
@@ -1081,8 +1097,23 @@ function managedUserPath(userId: string) {
   return `/api/admin/users/${encodeURIComponent(userId)}`;
 }
 
-export async function fetchManagedUsers() {
-  return httpRequest<{ items: ManagedUser[] }>("/api/admin/users");
+export async function fetchManagedUsers(query: ManagedUsersQuery = {}) {
+  const params = new URLSearchParams();
+  if (query.page) params.set("page", String(query.page));
+  if (query.page_size) params.set("page_size", String(query.page_size));
+  if (query.search?.trim()) params.set("search", query.search.trim());
+  if (query.provider && query.provider !== "all") params.set("provider", query.provider);
+  if (query.status && query.status !== "all") params.set("status", query.status);
+  const data = await httpRequest<Partial<ManagedUsersResponse>>(
+    `/api/admin/users${params.toString() ? `?${params.toString()}` : ""}`,
+  );
+  return {
+    items: Array.isArray(data.items) ? data.items : [],
+    total: Number(data.total ?? data.items?.length ?? 0),
+    page: Number(data.page ?? query.page ?? 1),
+    page_size: Number(data.page_size ?? query.page_size ?? 20),
+    total_pages: Number(data.total_pages ?? 1),
+  };
 }
 
 export async function fetchPermissionCatalog() {
@@ -1126,7 +1157,7 @@ export async function deleteManagedRole(roleId: string) {
 }
 
 export async function createManagedUser(payload: CreateManagedUserPayload) {
-  return httpRequest<{ item: ManagedUser; items: ManagedUser[] }>("/api/admin/users", {
+  return httpRequest<{ item: ManagedUser; items?: ManagedUser[] } & Partial<ManagedUsersResponse>>("/api/admin/users", {
     method: "POST",
     body: payload,
   });
@@ -1136,7 +1167,7 @@ export async function updateManagedUser(
   userId: string,
   updates: { enabled?: boolean; name?: string; role_id?: string },
 ) {
-  return httpRequest<{ item: ManagedUser; items: ManagedUser[] }>(managedUserPath(userId), {
+  return httpRequest<{ item: ManagedUser; items?: ManagedUser[] } & Partial<ManagedUsersResponse>>(managedUserPath(userId), {
     method: "POST",
     body: updates,
   });
@@ -1147,7 +1178,7 @@ export async function revealManagedUserKey(userId: string) {
 }
 
 export async function resetManagedUserKey(userId: string, name?: string) {
-  return httpRequest<{ item: ManagedUser; api_key: UserKey; key: string; items: ManagedUser[] }>(
+  return httpRequest<{ item: ManagedUser; api_key: UserKey; key: string; items?: ManagedUser[] } & Partial<ManagedUsersResponse>>(
     `${managedUserPath(userId)}/reset-key`,
     {
       method: "POST",
@@ -1157,7 +1188,7 @@ export async function resetManagedUserKey(userId: string, name?: string) {
 }
 
 export async function deleteManagedUser(userId: string) {
-  return httpRequest<{ items: ManagedUser[] }>(managedUserPath(userId), {
+  return httpRequest<{ items?: ManagedUser[] } & Partial<ManagedUsersResponse>>(managedUserPath(userId), {
     method: "DELETE",
   });
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -373,7 +374,12 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == base {
 		switch r.Method {
 		case http.MethodGet:
-			util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.managedUsers()})
+			response, err := a.managedUsersResponse(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			util.WriteJSON(w, http.StatusOK, response)
 		case http.MethodPost:
 			body, err := readJSONMap(r)
 			if err != nil {
@@ -395,11 +401,16 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 				util.WriteError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			items := a.managedUsers()
-			if current := findManagedUser(items, util.Clean(item["id"])); current != nil {
+			response, err := a.managedUsersResponse(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if current := a.managedUser(util.Clean(item["id"])); current != nil {
 				item = current
 			}
-			util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": items})
+			response["item"] = item
+			util.WriteJSON(w, http.StatusOK, response)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -458,11 +469,18 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		items := a.managedUsers()
-		if current := findManagedUser(items, userID); current != nil {
+		response, err := a.managedUsersResponse(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if current := a.managedUser(userID); current != nil {
 			item = current
 		}
-		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "api_key": apiKey, "key": raw, "items": items})
+		response["item"] = item
+		response["api_key"] = apiKey
+		response["key"] = raw
+		util.WriteJSON(w, http.StatusOK, response)
 		return
 	}
 	if len(parts) != 4 {
@@ -495,24 +513,82 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		items := a.managedUsers()
-		if current := findManagedUser(items, userID); current != nil {
+		response, err := a.managedUsersResponse(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if current := a.managedUser(userID); current != nil {
 			item = current
 		}
-		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": items})
+		response["item"] = item
+		util.WriteJSON(w, http.StatusOK, response)
 	case http.MethodDelete:
 		if !a.auth.DeleteUser(userID) {
 			util.WriteError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.managedUsers()})
+		response, err := a.managedUsersResponse(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		util.WriteJSON(w, http.StatusOK, response)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
-func (a *App) managedUsers() []map[string]any {
-	items := a.auth.ListUsers()
+type managedUsersQuery struct {
+	Page       int
+	PageSize   int
+	Search     string
+	Provider   string
+	Status     string
+	Total      int
+	TotalPages int
+}
+
+func (a *App) managedUsersResponse(r *http.Request) (map[string]any, error) {
+	query, err := parseManagedUsersQuery(r)
+	if err != nil {
+		return nil, err
+	}
+	items := filterManagedUsers(a.auth.ListUsers(), query)
+	query.Total = len(items)
+	query.TotalPages = managedUsersTotalPages(query.Total, query.PageSize)
+	if query.Page > query.TotalPages {
+		query.Page = query.TotalPages
+	}
+	start := (query.Page - 1) * query.PageSize
+	if start > query.Total {
+		start = query.Total
+	}
+	end := start + query.PageSize
+	if end > query.Total {
+		end = query.Total
+	}
+	pageItems := items[start:end]
+	a.attachManagedUserUsage(pageItems)
+	return map[string]any{
+		"items":       pageItems,
+		"total":       query.Total,
+		"page":        query.Page,
+		"page_size":   query.PageSize,
+		"total_pages": query.TotalPages,
+	}, nil
+}
+
+func (a *App) managedUser(id string) map[string]any {
+	item := findManagedUser(a.auth.ListUsers(), id)
+	if item == nil {
+		return nil
+	}
+	a.attachManagedUserUsage([]map[string]any{item})
+	return item
+}
+
+func (a *App) attachManagedUserUsage(items []map[string]any) {
 	stats := a.logs.UserUsageStats(14)
 	for _, item := range items {
 		userID := util.Clean(item["id"])
@@ -524,7 +600,109 @@ func (a *App) managedUsers() []map[string]any {
 			item[key] = value
 		}
 	}
-	return items
+}
+
+func parseManagedUsersQuery(r *http.Request) (managedUsersQuery, error) {
+	values := r.URL.Query()
+	page, err := parseManagedUsersPage(values.Get("page"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
+	pageSize, err := parseManagedUsersPageSize(values.Get("page_size"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
+	return managedUsersQuery{
+		Page:     page,
+		PageSize: pageSize,
+		Search:   strings.TrimSpace(values.Get("search")),
+		Provider: strings.TrimSpace(values.Get("provider")),
+		Status:   strings.TrimSpace(values.Get("status")),
+	}, nil
+}
+
+func parseManagedUsersPage(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 1, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf("page 参数无效")
+	}
+	return value, nil
+}
+
+func parseManagedUsersPageSize(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 20, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf("page_size 参数无效")
+	}
+	return normalizedManagedUsersPageSize(value), nil
+}
+
+func normalizedManagedUsersPageSize(value int) int {
+	if value <= 0 {
+		return 20
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func managedUsersTotalPages(total, pageSize int) int {
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if total <= 0 {
+		return 1
+	}
+	return (total + pageSize - 1) / pageSize
+}
+
+func filterManagedUsers(items []map[string]any, query managedUsersQuery) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	search := strings.ToLower(strings.TrimSpace(query.Search))
+	provider := strings.TrimSpace(query.Provider)
+	status := strings.TrimSpace(query.Status)
+	for _, item := range items {
+		if provider != "" && provider != "all" && util.Clean(item["provider"]) != provider {
+			continue
+		}
+		if status == "enabled" && !util.ToBool(item["enabled"]) {
+			continue
+		}
+		if status == "disabled" && util.ToBool(item["enabled"]) {
+			continue
+		}
+		if search != "" && !strings.Contains(managedUserSearchText(item), search) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func managedUserSearchText(item map[string]any) string {
+	parts := []string{
+		util.Clean(item["id"]),
+		util.Clean(item["username"]),
+		util.Clean(item["name"]),
+		util.Clean(item["role_id"]),
+		util.Clean(item["role_name"]),
+		util.Clean(item["owner_id"]),
+		util.Clean(item["owner_name"]),
+		util.Clean(item["provider"]),
+		util.Clean(item["linuxdo_level"]),
+		util.Clean(item["session_id"]),
+		util.Clean(item["session_name"]),
+	}
+	return strings.ToLower(strings.Join(parts, " "))
 }
 
 func findManagedUser(items []map[string]any, id string) map[string]any {

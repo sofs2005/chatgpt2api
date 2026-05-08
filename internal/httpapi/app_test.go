@@ -2149,6 +2149,81 @@ func TestAdminUsersManageLinuxDoUsers(t *testing.T) {
 	}
 }
 
+func TestAdminUsersListPaginationAndFilters(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	if _, err := app.auth.CreatePasswordUser("enabled_one", "Password123", "Enabled One", service.DefaultManagedRoleID, true); err != nil {
+		t.Fatalf("CreatePasswordUser(enabled_one) error = %v", err)
+	}
+	if _, err := app.auth.CreatePasswordUser("disabled_one", "Password123", "Disabled One", service.DefaultManagedRoleID, false); err != nil {
+		t.Fatalf("CreatePasswordUser(disabled_one) error = %v", err)
+	}
+	if _, err := app.auth.CreatePasswordUser("enabled_two", "Password123", "Enabled Two", service.DefaultManagedRoleID, true); err != nil {
+		t.Fatalf("CreatePasswordUser(enabled_two) error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/users?page=2&page_size=2", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("paged users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("paged users json: %v", err)
+	}
+	if payload["total"] != float64(3) || payload["page"] != float64(2) || payload["page_size"] != float64(2) || payload["total_pages"] != float64(2) {
+		t.Fatalf("paged metadata = %#v", payload)
+	}
+	if items := logItems(payload); len(items) != 1 {
+		t.Fatalf("paged items length = %d payload = %#v", len(items), payload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=99&page_size=2", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("clamped users status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("clamped users json: %v", err)
+	}
+	if payload["page"] != float64(2) || payload["total_pages"] != float64(2) {
+		t.Fatalf("clamped metadata = %#v", payload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=1&page_size=20&provider=local&status=disabled&search=disabled_one", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("filtered users status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("filtered users json: %v", err)
+	}
+	items := logItems(payload)
+	if payload["total"] != float64(1) || len(items) != 1 || items[0]["username"] != "disabled_one" {
+		t.Fatalf("filtered users payload = %#v", payload)
+	}
+	if _, ok := items[0]["usage_curve"].([]any); !ok {
+		t.Fatalf("filtered user missing usage stats: %#v", items[0])
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=0", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("invalid page status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
 func TestLinuxDoOAuthCallbackCreatesSession(t *testing.T) {
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

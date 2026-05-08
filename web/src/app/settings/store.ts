@@ -594,7 +594,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => {
       if (!state.registerConfig) return {};
       const providers = [...(state.registerConfig.mail.providers || [])];
-      providers[index] = { ...(providers[index] || {}), ...updates };
+      providers[index] = { ...providers[index], ...updates };
       return { registerConfig: { ...state.registerConfig, mail: { ...state.registerConfig.mail, providers } } };
     });
   },

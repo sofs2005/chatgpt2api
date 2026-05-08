@@ -233,6 +233,12 @@ func isTransientImageStreamErrorMessage(message string) bool {
 	if lower == "" {
 		return false
 	}
+	if strings.Contains(lower, strings.ToLower(util.UpstreamConnectionFailureMessage)) {
+		return true
+	}
+	if _, ok := util.SummarizeUpstreamConnectionError(lower); ok {
+		return true
+	}
 	for _, token := range []string{
 		"sse read error",
 		"responses sse read error",

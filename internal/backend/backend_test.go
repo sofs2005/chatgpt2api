@@ -8,10 +8,36 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func ptrInt(value int) *int {
 	return &value
+}
+
+func newTestBackendClient(server *httptest.Server) *Client {
+	client := &Client{
+		BaseURL:     server.URL,
+		AccessToken: "token-1",
+		httpClient:  server.Client(),
+		lookup: testAccountLookup{
+			"token-1": {"chatgpt_account_id": "acct-1"},
+		},
+	}
+	client.fp = client.buildFingerprint()
+	client.applyBrowserFingerprint()
+	client.userAgent = client.fp["user-agent"]
+	client.deviceID = client.fp["oai-device-id"]
+	client.sessionID = client.fp["oai-session-id"]
+	return client
+}
+
+func setOfficialImageDownloadRetryDelayForTest(delay time.Duration) func() {
+	previous := officialImageDownloadRetryDelay
+	officialImageDownloadRetryDelay = delay
+	return func() {
+		officialImageDownloadRetryDelay = previous
+	}
 }
 
 func TestUpstreamHTTPErrorSummarizesCloudflareChallenge(t *testing.T) {
@@ -193,7 +219,13 @@ func TestStreamResponsesImageUsesOfficialPrepareAndConversationRoutes(t *testing
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_abc"}]}}}}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/file_abc/download":
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_abc":
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-1" {
+				t.Fatalf("conversation_id = %q", got)
+			}
+			if got := r.URL.Query().Get("inline"); got != "false" {
+				t.Fatalf("inline = %q", got)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_abc.png"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/download/file_abc.png":
@@ -302,7 +334,13 @@ func TestStreamResponsesImageDoesNotTreatQueuedAssistantNoticeAsFinalText(t *tes
 			pollCount++
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_ready"}]}}}}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/file_ready/download":
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_ready":
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-queued" {
+				t.Fatalf("conversation_id = %q", got)
+			}
+			if got := r.URL.Query().Get("inline"); got != "false" {
+				t.Fatalf("inline = %q", got)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_ready.png"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/download/file_ready.png":
@@ -347,6 +385,167 @@ func TestStreamResponsesImageDoesNotTreatQueuedAssistantNoticeAsFinalText(t *tes
 	}
 	if pollCount == 0 {
 		t.Fatal("expected conversation polling after queued assistant notice")
+	}
+	if len(results) != 1 || results[0].Result != png1x1 {
+		t.Fatalf("results = %#v, want one final image result", results)
+	}
+}
+
+func TestResolveOfficialImageResultsRetriesTransientDownloadURL404(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	resetOfficialImageRetryDelay := setOfficialImageDownloadRetryDelayForTest(0)
+	defer resetOfficialImageRetryDelay()
+
+	downloadAttempts := 0
+	urlAttempts := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_img":
+			urlAttempts++
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-1" {
+				t.Fatalf("conversation_id = %q", got)
+			}
+			if got := r.URL.Query().Get("inline"); got != "false" {
+				t.Fatalf("inline = %q", got)
+			}
+			if got := r.Header.Get("X-OpenAI-Target-Path"); got != "/backend-api/files/download/file_img" {
+				t.Fatalf("target path = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/image.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/image.png":
+			downloadAttempts++
+			if downloadAttempts < officialImageDownloadAttempts {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"detail":"File link not found."}`))
+				return
+			}
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{
+		Prompt: "生成封面",
+	}, ResponsesImageEvent{
+		ConversationID: "conv-1",
+		SedimentIDs:    []string{"file_img"},
+	})
+	if err != nil {
+		t.Fatalf("resolveOfficialImageResults() error = %v", err)
+	}
+	if urlAttempts != officialImageDownloadAttempts {
+		t.Fatalf("download URL attempts = %d, want %d", urlAttempts, officialImageDownloadAttempts)
+	}
+	if downloadAttempts != officialImageDownloadAttempts {
+		t.Fatalf("download attempts = %d, want %d", downloadAttempts, officialImageDownloadAttempts)
+	}
+	if len(results) != 1 || results[0].Result != png1x1 {
+		t.Fatalf("results = %#v, want one final image result", results)
+	}
+}
+
+func TestResolveOfficialImageResultsUsesConversationScopedFileDownloadForSedimentID(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+
+	fileURLAttempts := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_img":
+			fileURLAttempts++
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-1" {
+				t.Fatalf("conversation_id = %q", got)
+			}
+			if got := r.URL.Query().Get("inline"); got != "false" {
+				t.Fatalf("inline = %q", got)
+			}
+			if got := r.Header.Get("X-OpenAI-Target-Path"); got != "/backend-api/files/download/file_img" {
+				t.Fatalf("target path = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/file.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{
+		Prompt: "生成封面",
+	}, ResponsesImageEvent{
+		ConversationID: "conv-1",
+		SedimentIDs:    []string{"file_img"},
+	})
+	if err != nil {
+		t.Fatalf("resolveOfficialImageResults() error = %v", err)
+	}
+	if fileURLAttempts != 1 {
+		t.Fatalf("file URL attempts = %d, want 1", fileURLAttempts)
+	}
+	if len(results) != 1 || results[0].Result != png1x1 {
+		t.Fatalf("results = %#v, want one final image result", results)
+	}
+}
+
+func TestResolveOfficialImageResultsAuthenticatesBackendDownloadURL(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_img":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/backend-api/estuary/content?id=file_img&sig=test"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/estuary/content":
+			if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			if got := r.Header.Get("X-OpenAI-Target-Path"); got != "/backend-api/estuary/content" {
+				t.Fatalf("target path = %q", got)
+			}
+			if got := r.Header.Get("Accept"); got != "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8" {
+				t.Fatalf("Accept = %q", got)
+			}
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{
+		Prompt: "生成封面",
+	}, ResponsesImageEvent{
+		ConversationID: "conv-1",
+		FileIDs:        []string{"file_img"},
+	})
+	if err != nil {
+		t.Fatalf("resolveOfficialImageResults() error = %v", err)
 	}
 	if len(results) != 1 || results[0].Result != png1x1 {
 		t.Fatalf("results = %#v, want one final image result", results)

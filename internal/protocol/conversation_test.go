@@ -339,6 +339,8 @@ func TestIsTransientImageStreamErrorMessage(t *testing.T) {
 		"unexpected EOF",
 		"connection reset by peer",
 		"stream closed",
+		"bootstrap failed: upstream connection failed before TLS handshake completed; check proxy reachability to chatgpt.com or change proxy",
+		`bootstrap failed: Get "https://chatgpt.com/": surf: HTTP/2 request failed: uTLS.HandshakeContext() error: EOF; HTTP/1.1 fallback failed: uTLS.HandshakeContext() error: EOF`,
 	}
 	for _, input := range transient {
 		if !isTransientImageStreamErrorMessage(input) {

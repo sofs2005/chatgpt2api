@@ -102,7 +102,7 @@ CHATGPT2API_ADMIN_PASSWORD=change_me_please
 ### 2. 启动服务
 
 ```bash
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 默认 Compose 配置：
@@ -119,16 +119,16 @@ docker compose up -d
 http://localhost:3000
 ```
 
-查看日志（需要在 `docker-compose.yml` 所在目录执行）：
+查看日志（需要在仓库根目录执行）：
 
 ```bash
-docker compose logs -f app
+docker compose -f deploy/docker-compose.yml logs -f app
 ```
 
-查看自动生成的管理员密码（需要在 `docker-compose.yml` 所在目录执行）：
+查看自动生成的管理员密码（需要在仓库根目录执行）：
 
 ```bash
-docker compose logs app | grep "bootstrap admin password generated"
+docker compose -f deploy/docker-compose.yml logs app | grep "bootstrap admin password generated"
 ```
 
 日志行格式：
@@ -143,7 +143,7 @@ bootstrap admin password generated: username=admin password=生成的密码
 Windows PowerShell：
 
 ```powershell
-docker compose logs app | Select-String "bootstrap admin password generated"
+docker compose -f deploy/docker-compose.yml logs app | Select-String "bootstrap admin password generated"
 ```
 
 默认容器名方式：
@@ -152,7 +152,7 @@ docker compose logs app | Select-String "bootstrap admin password generated"
 docker logs chatgpt2api 2>&1 | grep "bootstrap admin password generated"
 ```
 
-如果提示 `no configuration file provided: not found`，说明当前目录没有 Compose 配置文件。先进入部署目录再执行 `docker compose logs app`，或直接使用上面的 `docker logs chatgpt2api ...` 命令。
+如果提示 `no configuration file provided: not found`，说明当前命令没有指定 Compose 配置文件。先进入仓库根目录再执行 `docker compose -f deploy/docker-compose.yml logs app`，或直接使用上面的 `docker logs chatgpt2api ...` 命令。
 
 如果查不到日志，先确认 `.env` 或容器环境里是否已经设置了固定密码：
 
@@ -175,7 +175,7 @@ cd /opt/chatgpt2api
 # 编辑 .env，设置一个新的已知管理员密码：
 # CHATGPT2API_ADMIN_PASSWORD=your_new_password
 
-docker compose down
+docker compose -f deploy/docker-compose.yml down
 cp -a data "data.bak.$(date +%Y%m%d-%H%M%S)"
 python3 - <<'PY'
 import sqlite3
@@ -191,27 +191,47 @@ con.commit()
 print(f"removed auth_users.json rows: {cur.rowcount}")
 con.close()
 PY
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 如果使用 `STORAGE_BACKEND=json`，本地登录账号保存在 `data/auth_users.json`，可在备份后删除该文件再重启：
 
 ```bash
-docker compose down
+docker compose -f deploy/docker-compose.yml down
 cp -a data "data.bak.$(date +%Y%m%d-%H%M%S)"
 rm -f data/auth_users.json
-docker compose up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 </details>
 
-### 3. 自建镜像
+### 3. 服务器源码构建（可选）
 
-如果需要从当前源码构建本地镜像：
+发布镜像由 GitHub Actions 构建。如果你需要在自己的服务器上从当前源码构建镜像，使用受限 BuildKit 脚本：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+sh deploy/docker-build-limited.sh up
 ```
+
+该脚本会创建独立的 `docker-container` Buildx builder，并对构建容器设置 CPU / 内存上限。默认给构建过程 2 核、2 GB 内存、BuildKit 并行度 2，Go 编译并行度 2：
+
+```bash
+BUILD_CPUS=2 BUILD_MEMORY=2g sh deploy/docker-build-limited.sh up
+```
+
+低配服务器可以进一步收紧配额，构建会变慢，但不会让构建进程吃满整台机器：
+
+```bash
+BUILD_CPUS=1 BUILD_MEMORY=1536m BUILD_GOMEMLIMIT=768MiB sh deploy/docker-build-limited.sh up
+```
+
+如果只想构建本地镜像、不重启容器：
+
+```bash
+sh deploy/docker-build-limited.sh build
+```
+
+脚本使用 `deploy/Dockerfile` 从源码构建本地镜像，默认镜像名为 `chatgpt2api:local`；`up` 模式会继续用 `deploy/docker-compose.yml` 启动该本地镜像。
 
 ## 升级与在线更新
 
@@ -220,11 +240,11 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 Docker 部署的推荐升级方式：
 
 ```bash
-docker compose pull
-docker compose up -d
+docker compose -f deploy/docker-compose.yml pull
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
-默认 Compose 使用 DockerHub 公共镜像，普通用户不需要配置 GitHub Release 源、GitHub Token，也不需要登录 GitHub。也可以按需将 `docker-compose.yml` 的 `image` 改为 GHCR：
+默认 Compose 使用 DockerHub 公共镜像，普通用户不需要配置 GitHub Release 源、GitHub Token，也不需要登录 GitHub。也可以按需将 `deploy/docker-compose.yml` 的 `image` 改为 GHCR：
 
 ```yaml
 image: ghcr.io/zyphrzero/chatgpt2api:latest
@@ -241,7 +261,7 @@ ghcr.io/zyphrzero/chatgpt2api:latest
 
 设置页的“版本更新”卡片会按部署方式选择更新来源：
 
-- Docker 镜像：默认匿名检查 DockerHub 公共镜像标签，升级方式是 `docker compose pull && docker compose up -d`。
+- Docker 镜像：默认匿名检查 DockerHub 公共镜像标签，升级方式是 `docker compose -f deploy/docker-compose.yml pull && docker compose -f deploy/docker-compose.yml up -d`。
 - Release 二进制：检查项目 GitHub Release，只有这种非 Docker 部署会显示“立即更新”并替换当前 `chatgpt2api` 二进制。
 
 Release 二进制在线更新流程：
@@ -257,12 +277,11 @@ Release 二进制在线更新流程：
 重要说明：
 
 - Docker 部署默认从 DockerHub 拉取镜像，不需要填写 GitHub Release 源或 GitHub Token。
-- Docker 容器内不会执行二进制替换；请用 `docker compose pull && docker compose up -d` 更新镜像。
+- Docker 容器内不会执行二进制替换；请用 `docker compose -f deploy/docker-compose.yml pull && docker compose -f deploy/docker-compose.yml up -d` 更新镜像。
 - 在线二进制替换只在非 Docker 的 `BuildType=release` 构建中开放。
 - 前端资源已嵌入 Release 二进制，在线更新只替换 `chatgpt2api` 这一个运行文件。
 - 检查更新访问 DockerHub / Release API 可通过 `CHATGPT2API_UPDATE_PROXY_URL` 配置代理；未设置时复用 `CHATGPT2API_PROXY`。
 - 正式 Release archive 只发布 Linux `amd64` / `arm64` 构建；Windows 和 macOS 不提供在线更新压缩包。
-- 简化发布只推送 Docker 镜像，不上传二进制压缩包时，在线更新无法找到可下载的 Release archive。
 
 ### 源码部署升级
 
@@ -273,7 +292,7 @@ git pull
 bun install --cwd web --frozen-lockfile
 bun --cwd web run build
 go test ./...
-go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o chatgpt2api ./cmd/chatgpt2api
+go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o chatgpt2api ./internal
 ```
 
 ## 配置说明
@@ -349,7 +368,7 @@ CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL=/auth/linuxdo/callback
 bun install --cwd web --frozen-lockfile
 bun --cwd web run build
 go test ./...
-go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=0.0.0-dev" -o chatgpt2api ./cmd/chatgpt2api
+go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=0.0.0-dev" -o chatgpt2api ./internal
 CHATGPT2API_ADMIN_PASSWORD=change_me_please ./chatgpt2api
 ```
 
@@ -398,6 +417,7 @@ bun run build
 - `go test ./...`
 - `bun install --frozen-lockfile`
 - `bun run build`
+- `docker compose -f deploy/docker-compose.yml config`
 
 ### Release
 
@@ -408,7 +428,7 @@ bun run build
 3. 将前端 artifact 下载到 `internal/web/dist`。
 4. GoReleaser 使用 `-tags=embed` 构建 Linux `amd64` / `arm64` 二进制。
 5. 生成 GitHub Release archive 和 `checksums.txt`。
-6. 使用 `Dockerfile.goreleaser` 构建多架构 Docker 镜像。
+6. 使用 `deploy/Dockerfile.release` 构建多架构 Docker 镜像。
 7. 推送 DockerHub 镜像。
 8. 推送 GHCR 镜像。
 
@@ -643,14 +663,10 @@ Telegram 群组：[ChatGPT2API](https://t.me/+YBR7t_CPOYBkYzU1)
 
 学 AI，上 L 站：[LinuxDO](https://linux.do)
 
-内置提示词参考：
-
 - [banana-prompt-quicker](https://github.com/glidea/banana-prompt-quicker)，作者：[阿良](https://linux.do/u/ajd)
 - [awesome-gpt-image-2-prompts](https://github.com/EvoLinkAI/awesome-gpt-image-2-prompts)
-
-生图配置参考：
-
 - [ChatGpt-Image-Studio](https://github.com/peiyizhi0724/ChatGpt-Image-Studio)，作者：[小怪兽](https://linux.do/u/peiyizhi)
+- [sub2api](https://github.com/Wei-Shaw/sub2api)
 
 ## Contributors
 

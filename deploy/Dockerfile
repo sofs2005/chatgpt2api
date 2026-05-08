@@ -38,7 +38,7 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=0.0.0-dev
 ARG BUILD_GOMAXPROCS=2
-ARG BUILD_GOMEMLIMIT=1GiB
+ARG BUILD_GOMEMLIMIT=2GiB
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     GOMAXPROCS=${BUILD_GOMAXPROCS} GOMEMLIMIT=${BUILD_GOMEMLIMIT} \

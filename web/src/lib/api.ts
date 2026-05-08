@@ -372,7 +372,7 @@ export type CreationTask = {
   created_at: string;
   updated_at: string;
   data?: CreationTaskData[];
-  output_statuses?: ("queued" | "running" | "success")[];
+  output_statuses?: ("queued" | "running" | "success" | "error" | "cancelled")[];
   error?: string;
   output_type?: "text";
   visibility?: ImageVisibility;

@@ -213,16 +213,16 @@ docker compose -f deploy/docker-compose.yml up -d
 sh deploy/docker-build-limited.sh up
 ```
 
-该脚本会创建独立的 `docker-container` Buildx builder，并对构建容器设置 CPU / 内存上限。默认给构建过程 2 核、2 GB 内存、BuildKit 并行度 2，Go 编译并行度 2：
+该脚本会创建独立的 `docker-container` Buildx builder，并对构建容器设置 CPU / 内存上限。直接运行时会按服务器资源自动选择默认值：最多使用 2 核；内存充足时默认放开到 3-4 GB；低内存机器才会降低 Go 编译并行度，避免 `compile: signal: killed` 这类 OOM：
 
 ```bash
-BUILD_CPUS=2 BUILD_MEMORY=2g sh deploy/docker-build-limited.sh up
+sh deploy/docker-build-limited.sh up
 ```
 
-低配服务器可以进一步收紧配额，构建会变慢，但不会让构建进程吃满整台机器：
+如果你想显式放开配额：
 
 ```bash
-BUILD_CPUS=1 BUILD_MEMORY=1536m BUILD_GOMEMLIMIT=768MiB sh deploy/docker-build-limited.sh up
+BUILD_CPUS=2 BUILD_MEMORY=4g BUILD_MEMORY_SWAP=4g BUILD_GOMAXPROCS=2 BUILD_GOMEMLIMIT=2GiB sh deploy/docker-build-limited.sh up
 ```
 
 如果只想构建本地镜像、不重启容器：

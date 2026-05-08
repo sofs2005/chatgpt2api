@@ -1329,6 +1329,20 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	result, err := run(ctx, payload)
 	urls := collectURLs(result)
 	a.recordGeneratedImagesForPayload(identity, urls, util.Clean(payload["visibility"]), payload)
+	if imageTaskTextResponseError(err) {
+		if result == nil {
+			result = map[string]any{}
+		}
+		message := util.Clean(result["message"])
+		if message == "" {
+			message = err.Error()
+		}
+		result["output_type"] = "text"
+		result["message"] = message
+		result["data"] = []map[string]any{{"text_response": message}}
+		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "success", http.StatusOK, "", urls)
+		return result, nil
+	}
 	if err != nil {
 		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls)
 		return result, err
@@ -1340,6 +1354,11 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	}
 	a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "success", http.StatusOK, "", urls)
 	return result, nil
+}
+
+func imageTaskTextResponseError(err error) bool {
+	var imageErr *protocol.ImageGenerationError
+	return errors.As(err, &imageErr) && imageErr.Code == "image_generation_text_response"
 }
 
 func (a *App) attachCreationTaskLimiter(body map[string]any, identity service.Identity) {

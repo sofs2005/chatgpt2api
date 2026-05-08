@@ -524,6 +524,44 @@ func TestRunLoggedImageTaskLogsTextOutputAsFailure(t *testing.T) {
 	}
 }
 
+func TestRunLoggedImageTaskReturnsOfficialTextResponseAsSuccess(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	identity := service.Identity{ID: "admin", Role: service.AuthRoleAdmin, Name: "Admin"}
+	officialText := "我可以帮你生成一张基于你描述的场景的创意图像，但我需要确认一下细节：\n\n你希望的图片是两位虚构角色在温馨场景中互动，对吗？为了确保生成合适内容，我需要知道：\n\n这两位角色是公众人物、虚拟角色，还是你的原创角色？\n你希望风格是写实、漫画、插画、还是卡通？\n图片的场景或氛围是浪漫、搞笑、温馨、还是幻想？\n\n确认这些后我可以生成图片。"
+	result, err := app.runLoggedImageTask(
+		context.Background(),
+		identity,
+		map[string]any{"model": "gpt-image-2"},
+		"/api/creation-tasks/image-generations",
+		"文生图",
+		func(context.Context, map[string]any) (map[string]any, error) {
+			return map[string]any{"output_type": "text", "message": officialText, "data": []map[string]any{}},
+				&protocol.ImageGenerationError{Message: officialText, StatusCode: http.StatusBadRequest, Type: "invalid_request_error", Code: "image_generation_text_response"}
+		},
+	)
+	if err != nil {
+		t.Fatalf("runLoggedImageTask() error = %v", err)
+	}
+	if result["output_type"] != "text" {
+		t.Fatalf("output_type = %#v, want text in %#v", result["output_type"], result)
+	}
+	data := util.AsMapSlice(result["data"])
+	if len(data) != 1 || data[0]["text_response"] != officialText {
+		t.Fatalf("text response data = %#v", result)
+	}
+	logs := app.logs.Search(service.LogQuery{Limit: 10})
+	item := findLogBySummary(logs, "文生图调用完成")
+	if item == nil {
+		t.Fatalf("expected official text response to write success log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if detail["outcome"] != "success" || util.ToInt(detail["status"], 0) != http.StatusOK {
+		t.Fatalf("success log detail = %#v", detail)
+	}
+}
+
 func TestDirectImageGenerationUsesCreationLimiter(t *testing.T) {
 	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
 	app := newTestApp(t)

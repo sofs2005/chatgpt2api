@@ -610,6 +610,30 @@ func TestImageTaskServicePreservesPartialDataOnFailure(t *testing.T) {
 	if item["error"] != "second image failed" {
 		t.Fatalf("partial failure error = %#v", item)
 	}
+	statuses := util.AsStringSlice(item["output_statuses"])
+	if strings.Join(statuses, ",") != "success,error" {
+		t.Fatalf("partial failure output_statuses = %#v, want success,error in %#v", statuses, item)
+	}
+}
+
+func TestImageTaskServiceMarksOutputStatusesOnEmptyFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return nil, errors.New("no image was generated")
+	}
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
+
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
+	got := svc.ListTasks(identity, []string{"task-1"})
+	item := got["items"].([]map[string]any)[0]
+	statuses := util.AsStringSlice(item["output_statuses"])
+	if strings.Join(statuses, ",") != "error" {
+		t.Fatalf("output_statuses = %#v, want error in %#v", statuses, item)
+	}
 }
 
 func TestImageTaskServiceMarksTimedOutTaskAsError(t *testing.T) {

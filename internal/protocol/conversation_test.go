@@ -564,6 +564,39 @@ func TestStreamImageOutputsWithPoolReportsCodexUnauthorizedPermission(t *testing
 	}
 }
 
+func TestStreamResponsesImageOutputsTreatsUpstreamQuestionAsTextMessage(t *testing.T) {
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return &backend.Client{} },
+	}
+	asked := "你希望我把这张图画成什么风格？"
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "message", Model: request.Model, Index: index, Total: total, Created: 1, Text: asked}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{
+		Model:          "gpt-image-2",
+		N:              1,
+		MessageAsError: true,
+	})
+	for range outputs {
+	}
+	err := <-errCh
+	imageErr, ok := err.(*ImageGenerationError)
+	if !ok {
+		t.Fatalf("err = %T %v, want ImageGenerationError", err, err)
+	}
+	if imageErr.Code != "image_generation_text_response" || imageErr.Message != asked {
+		t.Fatalf("imageErr = %#v, want text response error", imageErr)
+	}
+}
+
 func TestCollectImageOutputsKeepsImageOrderByIndex(t *testing.T) {
 	outputs := make(chan ImageOutput, 2)
 	errCh := make(chan error, 1)

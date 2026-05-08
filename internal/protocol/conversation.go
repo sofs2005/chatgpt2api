@@ -784,7 +784,8 @@ func firstNonZeroInt64(values ...int64) int64 {
 }
 
 func isFinalImageTextEvent(event backend.ResponsesImageEvent) bool {
-	if strings.TrimSpace(event.Text) == "" || event.Result != "" {
+	text := strings.TrimSpace(event.Text)
+	if text == "" || event.Result != "" {
 		return false
 	}
 	if event.Blocked {
@@ -793,7 +794,33 @@ func isFinalImageTextEvent(event backend.ResponsesImageEvent) bool {
 	if strings.EqualFold(strings.TrimSpace(event.TurnUseCase), "text") {
 		return true
 	}
-	return event.ToolInvoked != nil && !*event.ToolInvoked
+	if event.ToolInvoked != nil {
+		return !*event.ToolInvoked
+	}
+	return !isImageQueuedText(text)
+}
+
+func isImageQueuedText(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+	for _, token := range []string{
+		"正在处理图片",
+		"创建图片",
+		"图片准备好后",
+		"生成图片",
+		"processing your image",
+		"creating your image",
+		"image is ready",
+		"your image is ready",
+		"generating your image",
+	} {
+		if strings.Contains(normalized, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) CollectImageOutputs(outputs <-chan ImageOutput, errCh <-chan error) (map[string]any, error) {

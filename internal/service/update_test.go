@@ -179,6 +179,15 @@ func TestServerSourceDockerBuildFilesStayUnderDeploy(t *testing.T) {
 	if strings.Contains(dockerfile, "./cmd/chatgpt2api") || strings.Contains(dockerfile, "COPY cmd ") {
 		t.Fatal("deploy/Dockerfile must not reference the retired cmd/chatgpt2api entrypoint")
 	}
+	for _, want := range []string{
+		"ARG BUILD_NODE_OPTIONS=--max-old-space-size=1024",
+		"ARG BUILD_GOMAXPROCS=2",
+		"ARG BUILD_GOMEMLIMIT=2GiB",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Fatalf("deploy/Dockerfile must keep safe direct-build default %q", want)
+		}
+	}
 
 	scriptData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "docker-build-limited.sh"))
 	if err != nil {
@@ -190,6 +199,23 @@ func TestServerSourceDockerBuildFilesStayUnderDeploy(t *testing.T) {
 	}
 	if !strings.Contains(script, `-f "$repo_root/deploy/docker-compose.yml"`) {
 		t.Fatal("docker-build-limited.sh must run deploy/docker-compose.yml")
+	}
+	for _, want := range []string{
+		`detect_cpu_count()`,
+		`detect_memory_mib()`,
+		`default_build_cpus=2`,
+		`default_build_memory=4g`,
+		`default_build_memory=3g`,
+		`default_buildkit_max_parallelism=1`,
+		`default_build_gomaxprocs=1`,
+		`build_cpus="${BUILD_CPUS:-$default_build_cpus}"`,
+		`buildkit_max_parallelism="${BUILDKIT_MAX_PARALLELISM:-$default_buildkit_max_parallelism}"`,
+		`export BUILD_GOMAXPROCS="${BUILD_GOMAXPROCS:-$default_build_gomaxprocs}"`,
+		`export BUILD_GOMEMLIMIT="${BUILD_GOMEMLIMIT:-$default_build_gomemlimit}"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("docker-build-limited.sh must keep adaptive direct-run default %q", want)
+		}
 	}
 }
 

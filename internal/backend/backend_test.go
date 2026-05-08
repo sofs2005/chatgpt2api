@@ -40,6 +40,17 @@ func setOfficialImageDownloadRetryDelayForTest(delay time.Duration) func() {
 	}
 }
 
+func setOfficialImagePollTimingForTest(timeout, interval time.Duration) func() {
+	previousTimeout := officialImagePollTimeout
+	previousInterval := officialImagePollInterval
+	officialImagePollTimeout = timeout
+	officialImagePollInterval = interval
+	return func() {
+		officialImagePollTimeout = previousTimeout
+		officialImagePollInterval = previousInterval
+	}
+}
+
 func TestUpstreamHTTPErrorSummarizesCloudflareChallenge(t *testing.T) {
 	err := upstreamHTTPError("bootstrap", 403, []byte(`<html><body><script>window._cf_chl_opt={}</script>Enable JavaScript and cookies to continue</body></html>`))
 	got := err.Error()
@@ -391,6 +402,113 @@ func TestStreamResponsesImageDoesNotTreatQueuedAssistantNoticeAsFinalText(t *tes
 	}
 }
 
+func TestStreamResponsesImageReportsAsyncResultTimeout(t *testing.T) {
+	resetPollTiming := setOfficialImagePollTimingForTest(20*time.Millisecond, time.Millisecond)
+	defer resetPollTiming()
+
+	pollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImagePreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImageStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"server_ste_metadata\",\"metadata\":{\"tool_invoked\":true,\"turn_use_case\":\"image gen\"},\"conversation_id\":\"conv-empty\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-empty\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-empty":
+			pollCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt: "生成封面",
+		Model:  "gpt-image-2",
+	})
+	for range events {
+	}
+	err := <-errCh
+	if err == nil {
+		t.Fatal("StreamResponsesImage() error = nil, want async timeout error")
+	}
+	if pollCount == 0 {
+		t.Fatal("expected conversation polling before timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting for async image generation results in conversation conv-empty") {
+		t.Fatalf("error = %q, want async timeout context", err.Error())
+	}
+}
+
+func TestStreamResponsesImageIgnoresInputMessageTextAsFinalText(t *testing.T) {
+	resetPollTiming := setOfficialImagePollTimingForTest(20*time.Millisecond, time.Millisecond)
+	defer resetPollTiming()
+
+	prompt := "生成两位虚构角色在温馨场景中互动的图像"
+	var pollCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImagePreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialImageStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(`data: {"type":"input_message","message":{"author":{"role":"user"},"content":{"content_type":"text","parts":["` + prompt + `"]}},"conversation_id":"conv-input"}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"server_ste_metadata","metadata":{"tool_invoked":true,"turn_use_case":"image gen"},"conversation_id":"conv-input"}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"message_stream_complete","conversation_id":"conv-input"}` + "\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-input":
+			pollCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt: prompt,
+		Model:  "gpt-image-2",
+	})
+	var texts []string
+	for event := range events {
+		if strings.TrimSpace(event.Text) != "" {
+			texts = append(texts, event.Text)
+		}
+	}
+	err := <-errCh
+	if err == nil {
+		t.Fatal("StreamResponsesImage() error = nil, want async timeout error")
+	}
+	if pollCount == 0 {
+		t.Fatal("expected polling after input message was ignored as final text")
+	}
+	if strings.Contains(err.Error(), prompt) {
+		t.Fatalf("error echoed user prompt: %q", err.Error())
+	}
+	if len(texts) != 0 {
+		t.Fatalf("input message text leaked as response text: %#v", texts)
+	}
+}
+
 func TestResolveOfficialImageResultsRetriesTransientDownloadURL404(t *testing.T) {
 	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
 	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
@@ -604,7 +722,9 @@ func TestShouldTreatOfficialImageEventAsFinalText(t *testing.T) {
 		{name: "blocked text", event: ResponsesImageEvent{Text: "blocked", Blocked: true}, want: true},
 		{name: "explicit no tool", event: ResponsesImageEvent{Text: "denied", ToolInvoked: &toolFalse, TurnUseCase: "multimodal"}, want: true},
 		{name: "text use case", event: ResponsesImageEvent{Text: "plain text", ToolInvoked: &toolTrue, TurnUseCase: "text"}, want: true},
+		{name: "non queued text without metadata", event: ResponsesImageEvent{Text: "你希望我画成什么风格？", ConversationID: "conv-1"}, want: true},
 		{name: "queued notice still pending", event: ResponsesImageEvent{Text: "正在处理图片", ToolInvoked: nil, TurnUseCase: ""}, want: false},
+		{name: "english queued notice still pending", event: ResponsesImageEvent{Text: "I'm creating your image now.", ToolInvoked: nil, TurnUseCase: ""}, want: false},
 		{name: "image result present", event: ResponsesImageEvent{Text: "ignored", Result: "b64"}, want: false},
 		{name: "empty text", event: ResponsesImageEvent{Text: "", ToolInvoked: &toolFalse}, want: false},
 	}

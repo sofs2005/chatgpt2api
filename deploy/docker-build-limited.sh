@@ -10,18 +10,18 @@ Creates a resource-capped BuildKit builder, then builds the local Docker image.
 
 Tunable environment variables:
   CHATGPT2API_BUILDER_NAME     Builder name (default: chatgpt2api-local-build)
-  BUILD_CPUS                   Whole CPU cores available to BuildKit (default: 2)
-  BUILD_MEMORY                 BuildKit memory limit (default: 2g)
-  BUILD_MEMORY_SWAP            BuildKit memory+swap limit (default: BUILD_MEMORY)
+  BUILD_CPUS                   Whole CPU cores available to BuildKit (default: auto, up to 2)
+  BUILD_MEMORY                 BuildKit memory limit (default: auto, 2g-4g)
+  BUILD_MEMORY_SWAP            BuildKit memory+swap limit (default: auto, 4g when possible)
   BUILDKIT_MAX_PARALLELISM     BuildKit solver parallelism (default: BUILD_CPUS)
-  BUILD_GOMAXPROCS             Go compiler parallelism (default: BUILD_CPUS)
-  BUILD_GOMEMLIMIT             Go soft memory limit (default: 1GiB)
+  BUILD_GOMAXPROCS             Go compiler parallelism (default: auto, 1 on low-memory hosts, otherwise BUILD_CPUS)
+  BUILD_GOMEMLIMIT             Go soft memory limit (default: auto)
   BUILD_NODE_OPTIONS           Node options for the web build
   BUILD_CPUSET_CPUS            Optional cpuset, for example 0-1
 
 Examples:
-  BUILD_CPUS=2 BUILD_MEMORY=2g sh deploy/docker-build-limited.sh up
-  BUILD_CPUS=1 BUILD_MEMORY=1536m BUILD_GOMEMLIMIT=768MiB sh deploy/docker-build-limited.sh build
+  sh deploy/docker-build-limited.sh up
+  BUILD_CPUS=2 BUILD_MEMORY=4g BUILD_MEMORY_SWAP=4g BUILD_GOMAXPROCS=2 BUILD_GOMEMLIMIT=2GiB sh deploy/docker-build-limited.sh up
 EOF
 }
 
@@ -54,15 +54,66 @@ case "$command" in
     ;;
 esac
 
+detect_cpu_count() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc
+  elif command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN
+  else
+    echo 2
+  fi
+}
+
+detect_memory_mib() {
+  if [ -r /proc/meminfo ]; then
+    awk '/MemTotal:/ { print int($2 / 1024); exit }' /proc/meminfo
+  else
+    echo 4096
+  fi
+}
+
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
+detected_cpus="$(detect_cpu_count)"
+require_uint detected_cpus "$detected_cpus"
+if [ "$detected_cpus" -gt 2 ]; then
+  default_build_cpus=2
+else
+  default_build_cpus="$detected_cpus"
+fi
+
+detected_memory_mib="$(detect_memory_mib)"
+require_uint detected_memory_mib "$detected_memory_mib"
+if [ "$detected_memory_mib" -ge 6144 ]; then
+  default_build_memory=4g
+  default_build_memory_swap=4g
+  default_buildkit_max_parallelism="$default_build_cpus"
+  default_build_gomaxprocs="$default_build_cpus"
+  default_build_gomemlimit=2GiB
+  default_build_node_options=--max-old-space-size=1024
+elif [ "$detected_memory_mib" -ge 4096 ]; then
+  default_build_memory=3g
+  default_build_memory_swap=4g
+  default_buildkit_max_parallelism="$default_build_cpus"
+  default_build_gomaxprocs="$default_build_cpus"
+  default_build_gomemlimit=1536MiB
+  default_build_node_options=--max-old-space-size=1024
+else
+  default_build_memory=2g
+  default_build_memory_swap=4g
+  default_buildkit_max_parallelism=1
+  default_build_gomaxprocs=1
+  default_build_gomemlimit=1GiB
+  default_build_node_options=--max-old-space-size=768
+fi
+
 builder_name="${CHATGPT2API_BUILDER_NAME:-chatgpt2api-local-build}"
-build_cpus="${BUILD_CPUS:-2}"
+build_cpus="${BUILD_CPUS:-$default_build_cpus}"
 build_cpu_period="${BUILD_CPU_PERIOD:-100000}"
-build_memory="${BUILD_MEMORY:-2g}"
-build_memory_swap="${BUILD_MEMORY_SWAP:-$build_memory}"
-buildkit_max_parallelism="${BUILDKIT_MAX_PARALLELISM:-$build_cpus}"
+build_memory="${BUILD_MEMORY:-$default_build_memory}"
+build_memory_swap="${BUILD_MEMORY_SWAP:-$default_build_memory_swap}"
+buildkit_max_parallelism="${BUILDKIT_MAX_PARALLELISM:-$default_buildkit_max_parallelism}"
 
 require_uint BUILD_CPUS "$build_cpus"
 require_uint BUILD_CPU_PERIOD "$build_cpu_period"
@@ -73,9 +124,9 @@ require_uint BUILD_CPU_QUOTA "$build_cpu_quota"
 
 export DOCKER_BUILDKIT=1
 export BUILDX_BUILDER="$builder_name"
-export BUILD_GOMAXPROCS="${BUILD_GOMAXPROCS:-$build_cpus}"
-export BUILD_GOMEMLIMIT="${BUILD_GOMEMLIMIT:-1GiB}"
-export BUILD_NODE_OPTIONS="${BUILD_NODE_OPTIONS:---max-old-space-size=1024}"
+export BUILD_GOMAXPROCS="${BUILD_GOMAXPROCS:-$default_build_gomaxprocs}"
+export BUILD_GOMEMLIMIT="${BUILD_GOMEMLIMIT:-$default_build_gomemlimit}"
+export BUILD_NODE_OPTIONS="${BUILD_NODE_OPTIONS:-$default_build_node_options}"
 export CHATGPT2API_LOCAL_IMAGE="${CHATGPT2API_LOCAL_IMAGE:-chatgpt2api:local}"
 export CHATGPT2API_VERSION="${CHATGPT2API_VERSION:-0.0.0-dev}"
 
@@ -97,6 +148,19 @@ memory=$build_memory
 memory-swap=$build_memory_swap
 max-parallelism=$buildkit_max_parallelism
 cpuset-cpus=${BUILD_CPUSET_CPUS:-}"
+
+cat <<EOF
+chatgpt2api Docker source build limits:
+  builder: $builder_name
+  cpu: $build_cpus core(s)
+  memory: $build_memory
+  memory+swap: $build_memory_swap
+  buildkit parallelism: $buildkit_max_parallelism
+  go parallelism: $BUILD_GOMAXPROCS
+  go memory target: $BUILD_GOMEMLIMIT
+  node options: $BUILD_NODE_OPTIONS
+  image: $CHATGPT2API_LOCAL_IMAGE
+EOF
 
 create_builder() {
   if [ -n "${BUILD_CPUSET_CPUS:-}" ]; then

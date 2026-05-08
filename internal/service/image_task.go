@@ -369,7 +369,11 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		} else if runCtx.Err() == context.DeadlineExceeded {
 			message = "图片生成超时，请稍后重试或降低分辨率"
 		}
-		updates := map[string]any{"status": status, "error": message, "data": taskResultData(result)}
+		data := taskResultData(result)
+		updates := map[string]any{"status": status, "error": message, "data": data}
+		if mode == "generate" || mode == "edit" {
+			updates["output_statuses"] = terminalImageOutputStatuses(status, taskCount(mode, payload), data)
+		}
 		if outputType := util.Clean(result["output_type"]); outputType != "" {
 			updates["output_type"] = outputType
 		}
@@ -386,6 +390,9 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 	if len(data) == 0 {
 		message := firstNonEmpty(util.Clean(result["message"]), "task returned no output data")
 		updates := map[string]any{"status": TaskStatusError, "error": message, "data": []any{}}
+		if mode == "generate" || mode == "edit" {
+			updates["output_statuses"] = terminalImageOutputStatuses(TaskStatusError, taskCount(mode, payload), nil)
+		}
 		if outputType != "" {
 			updates["output_type"] = outputType
 		}
@@ -642,13 +649,13 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 				normalized["output_compression"] = compression
 			}
 		}
-	if data := util.AsMapSlice(task["data"]); data != nil {
-		normalized["data"] = data
-	}
-	if statuses := normalizedImageOutputStatuses(mode, count, task["output_statuses"]); len(statuses) > 0 {
-		normalized["output_statuses"] = statuses
-	}
-	if errText := util.Clean(task["error"]); errText != "" {
+		if data := util.AsMapSlice(task["data"]); data != nil {
+			normalized["data"] = data
+		}
+		if statuses := normalizedImageOutputStatuses(mode, count, task["output_statuses"]); len(statuses) > 0 {
+			normalized["output_statuses"] = statuses
+		}
+		if errText := util.Clean(task["error"]); errText != "" {
 			normalized["error"] = errText
 		}
 		if outputType := util.Clean(task["output_type"]); outputType != "" {
@@ -808,6 +815,22 @@ func initialImageOutputStatuses(count int) []string {
 	return statuses
 }
 
+func terminalImageOutputStatuses(status string, count int, data []map[string]any) []string {
+	statuses := initialImageOutputStatuses(count)
+	for index := range statuses {
+		if index < len(data) && hasImageTaskOutputData(data[index]) {
+			statuses[index] = TaskStatusSuccess
+			continue
+		}
+		if status == TaskStatusCancelled {
+			statuses[index] = TaskStatusCancelled
+			continue
+		}
+		statuses[index] = TaskStatusError
+	}
+	return statuses
+}
+
 func normalizedImageOutputStatuses(mode string, count int, value any) []string {
 	if mode != "generate" && mode != "edit" {
 		return nil
@@ -821,7 +844,7 @@ func normalizedImageOutputStatuses(mode string, count int, value any) []string {
 		status := "queued"
 		if index < len(source) {
 			switch source[index] {
-			case "queued", "running", "success":
+			case "queued", "running", "success", "error", "cancelled":
 				status = source[index]
 			}
 		}

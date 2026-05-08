@@ -447,9 +447,18 @@ function updateStoredImage(image: StoredImage, updates: Partial<StoredImage>): S
   return STORED_IMAGE_FIELDS.every((field) => image[field] === next[field]) ? image : next;
 }
 
-function creationTaskImageStatus(task: CreationTask, dataIndex = 0): "queued" | "running" | "success" | undefined {
+function creationTaskImageStatus(
+  task: CreationTask,
+  dataIndex = 0,
+): "queued" | "running" | "success" | "error" | "cancelled" | undefined {
   const outputStatus = task.output_statuses?.[dataIndex];
-  if (outputStatus === "queued" || outputStatus === "running" || outputStatus === "success") {
+  if (
+    outputStatus === "queued" ||
+    outputStatus === "running" ||
+    outputStatus === "success" ||
+    outputStatus === "error" ||
+    outputStatus === "cancelled"
+  ) {
     return outputStatus;
   }
   if (task.status === "queued" || task.status === "running" || task.status === "success") {
@@ -710,8 +719,20 @@ function formatCreationTaskErrorMessage(message: string) {
   if (normalized.includes("no images generated") && normalized.includes("model may have refused")) {
     return "没有生成图片，模型可能检测到敏感内容并拒绝了这次请求，请调整提示词后重试。";
   }
+  if (normalized.includes("upstream moderation blocked the request")) {
+    return "没有生成图片，上游安全策略拦截了这次请求，请调整提示词后重试。";
+  }
+  if (normalized.includes("upstream did not invoke the image tool")) {
+    return "没有生成图片，上游没有调用图片工具，可能是提示词被当作普通文本或被拒绝，请调整提示词后重试。";
+  }
+  if (normalized.includes("upstream returned text instead")) {
+    return trimmed.replace(/^no image was generated; upstream returned text instead:\s*/i, "");
+  }
   if (normalized.includes("timed out waiting for async image generation")) {
-    return "图片生成等待超时，建议稍后重试；如果使用 Codex 结构化高分辨率参数，可降低尺寸后再试。";
+    return "图片生成已提交到上游，但等待结果超时，建议稍后重试；如果重复出现，请换账号或降低请求复杂度。";
+  }
+  if (normalized.includes("upstream returned no image output")) {
+    return "上游没有返回图片结果，请稍后重试；如果重复出现，请检查账号能力、代理和提示词内容。";
   }
   if (normalized.includes("no available image quota")) {
     return "当前没有可用的图片额度，请检查账号额度或稍后重试。";

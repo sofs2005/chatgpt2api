@@ -140,6 +140,12 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 		var errCh <-chan error
 		if IsImageChatRequest(body) {
 			items, errCh = e.ImageChatEvents(ctx, body)
+		} else if HasVisionImages(body) {
+			model, messages, images, err := VisionChatParts(body)
+			if err != nil {
+				return nil, nil, err
+			}
+			items, errCh = e.StreamVisionChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), messages, model, images)
 		} else {
 			model, messages, err := TextChatParts(body)
 			if err != nil {
@@ -151,6 +157,17 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 	}
 	if IsImageChatRequest(body) {
 		return e.ImageChatResponse(ctx, body)
+	}
+	if HasVisionImages(body) {
+		model, messages, images, err := VisionChatParts(body)
+		if err != nil {
+			return nil, nil, err
+		}
+		result, err := e.VisionChatResponse(ctx, body, model, messages, images)
+		if err != nil {
+			return nil, nil, err
+		}
+		return result, nil, nil
 	}
 	model, messages, err := TextChatParts(body)
 	if err != nil {
@@ -220,6 +237,62 @@ func (e *Engine) StreamTextChatCompletion(ctx context.Context, client *backend.C
 	return out, errOut
 }
 
+func (e *Engine) StreamVisionChatCompletion(ctx context.Context, client *backend.Client, messages []map[string]any, model string, images []UploadedImage) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		visionImages := make([]backend.VisionImage, len(images))
+		for i, img := range images {
+			visionImages[i] = backend.VisionImage{
+				Data:        img.Data,
+				ContentType: img.ContentType,
+				FileName:    img.Filename,
+			}
+		}
+		deltas, errCh := client.StreamMultimodalConversation(ctx, messages, model, visionImages)
+		id := "chatcmpl-" + util.NewHex(32)
+		created := time.Now().Unix()
+		sentRole := false
+		for deltaText := range deltas {
+			if !sentRole {
+				sentRole = true
+				out <- CompletionChunk(model, map[string]any{"role": "assistant", "content": deltaText}, nil, id, created)
+			} else {
+				out <- CompletionChunk(model, map[string]any{"content": deltaText}, nil, id, created)
+			}
+		}
+		if err := <-errCh; err != nil {
+			errOut <- err
+			return
+		}
+		if !sentRole {
+			out <- CompletionChunk(model, map[string]any{"role": "assistant", "content": ""}, nil, id, created)
+		}
+		out <- CompletionChunk(model, map[string]any{}, "stop", id, created)
+		errOut <- nil
+	}()
+	return out, errOut
+}
+
+func (e *Engine) VisionChatResponse(ctx context.Context, body map[string]any, model string, messages []map[string]any, images []UploadedImage) (map[string]any, error) {
+	visionImages := make([]backend.VisionImage, len(images))
+	for i, img := range images {
+		visionImages[i] = backend.VisionImage{
+			Data:        img.Data,
+			ContentType: img.ContentType,
+			FileName:    img.Filename,
+		}
+	}
+	client := e.TextBackend(e.Accounts.GetTextAccessToken())
+	text, err := e.CollectVisionText(ctx, client, messages, model, visionImages)
+	if err != nil {
+		return nil, err
+	}
+	return CompletionResponse(model, text, 0, messages), nil
+}
+
 func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {
 	if messages := util.AsMapSlice(body["messages"]); len(messages) > 0 {
 		return messages, nil
@@ -249,6 +322,37 @@ func IsImageChatRequest(body map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func HasVisionImages(body map[string]any) bool {
+	if IsImageChatRequest(body) {
+		return false
+	}
+	for _, msg := range util.AsMapSlice(body["messages"]) {
+		if len(ExtractImagesFromMessageContent(msg["content"])) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func ExtractVisionImages(body map[string]any) []UploadedImage {
+	var images []UploadedImage
+	for _, msg := range util.AsMapSlice(body["messages"]) {
+		images = append(images, ExtractImagesFromMessageContent(msg["content"])...)
+	}
+	return images
+}
+
+func VisionChatParts(body map[string]any) (string, []map[string]any, []UploadedImage, error) {
+	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	rawMessages, err := ChatMessagesFromBody(body)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	messages := NormalizeMessages(rawMessages, nil)
+	images := ExtractVisionImages(body)
+	return model, messages, images, nil
 }
 
 func (e *Engine) ImageChatResponse(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {

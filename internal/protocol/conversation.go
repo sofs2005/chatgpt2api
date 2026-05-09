@@ -385,6 +385,15 @@ func (e *Engine) CollectText(ctx context.Context, client *backend.Client, reques
 	return strings.Join(parts, ""), <-errCh
 }
 
+func (e *Engine) CollectVisionText(ctx context.Context, client *backend.Client, messages []map[string]any, model string, images []backend.VisionImage) (string, error) {
+	deltas, errCh := client.StreamMultimodalConversation(ctx, messages, model, images)
+	var parts []string
+	for delta := range deltas {
+		parts = append(parts, delta)
+	}
+	return strings.Join(parts, ""), <-errCh
+}
+
 func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client, messages []map[string]any, model, prompt string) (<-chan ConversationEvent, <-chan error) {
 	out := make(chan ConversationEvent)
 	errCh := make(chan error, 1)

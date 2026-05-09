@@ -537,6 +537,189 @@ func (c *Client) startTextConversation(ctx context.Context, messages []map[strin
 	return c.postJSON(ctx, officialStreamPath, payload, c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream"), true)
 }
 
+// VisionImage represents an image to be uploaded for multimodal vision understanding.
+type VisionImage struct {
+	Data        []byte
+	ContentType string
+	FileName    string
+}
+
+func (c *Client) uploadVisionImages(ctx context.Context, images []VisionImage) ([]uploadedImageRef, error) {
+	refs := make([]uploadedImageRef, 0, len(images))
+	for i, img := range images {
+		fileName := img.FileName
+		if fileName == "" {
+			fileName = fmt.Sprintf("image_%d.png", i)
+		}
+		ref, err := c.uploadImage(ctx, ResponsesInputImage{Data: img.Data, ContentType: img.ContentType}, fileName)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
+func buildVisionParts(prompt string, refs []uploadedImageRef) []any {
+	parts := []any{prompt}
+	for _, ref := range refs {
+		parts = append(parts, map[string]any{
+			"content_type":  "image_asset_pointer",
+			"asset_pointer": "file-service://" + ref.FileID,
+			"width":         ref.Width,
+			"height":        ref.Height,
+			"size_bytes":    ref.FileSize,
+		})
+	}
+	return parts
+}
+
+func buildVisionAttachments(refs []uploadedImageRef) []map[string]any {
+	attachments := make([]map[string]any, 0, len(refs))
+	for _, ref := range refs {
+		attachments = append(attachments, map[string]any{
+			"id":       ref.FileID,
+			"mimeType": ref.MIMEType,
+			"name":     ref.FileName,
+			"size":     ref.FileSize,
+			"width":    ref.Width,
+			"height":   ref.Height,
+		})
+	}
+	return attachments
+}
+
+func (c *Client) prepareMultimodalConversation(ctx context.Context, messages []map[string]any, reqs ChatRequirements, model string, refs []uploadedImageRef) (string, error) {
+	prompt := conversationPrompt(messages)
+	payload := map[string]any{
+		"action":                "next",
+		"fork_from_shared_post": false,
+		"parent_message_id":     util.NewUUID(),
+		"model":                 textModelSlug(model),
+		"client_prepare_state":  "success",
+		"timezone_offset_min":   -480,
+		"timezone":              "Asia/Shanghai",
+		"conversation_mode":     map[string]any{"kind": "primary_assistant"},
+		"system_hints":          []any{},
+		"partial_query": map[string]any{
+			"id":      util.NewUUID(),
+			"author":  map[string]any{"role": "user"},
+			"content": map[string]any{"content_type": "multimodal_text", "parts": buildVisionParts(prompt, refs)},
+		},
+		"supports_buffering":  true,
+		"supported_encodings": []any{"v1"},
+		"client_contextual_info": map[string]any{
+			"app_name": "chatgpt.com",
+		},
+	}
+	resp, err := c.postJSON(ctx, officialPreparePath, payload, c.officialHeaders(officialPreparePath, reqs, "", "*/*"), false)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := ensureOK(resp, officialPreparePath); err != nil {
+		return "", err
+	}
+	var data map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+	return util.Clean(data["conduit_token"]), nil
+}
+
+func (c *Client) startMultimodalConversation(ctx context.Context, messages []map[string]any, reqs ChatRequirements, conduitToken, model string, refs []uploadedImageRef) (*http.Response, error) {
+	prompt := conversationPrompt(messages)
+	attachments := buildVisionAttachments(refs)
+	payload := map[string]any{
+		"action": "next",
+		"messages": []any{
+			map[string]any{
+				"id":          util.NewUUID(),
+				"author":      map[string]any{"role": "user"},
+				"create_time": float64(time.Now().UnixNano()) / 1e9,
+				"content": map[string]any{
+					"content_type": "multimodal_text",
+					"parts":        buildVisionParts(prompt, refs),
+				},
+				"metadata": map[string]any{
+					"developer_mode_connector_ids": []any{},
+					"selected_github_repos":        []any{},
+					"selected_all_github_repos":    false,
+					"serialization_metadata":       map[string]any{"custom_symbol_offsets": []any{}},
+					"attachments":                  attachments,
+				},
+			},
+		},
+		"parent_message_id":                    util.NewUUID(),
+		"model":                                textModelSlug(model),
+		"client_prepare_state":                 "sent",
+		"timezone_offset_min":                  -480,
+		"timezone":                             "Asia/Shanghai",
+		"conversation_mode":                    map[string]any{"kind": "primary_assistant"},
+		"enable_message_followups":             true,
+		"system_hints":                         []any{},
+		"supports_buffering":                   true,
+		"supported_encodings":                  []any{"v1"},
+		"paragen_cot_summary_display_override": "allow",
+		"force_parallel_switch":                "auto",
+		"client_contextual_info": map[string]any{
+			"is_dark_mode":      false,
+			"time_since_loaded": 1200,
+			"page_height":       1072,
+			"page_width":        1724,
+			"pixel_ratio":       1.2,
+			"screen_height":     1440,
+			"screen_width":      2560,
+			"app_name":          "chatgpt.com",
+		},
+	}
+	return c.postJSON(ctx, officialStreamPath, payload, c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream"), true)
+}
+
+func (c *Client) StreamMultimodalConversation(ctx context.Context, messages []map[string]any, model string, images []VisionImage) (<-chan string, <-chan error) {
+	out := make(chan string)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errCh)
+		if c.AccessToken == "" {
+			errCh <- fmt.Errorf("vision requires authentication")
+			return
+		}
+		if err := c.bootstrap(ctx); err != nil {
+			errCh <- err
+			return
+		}
+		reqs, err := c.getChatRequirements(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		refs, err := c.uploadVisionImages(ctx, images)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		conduitToken, err := c.prepareMultimodalConversation(ctx, messages, reqs, model, refs)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resp, err := c.startMultimodalConversation(ctx, messages, reqs, conduitToken, model, refs)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer resp.Body.Close()
+		if err := ensureOK(resp, officialStreamPath); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- iterSSEPayloads(ctx, resp.Body, out)
+	}()
+	return out, errCh
+}
+
 func (c *Client) conversationPayload(messages []map[string]any, model, timezoneName string) map[string]any {
 	conversationMessages := []map[string]any{conversationUserMessage(conversationPrompt(messages))}
 	return map[string]any{

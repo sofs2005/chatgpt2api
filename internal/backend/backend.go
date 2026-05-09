@@ -937,6 +937,19 @@ func iterSSEPayloads(ctx context.Context, reader io.Reader, out chan<- string) e
 			}
 		}
 		if err == io.EOF {
+			if len(buf) > 0 {
+				line := strings.TrimSpace(string(buf))
+				if strings.HasPrefix(line, "data:") {
+					payload := strings.TrimSpace(line[5:])
+					if payload != "" {
+						select {
+						case out <- payload:
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+				}
+			}
 			return nil
 		}
 		if err != nil {
@@ -979,6 +992,26 @@ func iterMultimodalSSEPayloads(ctx context.Context, reader io.Reader, out chan<-
 			}
 		}
 		if err == io.EOF {
+			if len(buf) > 0 {
+				line := strings.TrimSpace(string(buf))
+				if strings.HasPrefix(line, "data:") {
+					payload := strings.TrimSpace(line[5:])
+					if payload != "" && payload != "[DONE]" {
+						var event map[string]any
+						if json.Unmarshal([]byte(payload), &event) == nil {
+							if v, ok := event["v"]; ok {
+								if text, ok := v.(string); ok && text != "" {
+									select {
+									case out <- text:
+									case <-ctx.Done():
+										return ctx.Err()
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 			return nil
 		}
 		if err != nil {

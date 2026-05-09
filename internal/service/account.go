@@ -32,6 +32,8 @@ type AccountService struct {
 	imageReservations map[string]int
 	remoteBaseURL     string
 	browserHTTPClient func(profile string, timeout time.Duration) *http.Client
+	textRequestCount  map[string]int
+	textCooldownUntil time.Time
 }
 
 const (
@@ -55,6 +57,7 @@ func NewAccountService(backend storage.Backend, config AccountConfig, proxy *Pro
 		imageReservations: map[string]int{},
 		remoteBaseURL:     "https://chatgpt.com",
 		browserHTTPClient: browserHTTPClient,
+		textRequestCount:  map[string]int{},
 	}
 	s.items = s.loadAccounts()
 	return s
@@ -197,6 +200,7 @@ func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 		if _, ok := targets[token]; ok {
 			removed++
 			delete(s.imageReservations, token)
+			delete(s.textRequestCount, token)
 			continue
 		}
 		next = append(next, item)
@@ -280,13 +284,88 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 func (s *AccountService) GetTextAccessToken() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	nonFree := s.filterNonFreeLocked()
+	if len(nonFree) > 0 {
+		return s.selectFromTextPoolLocked(nonFree, false)
+	}
+
+	free := s.filterFreeLocked()
+	if len(free) > 0 {
+		return s.selectFromTextPoolLocked(free, true)
+	}
+
+	return ""
+}
+
+func (s *AccountService) filterNonFreeLocked() []map[string]any {
+	var out []map[string]any
 	for _, item := range s.items {
 		status := util.Clean(item["status"])
-		if status != "禁用" && status != "异常" {
-			return util.Clean(item["access_token"])
+		if status == "禁用" || status == "异常" {
+			continue
+		}
+		if IsPaidImageAccount(item) {
+			out = append(out, item)
 		}
 	}
-	return ""
+	return out
+}
+
+func (s *AccountService) filterFreeLocked() []map[string]any {
+	var out []map[string]any
+	for _, item := range s.items {
+		status := util.Clean(item["status"])
+		if status == "禁用" || status == "异常" {
+			continue
+		}
+		if !IsPaidImageAccount(item) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func (s *AccountService) selectFromTextPoolLocked(pool []map[string]any, isFree bool) string {
+	const maxRequestsPerAccount = 10
+
+	var bestToken string
+	bestCount := int(^uint(0) >> 1)
+	allExhausted := true
+	for _, item := range pool {
+		token := util.Clean(item["access_token"])
+		count := s.textRequestCount[token]
+		if count < bestCount {
+			bestCount = count
+			bestToken = token
+		}
+		if count < maxRequestsPerAccount {
+			allExhausted = false
+		}
+	}
+
+	if allExhausted {
+		if isFree {
+			now := time.Now()
+			if now.After(s.textCooldownUntil) {
+				s.resetTextCountsLocked(pool)
+				s.textCooldownUntil = now.Add(5 * time.Hour)
+				bestCount = 0
+			}
+		} else if len(pool) > 1 {
+			s.resetTextCountsLocked(pool)
+			bestCount = 0
+		}
+	}
+
+	s.textRequestCount[bestToken] = bestCount + 1
+	return bestToken
+}
+
+func (s *AccountService) resetTextCountsLocked(pool []map[string]any) {
+	for _, item := range pool {
+		s.textRequestCount[util.Clean(item["access_token"])] = 0
+	}
 }
 
 func (s *AccountService) GetAvailableAccessToken(ctx context.Context) (string, error) {

@@ -607,7 +607,7 @@ export function ImageComposer({
         }}
       />
 
-      {composerMode === "image" && referenceImages.length > 0 ? (
+      {referenceImages.length > 0 ? (
         <div className="hide-scrollbar mb-2 flex max-h-20 gap-2 overflow-x-auto px-1 py-1 sm:mb-3">
           {referenceImages.map((image, index) => (
             <div key={`${image.name}-${index}`} className="relative size-14 shrink-0 sm:size-16">

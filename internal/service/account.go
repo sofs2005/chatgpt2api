@@ -1001,7 +1001,9 @@ func IsAccountInvalidErrorMessage(message string) bool {
 	return strings.Contains(text, "token_invalidated") ||
 		strings.Contains(text, "token_revoked") ||
 		strings.Contains(text, "authentication token has been invalidated") ||
-		strings.Contains(text, "invalidated oauth token")
+		strings.Contains(text, "invalidated oauth token") ||
+		strings.Contains(text, "token expired") ||
+		strings.Contains(text, "authentication token is expired")
 }
 
 func IsAccountRateLimitedErrorMessage(message string) bool {

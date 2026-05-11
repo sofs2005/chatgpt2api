@@ -440,20 +440,28 @@ func (s *AccountService) RefreshAccountState(ctx context.Context, accessToken st
 	return s.UpdateAccount(accessToken, remote), nil
 }
 
+type pendingRefreshItem struct {
+	accessToken  string
+	sessionToken string
+}
+
 func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []string) map[string]any {
 	tokens := cleanTokens(accessTokens)
 	if len(tokens) == 0 {
 		return map[string]any{
-			"refreshed":   0,
-			"errors":      []map[string]string{},
-			"results":     []map[string]any{},
-			"total":       0,
-			"failed":      0,
-			"duration_ms": 0,
-			"items":       s.ListAccounts(),
+			"refreshed":         0,
+			"session_refreshed": 0,
+			"session_failed":    0,
+			"errors":            []map[string]string{},
+			"results":           []map[string]any{},
+			"total":             0,
+			"failed":            0,
+			"duration_ms":       0,
+			"items":             s.ListAccounts(),
 		}
 	}
 	startedAt := time.Now()
+	pendingRefresh := []pendingRefreshItem{}
 	type result struct {
 		token    string
 		info     map[string]any
@@ -534,6 +542,11 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			detail["quota"] = current["quota"]
 			detail["image_quota_unknown"] = current["image_quota_unknown"]
 			detail["restore_at"] = current["restore_at"]
+			if util.Clean(current["status"]) == "过期待刷新" {
+				if st := util.Clean(current["session_token"]); st != "" {
+					pendingRefresh = append(pendingRefresh, pendingRefreshItem{accessToken: res.token, sessionToken: st})
+				}
+			}
 		}
 		errorItem := map[string]string{
 			"account_id":   accountIDFromToken(res.token),
@@ -545,14 +558,41 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		detail["error"] = message
 		details = append(details, detail)
 	}
+
+	refreshedCount := 0
+	failedRefreshCount := 0
+	if len(pendingRefresh) > 0 {
+		sortPendingRefreshByPriority(pendingRefresh, s)
+	}
+	for _, item := range pendingRefresh {
+		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshToken(ctx, item.accessToken, item.sessionToken)
+		if err != nil {
+			s.UpdateAccount(item.accessToken, map[string]any{"status": "异常"})
+			failedRefreshCount++
+			errors = append(errors, map[string]string{
+				"account_id":   accountIDFromToken(item.accessToken),
+				"access_token": item.accessToken,
+				"error":        fmt.Sprintf("token刷新失败: %s", err.Error()),
+			})
+			continue
+		}
+		s.RefreshAccountViaSession(item.accessToken, newAccessToken, newSessionToken, newExpires)
+		if info, err := s.FetchRemoteInfo(ctx, newAccessToken); err == nil {
+			s.UpdateAccount(newAccessToken, info)
+		}
+		refreshedCount++
+	}
+
 	return map[string]any{
-		"refreshed":   refreshed,
-		"errors":      errors,
-		"results":     details,
-		"total":       len(tokens),
-		"failed":      len(errors),
-		"duration_ms": time.Since(startedAt).Milliseconds(),
-		"items":       s.ListAccounts(),
+		"refreshed":         refreshed,
+		"session_refreshed": refreshedCount,
+		"session_failed":    failedRefreshCount,
+		"errors":            errors,
+		"results":           details,
+		"total":             len(tokens),
+		"failed":            len(errors),
+		"duration_ms":       time.Since(startedAt).Milliseconds(),
+		"items":             s.ListAccounts(),
 	}
 }
 
@@ -643,9 +683,11 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 			sessionToken = util.Clean(account["session_token"])
 		}
 		if sessionToken != "" {
-			// 有 session_token，尝试异步刷新
+			// 有 session_token，实时请求异步刷新；批量扫描由 RefreshAccounts 第二阶段串行刷新
 			s.UpdateAccount(accessToken, map[string]any{"status": "过期待刷新"})
-			s.refresher.TryRefreshAsync(accessToken, sessionToken)
+			if event != "refresh_accounts" {
+				s.refresher.TryRefreshAsync(accessToken, sessionToken)
+			}
 			return "检测到token过期，已提交刷新任务", true
 		}
 		// 无 session_token，直接标记异常
@@ -671,8 +713,8 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 // RefreshAccountViaSession 刷新成功后更新账号数据
 func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires string) bool {
 	updates := map[string]any{
-		"access_token":   newAccessToken,
-		"session_token":  newSessionToken,
+		"access_token":    newAccessToken,
+		"session_token":   newSessionToken,
 		"session_expires": newExpires,
 		"status":          "正常",
 	}
@@ -1022,6 +1064,27 @@ func (s *AccountService) detectAccountType(accessToken string, mePayload, initPa
 		}
 	}
 	return "Free"
+}
+
+func sortPendingRefreshByPriority(items []pendingRefreshItem, s *AccountService) {
+	if len(items) < 2 {
+		return
+	}
+	paid := make([]pendingRefreshItem, 0, len(items))
+	free := make([]pendingRefreshItem, 0, len(items))
+	for _, item := range items {
+		if isPaidRefreshAccount(s, item.accessToken) {
+			paid = append(paid, item)
+		} else {
+			free = append(free, item)
+		}
+	}
+	copy(items, append(paid, free...))
+}
+
+func isPaidRefreshAccount(s *AccountService, accessToken string) bool {
+	account := s.GetAccount(accessToken)
+	return IsPaidImageAccount(account)
 }
 
 func IsImageAccountAvailable(account map[string]any) bool {

@@ -325,7 +325,7 @@ func (s *AccountService) filterNonFreeLocked() []map[string]any {
 	var out []map[string]any
 	for _, item := range s.items {
 		status := util.Clean(item["status"])
-		if status == "禁用" || status == "异常" {
+		if status == "禁用" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
 			continue
 		}
 		if IsPaidImageAccount(item) {
@@ -339,7 +339,7 @@ func (s *AccountService) filterFreeLocked() []map[string]any {
 	var out []map[string]any
 	for _, item := range s.items {
 		status := util.Clean(item["status"])
-		if status == "禁用" || status == "异常" {
+		if status == "禁用" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
 			continue
 		}
 		if !IsPaidImageAccount(item) {
@@ -998,7 +998,7 @@ func IsImageAccountAvailable(account map[string]any) bool {
 		return false
 	}
 	status := util.Clean(account["status"])
-	if status == "禁用" || status == "限流" || status == "异常" {
+	if status == "禁用" || status == "限流" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
 		return false
 	}
 	if util.ToBool(account["image_quota_unknown"]) {

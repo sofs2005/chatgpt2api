@@ -16,6 +16,20 @@ import (
 	"chatgpt2api/internal/util"
 )
 
+// 账号 map 字段说明（storage 层存储的 account 对象）
+//
+//	access_token        - ChatGPT 访问令牌（JWT），必填，账号唯一标识
+//	session_token       - 会话令牌，用于自动刷新 access_token
+//	type                - 账号类型：Free / Plus / ProLite / Pro / Team
+//	status              - 账号状态：正常 / 异常 / 限流 / 禁用 / 过期待刷新 / 刷新中
+//	quota               - 剩余配额次数（整数）
+//	image_quota_unknown - 图片配额未知标记
+//	email               - 关联邮箱
+//	user_id             - 用户ID
+//	chatgpt_account_id  - ChatGPT 账号ID
+//	limits_progress     - 用量限制进度
+//	default_model_slug  - 默认模型标识
+//	restore_at          - 配额恢复时间
 type AccountConfig interface {
 	AutoRemoveInvalidAccounts() bool
 	AutoRemoveRateLimitedAccounts() bool
@@ -1003,6 +1017,19 @@ func IsAccountInvalidErrorMessage(message string) bool {
 		strings.Contains(text, "authentication token has been invalidated") ||
 		strings.Contains(text, "invalidated oauth token") ||
 		strings.Contains(text, "token expired") ||
+		strings.Contains(text, "authentication token is expired")
+}
+
+// IsAccountTokenExpiredErrorMessage 专门检测"可刷新的 token 过期"场景。
+// 与 IsAccountInvalidErrorMessage 的区别：本函数不包含 token_invalidated / token_revoked /
+// invalidated oauth token 等不可刷新场景，仅精确匹配 token expired 相关消息。
+// 当本函数返回 true 且账户有 session_token 时，应触发刷新而不是直接标记异常。
+func IsAccountTokenExpiredErrorMessage(message string) bool {
+	text := strings.ToLower(strings.TrimSpace(message))
+	if text == "" || isBootstrapErrorMessage(text) {
+		return false
+	}
+	return strings.Contains(text, "token expired") ||
 		strings.Contains(text, "authentication token is expired")
 }
 

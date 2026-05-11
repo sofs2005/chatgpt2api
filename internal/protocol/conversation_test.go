@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -328,6 +329,43 @@ func TestImageStreamErrorMessage(t *testing.T) {
 	}
 	if got := imageStreamErrorMessage(""); got != "image generation failed" {
 		t.Fatalf("empty error = %q", got)
+	}
+}
+
+func TestHandleImageGenerationsReturnsUpstreamTextResponse(t *testing.T) {
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "message", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Text: "你好！我是 ChatGPT。", UpstreamEventType: "image_text_response"}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	result, _, err := engine.HandleImageGenerations(context.Background(), map[string]any{
+		"prompt": "你好，你是什么模型？",
+		"model":  "gpt-image-2",
+	})
+	if err == nil {
+		t.Fatal("HandleImageGenerations() error = nil, want text-response image error")
+	}
+	var imageErr *ImageGenerationError
+	if !errors.As(err, &imageErr) {
+		t.Fatalf("HandleImageGenerations() error = %T %v, want ImageGenerationError", err, err)
+	}
+	if imageErr.Code != "image_generation_text_response" || imageErr.Message != "你好！我是 ChatGPT。" {
+		t.Fatalf("image error = %#v", imageErr)
+	}
+	if result["output_type"] != "text" {
+		t.Fatalf("output_type = %#v, want text in %#v", result["output_type"], result)
+	}
+	if result["message"] != "你好！我是 ChatGPT。" {
+		t.Fatalf("message = %#v, want upstream text", result["message"])
 	}
 }
 

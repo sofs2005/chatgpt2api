@@ -796,6 +796,9 @@ func isFinalImageTextEvent(event backend.ResponsesImageEvent) bool {
 	if strings.TrimSpace(event.Text) == "" || event.Result != "" {
 		return false
 	}
+	if event.Type == "image_text_response" {
+		return true
+	}
 	if event.Blocked {
 		return true
 	}

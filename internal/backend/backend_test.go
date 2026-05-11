@@ -218,7 +218,7 @@ func TestStreamResponsesImageUsesOfficialPrepareAndConversationRoutes(t *testing
 			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-1\"}\n\n"))
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_abc"}]}}}}}`))
+			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"file-service://file_abc"}]}}}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_abc":
 			if got := r.URL.Query().Get("conversation_id"); got != "conv-1" {
 				t.Fatalf("conversation_id = %q", got)
@@ -306,6 +306,70 @@ func TestStreamResponsesImageUsesOfficialPrepareAndConversationRoutes(t *testing
 	}
 }
 
+func TestStreamResponsesImageUsesDirectSSEImageAssetPointer(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	var server *httptest.Server
+	pollCount := 0
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialPreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"p\":\"\",\"o\":\"add\",\"v\":{\"message\":{\"author\":{\"role\":\"tool\",\"metadata\":{}},\"content\":{\"content_type\":\"multimodal_text\",\"parts\":[{\"content_type\":\"image_asset_pointer\",\"asset_pointer\":\"sediment://file_direct\"}]}},\"conversation_id\":\"conv-direct\"}}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-direct\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-direct":
+			pollCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_direct":
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-direct" {
+				t.Fatalf("conversation_id = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_direct.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/file_direct.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt: "生成封面",
+		Model:  "gpt-image-2",
+	})
+	var results []ResponsesImageEvent
+	for event := range events {
+		if event.Result != "" {
+			results = append(results, event)
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamResponsesImage() error = %v", err)
+	}
+	if pollCount != 0 {
+		t.Fatalf("conversation poll count = %d, want direct SSE asset to avoid polling", pollCount)
+	}
+	if len(results) != 1 || results[0].Result != png1x1 {
+		t.Fatalf("results = %#v, want one direct image result", results)
+	}
+}
+
 func TestStreamResponsesImageDoesNotTreatQueuedAssistantNoticeAsFinalText(t *testing.T) {
 	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
 	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
@@ -333,7 +397,7 @@ func TestStreamResponsesImageDoesNotTreatQueuedAssistantNoticeAsFinalText(t *tes
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-queued":
 			pollCount++
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_ready"}]}}}}}`))
+			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"file-service://file_ready"}]}}}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_ready":
 			if got := r.URL.Query().Get("conversation_id"); got != "conv-queued" {
 				t.Fatalf("conversation_id = %q", got)
@@ -388,6 +452,123 @@ func TestStreamResponsesImageDoesNotTreatQueuedAssistantNoticeAsFinalText(t *tes
 	}
 	if len(results) != 1 || results[0].Result != png1x1 {
 		t.Fatalf("results = %#v, want one final image result", results)
+	}
+}
+
+func TestStreamResponsesImageEmitsFinalTextWhenNoImageResult(t *testing.T) {
+	const finalText = "你好！我是 ChatGPT。"
+	var server *httptest.Server
+	pollCount := 0
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialPreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"v\":{\"message\":{\"author\":{\"role\":\"assistant\"},\"content\":{\"content_type\":\"text\",\"parts\":[\"" + finalText + "\"]}}},\"conversation_id\":\"conv-text\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-text\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-text":
+			pollCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt: "你好，你是什么模型？",
+		Model:  "gpt-image-2",
+	})
+	var texts []string
+	var results []ResponsesImageEvent
+	for event := range events {
+		if strings.TrimSpace(event.Text) != "" {
+			texts = append(texts, event.Text)
+		}
+		if event.Result != "" {
+			results = append(results, event)
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamResponsesImage() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %#v, want no image results", results)
+	}
+	if len(texts) == 0 || texts[len(texts)-1] != finalText {
+		t.Fatalf("texts = %#v, want final text %q", texts, finalText)
+	}
+	if pollCount != 0 {
+		t.Fatalf("conversation poll count = %d, want no polling for final text", pollCount)
+	}
+}
+
+func TestStreamResponsesImageFetchesHistoryTextForTextTurn(t *testing.T) {
+	const finalText = "你好！我是 GPT-5 mini。"
+	historyCount := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialPreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"resume_conversation_token\",\"conversation_id\":\"conv-history\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"server_ste_metadata\",\"conversation_id\":\"conv-history\",\"metadata\":{\"tool_invoked\":false,\"turn_use_case\":\"text\"}}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-history\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-history":
+			historyCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{
+				"user-node":{"message":{"author":{"role":"user"},"create_time":1,"content":{"content_type":"text","parts":["你好，你是什么模型？"]},"status":"finished_successfully","recipient":"all","metadata":{}}},
+				"assistant-context":{"message":{"author":{"role":"assistant"},"create_time":2,"content":{"content_type":"model_editable_context"},"status":"finished_successfully","recipient":"all","metadata":{"is_visually_hidden_from_conversation":true}}},
+				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + finalText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-5-5"}}}
+			}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt: "你好，你是什么模型？",
+		Model:  "gpt-image-2",
+	})
+	var textEvents []ResponsesImageEvent
+	for event := range events {
+		if event.Type == "image_text_response" {
+			textEvents = append(textEvents, event)
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamResponsesImage() error = %v", err)
+	}
+	if len(textEvents) != 1 {
+		t.Fatalf("text events = %#v, want one text response", textEvents)
+	}
+	if textEvents[0].Text != finalText {
+		t.Fatalf("text response = %q, want %q", textEvents[0].Text, finalText)
+	}
+	if historyCount != 1 {
+		t.Fatalf("history count = %d, want 1", historyCount)
 	}
 }
 

@@ -48,6 +48,7 @@ type AccountService struct {
 	browserHTTPClient func(profile string, timeout time.Duration) *http.Client
 	textRequestCount  map[string]int
 	textCooldownUntil time.Time
+	refresher         *SessionRefresher
 }
 
 const (
@@ -73,6 +74,14 @@ func NewAccountService(backend storage.Backend, config AccountConfig, proxy *Pro
 		browserHTTPClient: browserHTTPClient,
 		textRequestCount:  map[string]int{},
 	}
+	// 初始化 SessionRefresher，使用 uTLS 客户端调用 /api/auth/session
+	s.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		client := s.browserHTTPClient(defaultRemoteProfile, refreshTimeout)
+		if client == nil {
+			client = &http.Client{Timeout: refreshTimeout}
+		}
+		return client.Do(req)
+	})
 	s.items = s.loadAccounts()
 	return s
 }

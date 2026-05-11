@@ -792,6 +792,30 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.accountItemsForIdentity(identity)})
 	case r.URL.Path == "/api/accounts/tokens" && r.Method == http.MethodGet:
 		util.WriteJSON(w, http.StatusOK, map[string]any{"tokens": a.accounts.ListTokens()})
+	case r.URL.Path == "/api/accounts/session" && r.Method == http.MethodPost:
+		body, _ := readJSONMap(r)
+		sessionJSON := util.Clean(body["session_json"])
+		if sessionJSON == "" {
+			util.WriteError(w, http.StatusBadRequest, "session_json is required")
+			return
+		}
+		result, err := a.accounts.AddAccountFromSession(sessionJSON)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		tokens := util.AsStringSlice(result["tokens"])
+		if len(tokens) > 0 {
+			refresh := a.accounts.RefreshAccounts(r.Context(), tokens)
+			for _, key := range []string{"refreshed", "errors", "items", "session_refreshed", "session_failed", "results", "total", "failed", "duration_ms"} {
+				if value, ok := refresh[key]; ok {
+					result[key] = value
+				}
+			}
+		}
+		delete(result, "tokens")
+		a.redactAccountPayloadForIdentity(identity, result)
+		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts" && r.Method == http.MethodPost:
 		body, _ := readJSONMap(r)
 		tokens := util.AsStringSlice(body["tokens"])

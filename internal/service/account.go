@@ -207,6 +207,51 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 	return map[string]any{"added": added, "skipped": skipped, "items": items}
 }
 
+func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]any, error) {
+	var session struct {
+		AccessToken  string `json:"accessToken"`
+		Expires      any    `json:"expires"`
+		SessionToken string `json:"sessionToken"`
+		User         struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Email string `json:"email"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal([]byte(sessionJSON), &session); err != nil {
+		return nil, fmt.Errorf("invalid session JSON: %w", err)
+	}
+	accessToken := util.Clean(session.AccessToken)
+	if accessToken == "" {
+		return nil, fmt.Errorf("session JSON missing accessToken")
+	}
+	sessionToken := util.Clean(session.SessionToken)
+	if sessionToken == "" {
+		return nil, fmt.Errorf("session JSON missing sessionToken")
+	}
+
+	result := s.AddAccounts([]string{accessToken})
+	updates := map[string]any{
+		"session_token":   sessionToken,
+		"session_expires": session.Expires,
+	}
+	if userID := util.Clean(session.User.ID); userID != "" {
+		updates["user_id"] = userID
+	}
+	if email := util.Clean(session.User.Email); email != "" {
+		updates["email"] = email
+	}
+	if name := util.Clean(session.User.Name); name != "" {
+		updates["name"] = name
+	}
+	if item := s.UpdateAccount(accessToken, updates); item != nil {
+		result["item"] = item
+		result["items"] = s.ListAccounts()
+	}
+	result["tokens"] = []string{accessToken}
+	return result, nil
+}
+
 func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 	targets := map[string]struct{}{}
 	for _, token := range cleanTokens(tokens) {

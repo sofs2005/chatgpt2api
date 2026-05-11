@@ -644,12 +644,34 @@ func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow f
 		account, refreshErr := s.RefreshAccountState(ctx, reservation.token)
 		if refreshErr != nil {
 			lastRefreshErr = refreshErr
+			if cached := s.cachedAccountForTransientRefreshError(reservation.token, refreshErr); cached != nil &&
+				(allow == nil || allow(cached)) &&
+				s.reservedImageSlotAvailable(reservation) {
+				return reservation.token, nil
+			}
 		}
 		if account != nil && (allow == nil || allow(account)) && s.reservedImageSlotAvailable(reservation) {
 			return reservation.token, nil
 		}
 		s.releaseImageReservation(reservation.token)
 	}
+}
+
+func (s *AccountService) cachedAccountForTransientRefreshError(accessToken string, err error) map[string]any {
+	if err == nil {
+		return nil
+	}
+	if _, ok := util.SummarizeUpstreamConnectionError(err.Error()); !ok {
+		return nil
+	}
+	account := s.GetAccount(accessToken)
+	if account == nil {
+		return nil
+	}
+	if IsImageAccountAvailable(account) {
+		return account
+	}
+	return nil
 }
 
 func (s *AccountService) HasAvailableAccount() bool {

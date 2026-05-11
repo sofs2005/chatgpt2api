@@ -656,6 +656,36 @@ func TestImageTaskServicePreservesTextOutputType(t *testing.T) {
 	}
 }
 
+func TestImageTaskServiceStoresTextOutputFromHandlerError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return map[string]any{"message": "text response", "output_type": "text"}, errors.New("text response")
+	}
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
+
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "who are you", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
+	got := svc.ListTasks(identity, []string{"task-1"})
+	item := got["items"].([]map[string]any)[0]
+	if util.Clean(item["error"]) != "" {
+		t.Fatalf("error = %#v, want empty in %#v", item["error"], item)
+	}
+	if item["output_type"] != "text" {
+		t.Fatalf("output_type = %#v, want text in %#v", item["output_type"], item)
+	}
+	data := item["data"].([]map[string]any)
+	if len(data) != 1 || data[0]["text_response"] != "text response" {
+		t.Fatalf("text response data = %#v", data)
+	}
+	statuses := item["output_statuses"].([]string)
+	if len(statuses) != 1 || statuses[0] != "success" {
+		t.Fatalf("output_statuses = %#v, want success", statuses)
+	}
+}
+
 func TestImageTaskServiceRestoresUnfinishedTasksAsErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	raw := map[string]any{"tasks": []map[string]any{

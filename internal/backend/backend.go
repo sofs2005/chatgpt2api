@@ -662,7 +662,7 @@ func (c *Client) startMultimodalConversation(ctx context.Context, messages []map
 		"supported_encodings":                  []any{"v1"},
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
-			"force_use_sse":                       true,
+		"force_use_sse":                        true,
 		"client_contextual_info": map[string]any{
 			"is_dark_mode":      false,
 			"time_since_loaded": 1200,

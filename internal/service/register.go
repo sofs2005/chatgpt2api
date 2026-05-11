@@ -492,21 +492,47 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	w.step("开始独立登录换 token")
 	codeVerifier, codeChallenge := generateRegisterPKCE()
 	values := registerAuthorizeParams(email, w.deviceID, registerRandomToken(), registerRandomToken(), codeChallenge)
-	status, _, err := w.request(ctx, http.MethodGet, registerAuthBase+"/api/accounts/authorize?"+values.Encode(), nil, w.navigateHeaders(registerPlatformBase+"/"), true)
+	authorizeLogin := func() error {
+		status, _, err := w.request(ctx, http.MethodGet, registerAuthBase+"/api/accounts/authorize?"+values.Encode(), nil, w.navigateHeaders(registerPlatformBase+"/"), true)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("platform_login_authorize_http_%d", status)
+		}
+		return nil
+	}
+	if err := authorizeLogin(); err != nil {
+		return nil, err
+	}
+	w.step("登录 authorize 完成")
+
+	status, payload, err := w.submitLoginEmail(ctx, email)
 	if err != nil {
 		return nil, err
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("platform_login_authorize_http_%d", status)
+	if status == http.StatusConflict {
+		w.step("邮箱提交 invalid_state，重新 authorize 后重试")
+		if err := authorizeLogin(); err != nil {
+			return nil, err
+		}
+		status, payload, err = w.submitLoginEmail(ctx, email)
+		if err != nil {
+			return nil, err
+		}
 	}
-	w.step("登录 authorize 完成")
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("email_submit_http_%d%s", status, registerResponseDetail(payload))
+	}
+	w.step("邮箱提交完成")
+
 	headers := w.jsonHeaders(registerAuthBase + "/log-in/password")
 	token, err := w.buildSentinelToken(ctx, "password_verify")
 	if err != nil {
 		return nil, err
 	}
 	headers["openai-sentinel-token"] = token
-	status, payload, err := w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/password/verify", map[string]any{
+	status, payload, err = w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/password/verify", map[string]any{
 		"password": password,
 	}, headers, false)
 	if err != nil {
@@ -571,6 +597,22 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 		"refresh_token": refreshToken,
 		"id_token":      idToken,
 	}, nil
+}
+
+func (w *registerWorker) submitLoginEmail(ctx context.Context, email string) (int, map[string]any, error) {
+	w.step("开始提交邮箱")
+	headers := w.jsonHeaders(registerAuthBase + "/log-in?usernameKind=email")
+	token, err := w.buildSentinelToken(ctx, "authorize_continue")
+	if err != nil {
+		return 0, nil, err
+	}
+	headers["openai-sentinel-token"] = token
+	return w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/authorize/continue", map[string]any{
+		"username": map[string]any{
+			"kind":  "email",
+			"value": email,
+		},
+	}, headers, false)
 }
 
 func (w *registerWorker) followConsentForCode(ctx context.Context, continueURL string) (string, error) {

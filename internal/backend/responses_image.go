@@ -28,7 +28,6 @@ const (
 	officialPreparePath = "/backend-api/f/conversation/prepare"
 	officialStreamPath  = "/backend-api/f/conversation"
 
-
 	ResponsesImageMainModel      = "gpt-5.4-mini"
 	ResponsesImageCodexToolModel = "gpt-5.4-mini"
 
@@ -923,6 +922,25 @@ func iterOfficialImageSSE(ctx context.Context, client *Client, reader io.Reader,
 	if shouldTreatOfficialImageEventAsFinalText(lastEvent) {
 		return nil
 	}
+	if strings.TrimSpace(lastEvent.Text) != "" && !isPendingOfficialImageText(lastEvent.Text) {
+		lastEvent.Type = "image_text_response"
+		select {
+		case out <- lastEvent:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
+	if textEvent, ok, err := client.resolveOfficialImageTextResponse(ctx, lastEvent); err != nil {
+		return err
+	} else if ok {
+		select {
+		case out <- textEvent:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
 	resolved, err := client.resolveOfficialImageResults(ctx, request, lastEvent)
 	if err != nil {
 		return err
@@ -934,10 +952,74 @@ func iterOfficialImageSSE(ctx context.Context, client *Client, reader io.Reader,
 			return ctx.Err()
 		}
 	}
+	if len(resolved) == 0 && strings.TrimSpace(lastEvent.Text) != "" {
+		lastEvent.Type = "image_text_response"
+		select {
+		case out <- lastEvent:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
 	if len(resolved) == 0 && strings.TrimSpace(lastEvent.Text) == "" {
 		return fmt.Errorf("image generation failed")
 	}
 	return nil
+}
+
+func (c *Client) resolveOfficialImageTextResponse(ctx context.Context, event ResponsesImageEvent) (ResponsesImageEvent, bool, error) {
+	if !isOfficialImageTextResponseTurn(event) {
+		return ResponsesImageEvent{}, false, nil
+	}
+	text := strings.TrimSpace(event.Text)
+	if text == "" {
+		conversationID := strings.TrimSpace(event.ConversationID)
+		if conversationID != "" {
+			var err error
+			text, err = c.fetchOfficialConversationText(ctx, conversationID)
+			if err != nil {
+				return ResponsesImageEvent{}, false, err
+			}
+		}
+	}
+	if text == "" {
+		text = "Image generation returned a text response instead of image data."
+	}
+	event.Type = "image_text_response"
+	event.Text = text
+	return event, true, nil
+}
+
+func isOfficialImageTextResponseTurn(event ResponsesImageEvent) bool {
+	if event.Blocked {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(event.TurnUseCase), "text") {
+		return true
+	}
+	return event.ToolInvoked != nil && !*event.ToolInvoked
+}
+
+func isPendingOfficialImageText(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+	pendingPhrases := []string{
+		"正在处理图片",
+		"图片准备好后",
+		"creating your image",
+		"working on your image",
+		"image is ready",
+		"we'll notify you",
+		"we will notify you",
+	}
+	for _, phrase := range pendingPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldTreatOfficialImageEventAsFinalText(event ResponsesImageEvent) bool {
@@ -1070,7 +1152,39 @@ func isOfficialImageToolEvent(event map[string]any) bool {
 	}
 	metadata := util.StringMap(message["metadata"])
 	author := util.StringMap(message["author"])
-	return strings.EqualFold(util.Clean(author["role"]), "tool") && util.Clean(metadata["async_task_type"]) == "image_gen"
+	if !strings.EqualFold(util.Clean(author["role"]), "tool") {
+		return false
+	}
+	return util.Clean(metadata["async_task_type"]) == "image_gen" || officialImageMessageHasAssetPointer(message)
+}
+
+func officialImageMessageHasAssetPointer(message map[string]any) bool {
+	content := util.StringMap(message["content"])
+	if util.Clean(content["content_type"]) != "multimodal_text" {
+		return false
+	}
+	parts, _ := content["parts"].([]any)
+	for _, rawPart := range parts {
+		switch part := rawPart.(type) {
+		case map[string]any:
+			if util.Clean(part["content_type"]) == "image_asset_pointer" {
+				return true
+			}
+			if isOfficialImageAssetPointer(util.Clean(part["asset_pointer"])) {
+				return true
+			}
+		case string:
+			if isOfficialImageAssetPointer(part) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isOfficialImageAssetPointer(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "file-service://") || strings.HasPrefix(value, "sediment://")
 }
 
 func officialImageAssistantText(event map[string]any) string {
@@ -1227,7 +1341,10 @@ func (c *Client) fetchOfficialConversationImageIDs(ctx context.Context, conversa
 		author := util.StringMap(message["author"])
 		metadata := util.StringMap(message["metadata"])
 		content := util.StringMap(message["content"])
-		if !strings.EqualFold(util.Clean(author["role"]), "tool") || util.Clean(metadata["async_task_type"]) != "image_gen" {
+		if !strings.EqualFold(util.Clean(author["role"]), "tool") {
+			continue
+		}
+		if util.Clean(metadata["async_task_type"]) != "image_gen" && !officialImageMessageHasAssetPointer(message) {
 			continue
 		}
 		if util.Clean(content["content_type"]) != "multimodal_text" {
@@ -1255,6 +1372,100 @@ func (c *Client) fetchOfficialConversationImageIDs(ctx context.Context, conversa
 		}
 	}
 	return fileIDs, sedimentIDs, nil
+}
+
+func (c *Client) fetchOfficialConversationText(ctx context.Context, conversationID string) (string, error) {
+	path := "/backend-api/conversation/" + conversationID
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	for key, value := range c.headers(path, map[string]string{"Accept": "application/json"}) {
+		req.Header.Set(key, value)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", upstreamTransportError(path, err)
+	}
+	defer resp.Body.Close()
+	if err := ensureOK(resp, path); err != nil {
+		return "", err
+	}
+	var data map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+	return officialConversationAssistantText(data), nil
+}
+
+func officialConversationAssistantText(data map[string]any) string {
+	mapping := util.StringMap(data["mapping"])
+	bestText := ""
+	bestTime := -1.0
+	for _, raw := range mapping {
+		node, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		message := util.StringMap(node["message"])
+		if !isOfficialVisibleAssistantMessage(message) {
+			continue
+		}
+		text := officialImageMessageText(message)
+		if text == "" {
+			continue
+		}
+		messageTime := officialImageMessageTimestamp(message)
+		if bestText == "" || messageTime >= bestTime {
+			bestText = text
+			bestTime = messageTime
+		}
+	}
+	return strings.TrimSpace(bestText)
+}
+
+func isOfficialVisibleAssistantMessage(message map[string]any) bool {
+	if len(message) == 0 {
+		return false
+	}
+	author := util.StringMap(message["author"])
+	if !strings.EqualFold(util.Clean(author["role"]), "assistant") {
+		return false
+	}
+	recipient := util.Clean(message["recipient"])
+	if recipient != "" && !strings.EqualFold(recipient, "all") {
+		return false
+	}
+	metadata := util.StringMap(message["metadata"])
+	if util.ToBool(metadata["is_visually_hidden_from_conversation"]) {
+		return false
+	}
+	return true
+}
+
+func officialImageMessageTimestamp(message map[string]any) float64 {
+	for _, key := range []string{"update_time", "create_time"} {
+		switch value := message[key].(type) {
+		case float64:
+			if value > 0 {
+				return value
+			}
+		case int:
+			if value > 0 {
+				return float64(value)
+			}
+		case int64:
+			if value > 0 {
+				return float64(value)
+			}
+		case json.Number:
+			if parsed, err := strconv.ParseFloat(value.String(), 64); err == nil && parsed > 0 {
+				return parsed
+			}
+		case string:
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return 0
 }
 
 func (c *Client) getOfficialFileDownloadURL(ctx context.Context, conversationID, fileID string) (string, error) {

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -696,6 +697,27 @@ func TestGetAvailableAccessTokenReportsRefreshFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "/backend-api/me failed: HTTP 502") {
 		t.Fatalf("GetAvailableAccessToken() error = %q, want refresh failure detail", err.Error())
+	}
+}
+
+func TestGetAvailableAccessTokenUsesCachedAccountOnConnectionRefreshFailure(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New(`Get "https://chatgpt.com/": surf: HTTP/2 request failed: uTLS.HandshakeContext() error: EOF; HTTP/1.1 fallback failed: uTLS.HandshakeContext() error: EOF`)
+			}),
+		}
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 1, "type": "Plus"})
+
+	token, err := accounts.GetAvailableAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetAvailableAccessToken() error = %v", err)
+	}
+	if token != "token-1" {
+		t.Fatalf("token = %q, want cached token-1", token)
 	}
 }
 

@@ -502,6 +502,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 	refreshed := 0
 	errors := []map[string]string{}
 	details := make([]map[string]any, 0, len(tokens))
+	detailsByToken := make(map[string]map[string]any, len(tokens))
 	for _, token := range tokens {
 		res := resultsByToken[token]
 		detail := map[string]any{
@@ -512,6 +513,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			"status":        "error",
 			"duration_ms":   res.duration.Milliseconds(),
 		}
+		detailsByToken[token] = detail
 		if res.err == nil {
 			updated := s.UpdateAccount(res.token, res.info)
 			if updated != nil {
@@ -535,6 +537,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		if normalized, handled := s.ApplyAccountError(res.token, "refresh_accounts", res.err); handled {
 			message = normalized
 		}
+		pendingSessionRefresh := false
 		if current := s.GetAccount(res.token); current != nil {
 			detail["account_status"] = current["status"]
 			detail["email"] = current["email"]
@@ -545,8 +548,15 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			if util.Clean(current["status"]) == "过期待刷新" {
 				if st := util.Clean(current["session_token"]); st != "" {
 					pendingRefresh = append(pendingRefresh, pendingRefreshItem{accessToken: res.token, sessionToken: st})
+					pendingSessionRefresh = true
 				}
 			}
+		}
+		detail["message"] = message
+		if pendingSessionRefresh {
+			detail["status"] = "pending_session_refresh"
+			details = append(details, detail)
+			continue
 		}
 		errorItem := map[string]string{
 			"account_id":   accountIDFromToken(res.token),
@@ -554,7 +564,6 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			"error":        message,
 		}
 		errors = append(errors, errorItem)
-		detail["message"] = message
 		detail["error"] = message
 		details = append(details, detail)
 	}
@@ -565,20 +574,58 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		sortPendingRefreshByPriority(pendingRefresh, s)
 	}
 	for _, item := range pendingRefresh {
+		detail := detailsByToken[item.accessToken]
 		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshToken(ctx, item.accessToken, item.sessionToken)
 		if err != nil {
 			s.UpdateAccount(item.accessToken, map[string]any{"status": "异常"})
 			failedRefreshCount++
+			message := fmt.Sprintf("token刷新失败: %s", err.Error())
 			errors = append(errors, map[string]string{
 				"account_id":   accountIDFromToken(item.accessToken),
 				"access_token": item.accessToken,
-				"error":        fmt.Sprintf("token刷新失败: %s", err.Error()),
+				"error":        message,
 			})
+			if detail != nil {
+				detail["status"] = "error"
+				detail["message"] = message
+				detail["error"] = message
+				detail["account_status"] = "异常"
+			}
 			continue
 		}
-		s.RefreshAccountViaSession(item.accessToken, newAccessToken, newSessionToken, newExpires)
+		if !s.RefreshAccountViaSession(item.accessToken, newAccessToken, newSessionToken, newExpires) {
+			failedRefreshCount++
+			message := "token刷新失败: 账号更新失败"
+			errors = append(errors, map[string]string{
+				"account_id":   accountIDFromToken(item.accessToken),
+				"access_token": item.accessToken,
+				"error":        message,
+			})
+			if detail != nil {
+				detail["status"] = "error"
+				detail["message"] = message
+				detail["error"] = message
+			}
+			continue
+		}
 		if info, err := s.FetchRemoteInfo(ctx, newAccessToken); err == nil {
 			s.UpdateAccount(newAccessToken, info)
+		}
+		if detail != nil {
+			detail["access_token"] = newAccessToken
+			detail["token_preview"] = util.AnonymizeToken(newAccessToken)
+			detail["success"] = true
+			detail["status"] = "success"
+			detail["message"] = "token刷新成功"
+			delete(detail, "error")
+			if current := s.GetAccount(newAccessToken); current != nil {
+				detail["account_status"] = current["status"]
+				detail["email"] = current["email"]
+				detail["type"] = current["type"]
+				detail["quota"] = current["quota"]
+				detail["image_quota_unknown"] = current["image_quota_unknown"]
+				detail["restore_at"] = current["restore_at"]
+			}
 		}
 		refreshedCount++
 	}
@@ -712,13 +759,56 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 
 // RefreshAccountViaSession 刷新成功后更新账号数据
 func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires string) bool {
-	updates := map[string]any{
+	accessToken = util.Clean(accessToken)
+	newAccessToken = util.Clean(newAccessToken)
+	if accessToken == "" || newAccessToken == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.findIndexLocked(accessToken)
+	if idx < 0 {
+		return false
+	}
+	if accessToken != newAccessToken {
+		if duplicateIdx := s.findIndexLocked(newAccessToken); duplicateIdx >= 0 && duplicateIdx != idx {
+			s.items = append(s.items[:duplicateIdx], s.items[duplicateIdx+1:]...)
+			if duplicateIdx < idx {
+				idx--
+			}
+		}
+	}
+
+	account := normalizeAccount(mergeMaps(s.items[idx], map[string]any{
 		"access_token":    newAccessToken,
 		"session_token":   newSessionToken,
 		"session_expires": newExpires,
 		"status":          "正常",
+	}))
+	if account == nil {
+		return false
 	}
-	return s.UpdateAccount(accessToken, updates) != nil
+	s.items[idx] = account
+	if accessToken != newAccessToken {
+		if count, ok := s.imageReservations[accessToken]; ok {
+			s.imageReservations[newAccessToken] = count
+			delete(s.imageReservations, accessToken)
+		}
+		if count, ok := s.textRequestCount[accessToken]; ok {
+			s.textRequestCount[newAccessToken] = count
+			delete(s.textRequestCount, accessToken)
+		}
+	}
+	_ = s.saveLocked()
+	s.logs.Add("刷新账号token", map[string]any{
+		"module":         "accounts",
+		"operation_type": "更新",
+		"token":          util.AnonymizeToken(newAccessToken),
+		"status":         account["status"],
+	})
+	return true
 }
 
 func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {

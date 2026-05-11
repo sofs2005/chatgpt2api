@@ -60,6 +60,7 @@ var apiPermissionCatalog = []APIPermission{
 	apiPermission("GET", "/api/accounts", "查看号池", "号池管理", false),
 	apiPermission("GET", "/api/accounts/tokens", "导出号池 Token", "号池管理", false),
 	apiPermission("POST", "/api/accounts", "导入号池 Token", "号池管理", false),
+	apiPermission("POST", "/api/accounts/session", "通过 Session 导入号池账号", "号池管理", false),
 	apiPermission("POST", "/api/accounts/refresh", "刷新号池", "号池管理", false),
 	apiPermission("POST", "/api/accounts/update", "编辑号池账号", "号池管理", false),
 	apiPermission("DELETE", "/api/accounts", "删除号池账号", "号池管理", false),

@@ -230,19 +230,44 @@ func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]a
 		return nil, fmt.Errorf("session JSON missing sessionToken")
 	}
 
-	result := s.AddAccounts([]string{accessToken})
+	validated, err := s.refresher.RefreshSession(context.Background(), accessToken, sessionToken)
+	if err != nil {
+		return nil, fmt.Errorf("session token validation failed: %w", err)
+	}
+	accessToken = validated.AccessToken
+	if validated.SessionToken != "" {
+		sessionToken = validated.SessionToken
+	}
+	sessionExpires := any(session.Expires)
+	if validated.Expires != "" {
+		sessionExpires = validated.Expires
+	}
+
+	userID := util.Clean(validated.User.ID)
+	email := util.Clean(validated.User.Email)
 	updates := map[string]any{
 		"session_token":   sessionToken,
-		"session_expires": session.Expires,
+		"session_expires": sessionExpires,
 	}
-	if userID := util.Clean(session.User.ID); userID != "" {
+	if userID != "" {
 		updates["user_id"] = userID
 	}
-	if email := util.Clean(session.User.Email); email != "" {
+	if email != "" {
 		updates["email"] = email
 	}
-	if name := util.Clean(session.User.Name); name != "" {
+	if name := util.Clean(validated.User.Name); name != "" {
 		updates["name"] = name
+	}
+
+	matchedToken := s.findSessionImportAccountToken(accessToken, userID, email)
+	result := map[string]any{"added": 0, "skipped": 0, "updated": 0, "items": s.ListAccounts()}
+	if matchedToken != "" {
+		if !s.UpdateAccountFromSessionImport(matchedToken, accessToken, updates, true) {
+			return nil, fmt.Errorf("session account update failed")
+		}
+		result["updated"] = 1
+	} else {
+		result = s.AddAccounts([]string{accessToken})
 	}
 	if item := s.UpdateAccount(accessToken, updates); item != nil {
 		publicItems := publicAccounts([]map[string]any{item})
@@ -253,6 +278,43 @@ func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]a
 	}
 	result["tokens"] = []string{accessToken}
 	return result, nil
+}
+
+func isRecoverableSessionImportStatus(status string) bool {
+	switch status {
+	case "异常", "过期待刷新", "刷新中":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *AccountService) findSessionImportAccountToken(accessToken, userID, email string) string {
+	accessToken = util.Clean(accessToken)
+	userID = util.Clean(userID)
+	email = strings.ToLower(util.Clean(email))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if accessToken != "" && s.findIndexLocked(accessToken) >= 0 {
+		return accessToken
+	}
+	if userID != "" {
+		for _, item := range s.items {
+			if util.Clean(item["user_id"]) == userID {
+				return util.Clean(item["access_token"])
+			}
+		}
+	}
+	if email != "" {
+		for _, item := range s.items {
+			if strings.ToLower(util.Clean(item["email"])) == email {
+				return util.Clean(item["access_token"])
+			}
+		}
+	}
+	return ""
 }
 
 func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
@@ -336,6 +398,58 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 		"status":         account["status"],
 	})
 	return util.CopyMap(account)
+}
+
+func (s *AccountService) UpdateAccountFromSessionImport(oldAccessToken, newAccessToken string, updates map[string]any, recoverStatus bool) bool {
+	oldAccessToken = util.Clean(oldAccessToken)
+	newAccessToken = util.Clean(newAccessToken)
+	if oldAccessToken == "" || newAccessToken == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.findIndexLocked(oldAccessToken)
+	if idx < 0 {
+		return false
+	}
+	if oldAccessToken != newAccessToken {
+		if duplicateIdx := s.findIndexLocked(newAccessToken); duplicateIdx >= 0 && duplicateIdx != idx {
+			s.items = append(s.items[:duplicateIdx], s.items[duplicateIdx+1:]...)
+			if duplicateIdx < idx {
+				idx--
+			}
+		}
+	}
+
+	accountUpdates := mergeMaps(updates, map[string]any{"access_token": newAccessToken})
+	if recoverStatus && isRecoverableSessionImportStatus(util.Clean(s.items[idx]["status"])) {
+		accountUpdates["status"] = "正常"
+	}
+	account := normalizeAccount(mergeMaps(s.items[idx], accountUpdates))
+	if account == nil {
+		return false
+	}
+	s.items[idx] = account
+	if oldAccessToken != newAccessToken {
+		if count, ok := s.imageReservations[oldAccessToken]; ok {
+			s.imageReservations[newAccessToken] = count
+			delete(s.imageReservations, oldAccessToken)
+		}
+		if count, ok := s.textRequestCount[oldAccessToken]; ok {
+			s.textRequestCount[newAccessToken] = count
+			delete(s.textRequestCount, oldAccessToken)
+		}
+	}
+	_ = s.saveLocked()
+	s.logs.Add("更新Session账号", map[string]any{
+		"module":         "accounts",
+		"operation_type": "更新",
+		"token":          util.AnonymizeToken(newAccessToken),
+		"status":         account["status"],
+	})
+	return true
 }
 
 func (s *AccountService) GetAccount(accessToken string) map[string]any {

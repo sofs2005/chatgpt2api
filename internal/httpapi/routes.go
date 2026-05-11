@@ -808,15 +808,6 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		tokens := util.AsStringSlice(result["tokens"])
-		if len(tokens) > 0 {
-			refresh := a.accounts.RefreshAccounts(r.Context(), tokens)
-			for _, key := range []string{"refreshed", "errors", "items", "session_refreshed", "session_failed", "results", "total", "failed", "duration_ms"} {
-				if value, ok := refresh[key]; ok {
-					result[key] = value
-				}
-			}
-		}
 		delete(result, "tokens")
 		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)

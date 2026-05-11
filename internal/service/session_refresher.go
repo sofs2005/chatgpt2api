@@ -23,10 +23,24 @@ type refreshCall struct {
 	result refreshResult
 }
 
+type SessionRefreshData struct {
+	AccessToken  string
+	SessionToken string
+	Expires      string
+	User         SessionRefreshUser
+}
+
+type SessionRefreshUser struct {
+	ID    string
+	Name  string
+	Email string
+}
+
 type refreshResult struct {
 	accessToken    string
 	sessionToken   string
 	sessionExpires string
+	user           SessionRefreshUser
 	err            error
 }
 
@@ -47,8 +61,13 @@ func NewSessionRefresher(httpDo func(req *http.Request) (*http.Response, error))
 // RefreshToken 使用 session_token 刷新 access_token
 // 如果同一 token 正在刷新中，等待并返回结果（去重）
 func (r *SessionRefresher) RefreshToken(ctx context.Context, accessToken, sessionToken string) (newAccessToken, newSessionToken, newExpires string, err error) {
+	result, err := r.RefreshSession(ctx, accessToken, sessionToken)
+	return result.AccessToken, result.SessionToken, result.Expires, err
+}
+
+func (r *SessionRefresher) RefreshSession(ctx context.Context, accessToken, sessionToken string) (SessionRefreshData, error) {
 	if sessionToken == "" {
-		return "", "", "", fmt.Errorf("session_token is empty")
+		return SessionRefreshData{}, fmt.Errorf("session_token is empty")
 	}
 
 	// 去重：检查是否已有进行中的刷新
@@ -57,23 +76,22 @@ func (r *SessionRefresher) RefreshToken(ctx context.Context, accessToken, sessio
 		r.mu.Unlock()
 		select {
 		case <-call.done:
-			result := call.result
-			return result.accessToken, result.sessionToken, result.sessionExpires, result.err
+			return call.result.sessionData(), call.result.err
 		case <-ctx.Done():
-			return "", "", "", ctx.Err()
+			return SessionRefreshData{}, ctx.Err()
 		}
 	}
 	call := &refreshCall{done: make(chan struct{})}
 	r.inFlight[accessToken] = call
 	r.mu.Unlock()
 
-	finish := func(result refreshResult) (string, string, string, error) {
+	finish := func(result refreshResult) (SessionRefreshData, error) {
 		call.result = result
 		close(call.done)
 		r.mu.Lock()
 		delete(r.inFlight, accessToken)
 		r.mu.Unlock()
-		return result.accessToken, result.sessionToken, result.sessionExpires, result.err
+		return result.sessionData(), result.err
 	}
 
 	// 获取信号量
@@ -86,6 +104,15 @@ func (r *SessionRefresher) RefreshToken(ctx context.Context, accessToken, sessio
 
 	// 执行刷新
 	return finish(r.doRefresh(ctx, sessionToken))
+}
+
+func (r refreshResult) sessionData() SessionRefreshData {
+	return SessionRefreshData{
+		AccessToken:  r.accessToken,
+		SessionToken: r.sessionToken,
+		Expires:      r.sessionExpires,
+		User:         r.user,
+	}
 }
 
 func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string) refreshResult {
@@ -132,6 +159,11 @@ func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string) r
 		AccessToken  string `json:"accessToken"`
 		Expires      string `json:"expires"`
 		SessionToken string `json:"sessionToken"`
+		User         struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Email string `json:"email"`
+		} `json:"user"`
 	}
 	if err := json.Unmarshal(body, &session); err != nil {
 		return refreshResult{err: fmt.Errorf("parse session response: %w", err)}
@@ -151,6 +183,11 @@ func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string) r
 		accessToken:    session.AccessToken,
 		sessionToken:   newSessionToken,
 		sessionExpires: session.Expires,
+		user: SessionRefreshUser{
+			ID:    session.User.ID,
+			Name:  session.User.Name,
+			Email: session.User.Email,
+		},
 	}
 }
 

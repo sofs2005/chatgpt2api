@@ -23,6 +23,26 @@ func TestSessionRefresherRejectsEmptySessionToken(t *testing.T) {
 	}
 }
 
+func TestSessionRefresherReturnsValidatedUser(t *testing.T) {
+	refresher := NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access","sessionToken":"new-session","expires":"2026-05-12T00:00:00Z","user":{"id":"user-123","email":"user@example.com","name":"User Name"}}`)),
+		}, nil
+	})
+
+	result, err := refresher.RefreshSession(context.Background(), "old-access", "old-session")
+	if err != nil {
+		t.Fatalf("RefreshSession() error = %v", err)
+	}
+	if result.AccessToken != "new-access" || result.SessionToken != "new-session" || result.Expires != "2026-05-12T00:00:00Z" {
+		t.Fatalf("RefreshSession() tokens = %#v", result)
+	}
+	if result.User.ID != "user-123" || result.User.Email != "user@example.com" || result.User.Name != "User Name" {
+		t.Fatalf("RefreshSession() user = %#v", result.User)
+	}
+}
+
 func TestSessionRefresherDeduplicatesConcurrentRefreshes(t *testing.T) {
 	var calls int32
 	release := make(chan struct{})

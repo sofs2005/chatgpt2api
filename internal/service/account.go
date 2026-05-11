@@ -414,11 +414,28 @@ func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newTo
 	}
 
 	sessionToken := util.Clean(account["session_token"])
-	if sessionToken != "" {
-		s.refresher.TryRefreshAsync(expiredToken, sessionToken)
-		s.UpdateAccount(expiredToken, map[string]any{"status": "刷新中"})
+	if sessionToken == "" {
+		return "", false
 	}
-	return "", sessionToken != ""
+	if s.UpdateAccount(expiredToken, map[string]any{"status": "刷新中"}) == nil {
+		return "", false
+	}
+	s.refreshAccountViaSessionAsync(expiredToken, sessionToken)
+	return "", true
+}
+
+func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		defer cancel()
+
+		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshToken(ctx, accessToken, sessionToken)
+		if err != nil {
+			s.UpdateAccount(accessToken, map[string]any{"status": "异常"})
+			return
+		}
+		s.RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires)
+	}()
 }
 
 func (s *AccountService) filterNonFreeLocked() []map[string]any {
@@ -831,9 +848,13 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 		}
 		if sessionToken != "" {
 			// 有 session_token，实时请求异步刷新；批量扫描由 RefreshAccounts 第二阶段串行刷新
-			s.UpdateAccount(accessToken, map[string]any{"status": "过期待刷新"})
+			status := "过期待刷新"
 			if event != "refresh_accounts" {
-				s.refresher.TryRefreshAsync(accessToken, sessionToken)
+				status = "刷新中"
+			}
+			s.UpdateAccount(accessToken, map[string]any{"status": status})
+			if event != "refresh_accounts" {
+				s.refreshAccountViaSessionAsync(accessToken, sessionToken)
 			}
 			return "检测到token过期，已提交刷新任务", true
 		}

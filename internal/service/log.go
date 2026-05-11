@@ -739,7 +739,7 @@ func sanitizeLogField(key string, value any) any {
 func sensitiveLogKey(key string) bool {
 	lower := strings.ToLower(strings.TrimSpace(key))
 	switch lower {
-	case "authorization", "password", "secret", "token", "access_token", "refresh_token", "api_key", "key", "dx":
+	case "authorization", "password", "secret", "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "session_token", "sessiontoken", "session_json", "sessionjson", "api_key", "key", "dx":
 		return true
 	default:
 		return strings.Contains(lower, "password") ||

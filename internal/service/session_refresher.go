@@ -13,9 +13,14 @@ import (
 // SessionRefresher 使用 uTLS 调用 /api/auth/session 刷新 token
 type SessionRefresher struct {
 	mu        sync.Mutex
-	inFlight  map[string]chan refreshResult // key: access_token, 去重
-	semaphore chan struct{}                 // 并发控制 (max 5 concurrent)
+	inFlight  map[string]*refreshCall // key: access_token, 去重
+	semaphore chan struct{}           // 并发控制 (max 5 concurrent)
 	httpDo    func(req *http.Request) (*http.Response, error)
+}
+
+type refreshCall struct {
+	done   chan struct{}
+	result refreshResult
 }
 
 type refreshResult struct {
@@ -33,7 +38,7 @@ const (
 
 func NewSessionRefresher(httpDo func(req *http.Request) (*http.Response, error)) *SessionRefresher {
 	return &SessionRefresher{
-		inFlight:  make(map[string]chan refreshResult),
+		inFlight:  make(map[string]*refreshCall),
 		semaphore: make(chan struct{}, maxConcurrentRefreshes),
 		httpDo:    httpDo,
 	}
@@ -48,40 +53,39 @@ func (r *SessionRefresher) RefreshToken(ctx context.Context, accessToken, sessio
 
 	// 去重：检查是否已有进行中的刷新
 	r.mu.Lock()
-	if ch, ok := r.inFlight[accessToken]; ok {
+	if call, ok := r.inFlight[accessToken]; ok {
 		r.mu.Unlock()
 		select {
-		case result := <-ch:
+		case <-call.done:
+			result := call.result
 			return result.accessToken, result.sessionToken, result.sessionExpires, result.err
 		case <-ctx.Done():
 			return "", "", "", ctx.Err()
 		}
 	}
-	ch := make(chan refreshResult, 1)
-	r.inFlight[accessToken] = ch
+	call := &refreshCall{done: make(chan struct{})}
+	r.inFlight[accessToken] = call
 	r.mu.Unlock()
 
-	// 确保清理
-	defer func() {
+	finish := func(result refreshResult) (string, string, string, error) {
+		call.result = result
+		close(call.done)
 		r.mu.Lock()
 		delete(r.inFlight, accessToken)
 		r.mu.Unlock()
-	}()
+		return result.accessToken, result.sessionToken, result.sessionExpires, result.err
+	}
 
 	// 获取信号量
 	select {
 	case r.semaphore <- struct{}{}:
 		defer func() { <-r.semaphore }()
 	case <-ctx.Done():
-		result := refreshResult{err: ctx.Err()}
-		ch <- result
-		return "", "", "", ctx.Err()
+		return finish(refreshResult{err: ctx.Err()})
 	}
 
 	// 执行刷新
-	result := r.doRefresh(ctx, sessionToken)
-	ch <- result
-	return result.accessToken, result.sessionToken, result.sessionExpires, result.err
+	return finish(r.doRefresh(ctx, sessionToken))
 }
 
 func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string) refreshResult {

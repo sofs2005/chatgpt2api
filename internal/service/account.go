@@ -352,7 +352,7 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 	return util.CopyMap(s.items[idx])
 }
 
-const maxTokenSwitchAttempts = 5
+const MaxTokenSwitchAttempts = 5
 
 func (s *AccountService) GetTextAccessToken() string {
 	s.mu.Lock()
@@ -425,6 +425,9 @@ func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newTo
 }
 
 func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken string) {
+	if s.refresher.IsRefreshing(accessToken) {
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 		defer cancel()

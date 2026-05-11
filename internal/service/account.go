@@ -352,6 +352,8 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 	return util.CopyMap(s.items[idx])
 }
 
+const maxTokenSwitchAttempts = 5
+
 func (s *AccountService) GetTextAccessToken() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -367,6 +369,56 @@ func (s *AccountService) GetTextAccessToken() string {
 	}
 
 	return ""
+}
+
+func (s *AccountService) GetTextAccessTokenWithRetry(exhaustedTokens map[string]struct{}) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nonFree := s.filterNonFreeLocked()
+	free := s.filterFreeLocked()
+
+	selectFrom := func(pool []map[string]any) string {
+		var bestToken string
+		bestCount := int(^uint(0) >> 1)
+		for _, item := range pool {
+			token := util.Clean(item["access_token"])
+			if _, exhausted := exhaustedTokens[token]; exhausted {
+				continue
+			}
+			count := s.textRequestCount[token]
+			if count < bestCount {
+				bestCount = count
+				bestToken = token
+			}
+		}
+		if bestToken != "" {
+			s.textRequestCount[bestToken] = bestCount + 1
+		}
+		return bestToken
+	}
+
+	if token := selectFrom(nonFree); token != "" {
+		return token, true
+	}
+	if token := selectFrom(free); token != "" {
+		return token, true
+	}
+	return "", false
+}
+
+func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newToken string, shouldRetry bool) {
+	account := s.GetAccount(expiredToken)
+	if account == nil {
+		return "", false
+	}
+
+	sessionToken := util.Clean(account["session_token"])
+	if sessionToken != "" {
+		s.refresher.TryRefreshAsync(expiredToken, sessionToken)
+		s.UpdateAccount(expiredToken, map[string]any{"status": "刷新中"})
+	}
+	return "", sessionToken != ""
 }
 
 func (s *AccountService) filterNonFreeLocked() []map[string]any {

@@ -635,6 +635,26 @@ func (s *AccountService) ApplyAccountError(accessToken, event string, err error)
 }
 
 func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message string) (string, bool) {
+	// token 过期但可能可以刷新
+	if IsAccountTokenExpiredErrorMessage(message) {
+		account := s.GetAccount(accessToken)
+		sessionToken := ""
+		if account != nil {
+			sessionToken = util.Clean(account["session_token"])
+		}
+		if sessionToken != "" {
+			// 有 session_token，尝试异步刷新
+			s.UpdateAccount(accessToken, map[string]any{"status": "过期待刷新"})
+			s.refresher.TryRefreshAsync(accessToken, sessionToken)
+			return "检测到token过期，已提交刷新任务", true
+		}
+		// 无 session_token，直接标记异常
+		if !s.RemoveInvalidToken(accessToken, event) {
+			s.UpdateAccount(accessToken, map[string]any{"status": "异常", "quota": 0, "image_quota_unknown": false})
+		}
+		return "检测到token过期且无法刷新", true
+	}
+	// token 被撤销/无效（不可刷新）
 	if IsAccountInvalidErrorMessage(message) {
 		if !s.RemoveInvalidToken(accessToken, event) {
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常", "quota": 0, "image_quota_unknown": false})
@@ -646,6 +666,17 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 		return "检测到限流", true
 	}
 	return message, false
+}
+
+// RefreshAccountViaSession 刷新成功后更新账号数据
+func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires string) bool {
+	updates := map[string]any{
+		"access_token":   newAccessToken,
+		"session_token":  newSessionToken,
+		"session_expires": newExpires,
+		"status":          "正常",
+	}
+	return s.UpdateAccount(accessToken, updates) != nil
 }
 
 func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {

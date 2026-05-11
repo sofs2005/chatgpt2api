@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Gauge,
   KeyRound,
   LoaderCircle,
   Plus,
@@ -34,11 +35,18 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
+  createBillingAdjustment,
   createManagedUser,
   deleteManagedUser,
+  fetchBillingAdjustments,
+  fetchManagedUser,
   fetchManagedRoles,
   fetchManagedUsers,
   updateManagedUser,
+  type BillingAdjustment,
+  type BillingAdjustmentPayload,
+  type BillingPeriod,
+  type BillingType,
   type CreateManagedUserPayload,
   type ManagedUser,
   type ManagedRole,
@@ -80,6 +88,16 @@ type CreateUserForm = {
 };
 
 type CreateUserErrors = Partial<Record<"username" | "password" | "confirmPassword", string>>;
+type BillingEditForm = {
+  billingType: BillingType;
+  unlimited: boolean;
+  standardBalance: string;
+  subscriptionQuotaLimit: string;
+  subscriptionPeriod: BillingPeriod;
+  adjustmentType: string;
+  adjustmentAmount: string;
+  reason: string;
+};
 
 const accountUsernamePattern = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
 const userPageSizeOptions = ["10", "20", "50", "100"];
@@ -297,6 +315,57 @@ function roleLabel(user: ManagedUser, roles: ManagedRole[]) {
   return user.role_name || role?.name || "普通用户";
 }
 
+function billingTypeLabel(type?: string) {
+  return type === "subscription" ? "订阅配额" : "标准余额";
+}
+
+function billingPeriodLabel(period?: string) {
+  switch (period) {
+    case "daily":
+      return "每日";
+    case "weekly":
+      return "每周";
+    default:
+      return "每月";
+  }
+}
+
+function billingSummary(user: ManagedUser) {
+  const billing = user.billing;
+  if (!billing) {
+    return { title: "--", detail: "未加载" };
+  }
+  if (billing.unlimited) {
+    return { title: "无限额度", detail: billingTypeLabel(billing.type) };
+  }
+  if (billing.type === "subscription") {
+    const sub = billing.subscription;
+    return {
+      title: `${billing.available} / ${sub?.quota_limit ?? 0}`,
+      detail: `已用 ${sub?.quota_used ?? 0} · ${billingPeriodLabel(sub?.quota_period)}`,
+    };
+  }
+  const standard = billing.standard;
+  return {
+    title: String(standard?.available_balance ?? billing.available),
+    detail: `余额 ${standard?.balance ?? 0} · 预留 ${standard?.balance_reserved ?? 0}`,
+  };
+}
+
+function billingFormFromUser(user: ManagedUser): BillingEditForm {
+  const billing = user.billing;
+  return {
+    billingType: billing?.type || "standard",
+    unlimited: Boolean(billing?.unlimited),
+    standardBalance: String(billing?.standard?.balance ?? 0),
+    subscriptionQuotaLimit: String(billing?.subscription?.quota_limit ?? 0),
+    subscriptionPeriod: billing?.subscription?.quota_period || "monthly",
+    adjustmentType: "increase_balance",
+    adjustmentAmount: "",
+    reason: "",
+  };
+}
+
 function UsersContent() {
   const rolesLoadedRef = useRef(false);
   const [items, setItems] = useState<ManagedUser[]>([]);
@@ -318,6 +387,11 @@ function UsersContent() {
   const [roleUser, setRoleUser] = useState<ManagedUser | null>(null);
   const [selectedRoleId, setSelectedRoleId] = useState("");
   const [isSavingRole, setIsSavingRole] = useState(false);
+  const [billingUser, setBillingUser] = useState<ManagedUser | null>(null);
+  const [billingForm, setBillingForm] = useState<BillingEditForm | null>(null);
+  const [billingAdjustments, setBillingAdjustments] = useState<BillingAdjustment[]>([]);
+  const [isLoadingBilling, setIsLoadingBilling] = useState(false);
+  const [isSavingBilling, setIsSavingBilling] = useState(false);
 
   const loadUsers = useCallback(async (overrides: { page?: number; includeRoles?: boolean } = {}) => {
     const requestedPage = overrides.page ?? page;
@@ -457,6 +531,108 @@ function UsersContent() {
     setSelectedRoleId(user.role_id || roles[0]?.id || "");
   };
 
+  const openBillingDialog = async (user: ManagedUser) => {
+    setBillingUser(user);
+    setBillingForm(billingFormFromUser(user));
+    setBillingAdjustments([]);
+    setIsLoadingBilling(true);
+    try {
+      const data = await fetchBillingAdjustments(user.id, 10);
+      setBillingAdjustments(Array.isArray(data.items) ? data.items : []);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载计费记录失败");
+    } finally {
+      setIsLoadingBilling(false);
+    }
+  };
+
+  const updateBillingForm = <Key extends keyof BillingEditForm>(key: Key, value: BillingEditForm[Key]) => {
+    setBillingForm((current) => (current ? { ...current, [key]: value } : current));
+  };
+
+  const handleBillingAdjustment = async (payload: BillingAdjustmentPayload, successMessage: string) => {
+    if (!billingUser) {
+      return;
+    }
+    setIsSavingBilling(true);
+    setItemPending(billingUser.id, true);
+    try {
+      await createBillingAdjustment(billingUser.id, payload);
+      const current = billingUser;
+      const [detail, refreshed] = await Promise.all([
+        fetchManagedUser(current.id),
+        fetchBillingAdjustments(current.id, 10),
+        loadUsers({ includeRoles: false }),
+      ]);
+      setBillingAdjustments(Array.isArray(refreshed.items) ? refreshed.items : []);
+      const nextUser = detail.item || current;
+      setBillingUser(nextUser);
+      setBillingForm((form) => form ? {
+        ...billingFormFromUser(nextUser),
+        reason: "",
+        adjustmentAmount: "",
+        adjustmentType: form.adjustmentType,
+      } : form);
+      toast.success(successMessage);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存计费调整失败");
+    } finally {
+      setIsSavingBilling(false);
+      setItemPending(billingUser.id, false);
+    }
+  };
+
+  const handleApplyBillingBase = async () => {
+    if (!billingUser || !billingForm) {
+      return;
+    }
+    const reason = billingForm.reason.trim();
+    if (!reason) {
+      toast.error("请填写调整原因");
+      return;
+    }
+    if (billingForm.unlimited !== Boolean(billingUser.billing?.unlimited)) {
+      await handleBillingAdjustment({ type: "set_unlimited", unlimited: billingForm.unlimited, reason }, "无限额度状态已保存");
+      return;
+    }
+    if (billingForm.billingType === "subscription") {
+      await handleBillingAdjustment({
+        type: billingUser.billing?.type === "subscription" ? "set_quota_limit" : "switch_to_subscription",
+        quota_limit: Math.max(0, Number(billingForm.subscriptionQuotaLimit) || 0),
+        quota_period: billingForm.subscriptionPeriod,
+        reason,
+      }, "订阅配额已保存");
+      if (billingUser.billing?.type === "subscription" && billingForm.subscriptionPeriod !== billingUser.billing.subscription?.quota_period) {
+        await handleBillingAdjustment({ type: "set_quota_period", quota_period: billingForm.subscriptionPeriod, reason }, "订阅周期已保存");
+      }
+      return;
+    }
+    await handleBillingAdjustment({
+      type: billingUser.billing?.type === "standard" ? "set_balance" : "switch_to_standard",
+      balance: Math.max(0, Number(billingForm.standardBalance) || 0),
+      reason,
+    }, "标准余额已保存");
+  };
+
+  const handleApplyBillingOperation = async () => {
+    if (!billingForm) {
+      return;
+    }
+    const reason = billingForm.reason.trim();
+    if (!reason) {
+      toast.error("请填写调整原因");
+      return;
+    }
+    const payload: BillingAdjustmentPayload = {
+      type: billingForm.adjustmentType,
+      reason,
+    };
+    if (!["reset_quota", "clear_quota_used", "release_balance_reserved", "release_quota_reserved"].includes(billingForm.adjustmentType)) {
+      payload.amount = Math.max(0, Number(billingForm.adjustmentAmount) || 0);
+    }
+    await handleBillingAdjustment(payload, "计费调整已执行");
+  };
+
   const handleSaveRole = async () => {
     if (!roleUser || !selectedRoleId) {
       return;
@@ -590,13 +766,14 @@ function UsersContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[1340px]">
+            <Table className="min-w-[1500px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>用户</TableHead>
                   <TableHead>角色</TableHead>
                   <TableHead>来源</TableHead>
                   <TableHead>状态</TableHead>
+                  <TableHead>本地计费</TableHead>
                   <TableHead>额度消耗</TableHead>
                   <TableHead className="w-[340px]">调用曲线</TableHead>
                   <TableHead>时间</TableHead>
@@ -606,6 +783,7 @@ function UsersContent() {
               <TableBody>
                 {items.map((user) => {
                   const isPending = pendingIds.has(user.id);
+                  const billing = billingSummary(user);
                   return (
                     <TableRow key={user.id} className="text-muted-foreground">
                       <TableCell>
@@ -650,6 +828,20 @@ function UsersContent() {
                       </TableCell>
                       <TableCell>
                         <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <Badge variant={user.billing?.type === "subscription" ? "info" : "secondary"} className="rounded-md">
+                              {billingTypeLabel(user.billing?.type)}
+                            </Badge>
+                            {user.billing?.unlimited ? (
+                              <Badge variant="success" className="rounded-md">无限</Badge>
+                            ) : null}
+                          </div>
+                          <div className="text-base font-semibold text-foreground">{billing.title}</div>
+                          <div className="text-xs text-muted-foreground">{billing.detail}</div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="space-y-1">
                           <div className="text-base font-semibold text-foreground">{numeric(user.quota_used)}</div>
                           <div className="text-xs text-muted-foreground">今日 {todayQuotaUsed(user)}</div>
                         </div>
@@ -672,6 +864,16 @@ function UsersContent() {
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-8 rounded-lg px-3"
+                            onClick={() => void openBillingDialog(user)}
+                            disabled={isPending}
+                          >
+                            <Gauge className="size-4" />
+                            计费
+                          </Button>
                           <Button
                             type="button"
                             variant="outline"
@@ -936,6 +1138,169 @@ function UsersContent() {
             >
               {isSavingRole ? <LoaderCircle className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
               保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(billingUser)} onOpenChange={(open) => (!open ? setBillingUser(null) : null)}>
+        <DialogContent className="max-h-[88dvh] overflow-y-auto rounded-2xl p-6 sm:max-w-3xl">
+          <DialogHeader className="gap-2">
+            <DialogTitle className="flex items-center gap-2">
+              <Gauge className="size-5 text-[#1456f0]" />
+              用户计费
+            </DialogTitle>
+            <DialogDescription className="truncate text-sm">
+              {billingUser?.name || "普通用户"} · {billingUser?.id}
+            </DialogDescription>
+          </DialogHeader>
+          {billingForm ? (
+            <div className="grid gap-5">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">计费类型</label>
+                  <Select value={billingForm.billingType} onValueChange={(value) => updateBillingForm("billingType", value as BillingType)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="standard">标准余额制</SelectItem>
+                      <SelectItem value="subscription">订阅配额制</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">无限额度</label>
+                  <Select value={billingForm.unlimited ? "true" : "false"} onValueChange={(value) => updateBillingForm("unlimited", value === "true")}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="false">按余额/配额限制</SelectItem>
+                      <SelectItem value="true">无限额度</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {billingForm.billingType === "standard" ? (
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-stone-700 dark:text-foreground">当前余额</label>
+                    <Input
+                      type="number"
+                      min="0"
+                      inputMode="numeric"
+                      value={billingForm.standardBalance}
+                      onChange={(event) => updateBillingForm("standardBalance", event.target.value)}
+                      className="h-11 rounded-xl"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700 dark:text-foreground">配额上限</label>
+                      <Input
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={billingForm.subscriptionQuotaLimit}
+                        onChange={(event) => updateBillingForm("subscriptionQuotaLimit", event.target.value)}
+                        className="h-11 rounded-xl"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700 dark:text-foreground">订阅周期</label>
+                      <Select value={billingForm.subscriptionPeriod} onValueChange={(value) => updateBillingForm("subscriptionPeriod", value as BillingPeriod)}>
+                        <SelectTrigger className="h-11 rounded-xl">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="daily">每日</SelectItem>
+                          <SelectItem value="weekly">每周</SelectItem>
+                          <SelectItem value="monthly">每月</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                )}
+                <div className="space-y-2 sm:col-span-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">调整原因</label>
+                  <Input
+                    value={billingForm.reason}
+                    onChange={(event) => updateBillingForm("reason", event.target.value)}
+                    placeholder="必填"
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <Button type="button" className="h-10 rounded-xl px-5" onClick={() => void handleApplyBillingBase()} disabled={isSavingBilling}>
+                  {isSavingBilling ? <LoaderCircle className="size-4 animate-spin" /> : <Gauge className="size-4" />}
+                  保存计费配置
+                </Button>
+              </div>
+
+              <div className="rounded-2xl border border-border p-4">
+                <div className="mb-3 text-sm font-semibold text-foreground">手动调整</div>
+                <div className="grid gap-3 sm:grid-cols-[1fr_140px]">
+                  <Select value={billingForm.adjustmentType} onValueChange={(value) => updateBillingForm("adjustmentType", value)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="increase_balance">增加余额</SelectItem>
+                      <SelectItem value="decrease_balance">扣减余额</SelectItem>
+                      <SelectItem value="release_balance_reserved">释放预留余额</SelectItem>
+                      <SelectItem value="increase_quota">增加当期配额</SelectItem>
+                      <SelectItem value="decrease_quota">扣减当期配额</SelectItem>
+                      <SelectItem value="reset_quota">重置当前周期</SelectItem>
+                      <SelectItem value="clear_quota_used">清零已用配额</SelectItem>
+                      <SelectItem value="release_quota_reserved">释放预留配额</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    value={billingForm.adjustmentAmount}
+                    onChange={(event) => updateBillingForm("adjustmentAmount", event.target.value)}
+                    placeholder="数量"
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <Button type="button" variant="outline" className="h-10 rounded-xl px-5" onClick={() => void handleApplyBillingOperation()} disabled={isSavingBilling}>
+                    执行调整
+                  </Button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-border p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-foreground">最近调整记录</div>
+                  {isLoadingBilling ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" /> : null}
+                </div>
+                <div className="space-y-2">
+                  {billingAdjustments.length === 0 ? (
+                    <div className="rounded-xl bg-muted/40 px-3 py-4 text-center text-sm text-muted-foreground">暂无调整记录</div>
+                  ) : billingAdjustments.map((item) => (
+                    <div key={item.id} className="rounded-xl border border-border/70 px-3 py-2 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium text-foreground">{item.type}</span>
+                        <span className="text-xs text-muted-foreground">{formatDateTime(item.created_at)}</span>
+                      </div>
+                      <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {item.operator_name || item.operator_id || "管理员"} · {item.reason}
+                        {typeof item.amount === "number" ? ` · ${item.amount}` : ""}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button type="button" variant="secondary" className="h-10 rounded-xl px-5" onClick={() => setBillingUser(null)} disabled={isSavingBilling}>
+              关闭
             </Button>
           </DialogFooter>
         </DialogContent>

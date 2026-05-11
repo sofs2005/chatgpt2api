@@ -41,6 +41,7 @@ type App struct {
 	config     *config.Store
 	auth       *service.AuthService
 	accounts   *service.AccountService
+	billing    *service.BillingService
 	logs       *service.LogService
 	logger     *service.Logger
 	proxy      *service.ProxyService
@@ -77,6 +78,7 @@ func NewApp() (*App, error) {
 	proxy := service.NewProxyService(cfg)
 	accounts := service.NewAccountService(storageBackend, cfg, proxy, logs)
 	auth := service.NewAuthService(storageBackend)
+	billing := service.NewBillingService(cfg.DataDir, storageBackend, cfg)
 	bootstrap, err := auth.EnsureBootstrapAdmin(cfg.AdminUsername(), cfg.AdminPassword())
 	if err != nil {
 		cancel()
@@ -88,7 +90,7 @@ func NewApp() (*App, error) {
 	}
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger}
-	app := &App{config: cfg, auth: auth, accounts: accounts, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), prompts: service.NewPromptFavoriteService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), prompts: service.NewPromptFavoriteService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), cancel: cancel}
 	app.cpaImport = service.NewCPAImportService(app.cpa, accounts, proxy)
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
 	app.register = service.NewRegisterService(cfg.DataDir, accounts, storageBackend)
@@ -113,6 +115,7 @@ func NewApp() (*App, error) {
 		cfg.UserDefaultConcurrentLimit,
 		cfg.UserDefaultRPMLimit,
 	)
+	app.tasks.SetBillingService(billing)
 	app.tasks.SetTaskTimeoutGetter(func() time.Duration {
 		return time.Duration(app.config.ImageTaskTimeoutSeconds()) * time.Second
 	})
@@ -150,7 +153,7 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.engine.ListModels(r.Context())
-	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate, nil)
 }
 
 func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -173,8 +176,13 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/images/generations", body), "/v1/images/generations", model)
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, nil)
+		return
+	}
 	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, reservation)
 }
 
 func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
@@ -205,8 +213,13 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/images/edits", body), "/v1/images/edits", model)
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, nil)
+		return
+	}
 	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, reservation)
 }
 
 func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -223,8 +236,13 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/chat/completions", body), "/v1/chat/completions", model)
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, nil)
+		return
+	}
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, reservation)
 }
 
 func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
@@ -241,8 +259,13 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/responses", body), "/v1/responses", model)
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, nil)
+		return
+	}
 	result, stream, err := a.engine.HandleResponsesScoped(r.Context(), body, identityScope(identity))
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, reservation)
 }
 
 func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -261,19 +284,22 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleMessages(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate, nil)
 }
 
-func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string) {
+func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, reservation *service.BillingReservation) {
 	start := time.Now()
 	requestCapture := requestAuditCapture(r.Context())
 	if err != nil {
+		a.settleProtocolBilling(reservation, 0)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture)
 		markRequestBusinessLogged(r)
 		a.writeProtocolError(w, err)
 		return
 	}
 	if stream == nil {
+		consumed := billableProtocolOutputCount(endpoint, result)
+		a.settleProtocolBilling(reservation, consumed)
 		urls := collectURLs(result)
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
@@ -286,8 +312,10 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 	flusher, _ := w.(http.Flusher)
 	if stream.Kind == "anthropic" || sseKind == "anthropic" {
 		var urls []string
+		streamConsumed := 0
 		for item := range stream.Items {
 			urls = append(urls, collectURLs(item)...)
+			streamConsumed += billableProtocolStreamItemCount(endpoint, item)
 			event := firstNonEmpty(util.Clean(item["type"]), "message_delta")
 			fmt.Fprintf(w, "event: %s\n", event)
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(item))
@@ -296,6 +324,7 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			}
 		}
 		if err := <-stream.Err; err != nil {
+			a.settleProtocolBilling(reservation, max(billableURLCount(urls), streamConsumed))
 			a.recordGeneratedImages(identity, urls, visibility)
 			a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 			markRequestBusinessLogged(r)
@@ -303,6 +332,7 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
 			return
 		}
+		a.settleProtocolBilling(reservation, max(billableURLCount(urls), streamConsumed))
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
@@ -313,19 +343,24 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		flusher.Flush()
 	}
 	var urls []string
+	streamConsumed := 0
 	for item := range stream.Items {
 		urls = append(urls, collectURLs(item)...)
+		streamConsumed += billableProtocolStreamItemCount(endpoint, item)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(item))
 		if flusher != nil {
 			flusher.Flush()
 		}
 	}
+	consumed := max(billableURLCount(urls), streamConsumed)
 	if err := <-stream.Err; err != nil {
+		a.settleProtocolBilling(reservation, consumed)
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 		markRequestBusinessLogged(r)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
+		a.settleProtocolBilling(reservation, consumed)
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
@@ -337,6 +372,10 @@ func protocolErrorHTTPStatus(err error) int {
 	var httpErr protocol.HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.Status
+	}
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		return http.StatusTooManyRequests
 	}
 	var imageErr *protocol.ImageGenerationError
 	if errors.As(err, &imageErr) {
@@ -353,6 +392,11 @@ func (a *App) writeProtocolError(w http.ResponseWriter, err error) {
 	var httpErr protocol.HTTPError
 	if errors.As(err, &httpErr) {
 		util.WriteError(w, httpErr.Status, httpErr.Message)
+		return
+	}
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		util.WriteJSON(w, http.StatusTooManyRequests, billingErr.OpenAIError())
 		return
 	}
 	var imageErr *protocol.ImageGenerationError
@@ -437,6 +481,8 @@ func (a *App) writeLoginResponse(w http.ResponseWriter, identity service.Identit
 		"credential_id":             identity.CredentialID,
 		"credential_name":           identity.CredentialName,
 		"creation_concurrent_limit": a.identityCreationConcurrentLimit(identity),
+		"creation_rpm_limit":        a.identityCreationRPMLimit(identity),
+		"billing":                   a.identityBillingState(identity),
 		"menu_paths":                permissions.MenuPaths,
 		"api_permissions":           permissions.APIPermissions,
 		"menus":                     service.FilterMenuPermissions(permissions.MenuPaths),
@@ -452,6 +498,31 @@ func (a *App) identityCreationConcurrentLimit(identity service.Identity) int {
 		return 0
 	}
 	return a.config.UserDefaultConcurrentLimit()
+}
+
+func (a *App) identityCreationRPMLimit(identity service.Identity) int {
+	if identity.Role != service.AuthRoleUser {
+		return 0
+	}
+	return a.config.UserDefaultRPMLimit()
+}
+
+func (a *App) identityBillingState(identity service.Identity) map[string]any {
+	if identity.Role != service.AuthRoleUser {
+		return map[string]any{
+			"type":         service.BillingTypeStandard,
+			"unit":         service.BillingUnitImage,
+			"unlimited":    true,
+			"available":    0,
+			"standard":     nil,
+			"subscription": nil,
+			"limit_state":  "unlimited",
+		}
+	}
+	if a == nil || a.billing == nil {
+		return nil
+	}
+	return a.billing.Get(identityScope(identity))
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -1161,6 +1232,10 @@ func jsonString(v any) string {
 }
 
 func openAIErrorForStream(err error) map[string]any {
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		return billingErr.OpenAIError()
+	}
 	var imageErr *protocol.ImageGenerationError
 	if errors.As(err, &imageErr) {
 		return imageErr.OpenAIError()
@@ -1356,6 +1431,25 @@ func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []
 	})
 }
 
+func (a *App) reserveProtocolBilling(identity service.Identity, amount int, endpoint, model string) (*service.BillingReservation, error) {
+	if amount <= 0 || a == nil || a.billing == nil {
+		return nil, nil
+	}
+	return a.billing.Reserve(identity, amount, service.BillingReference{
+		Endpoint:       endpoint,
+		Model:          model,
+		CredentialID:   identity.CredentialID,
+		CredentialName: identity.CredentialName,
+	})
+}
+
+func (a *App) settleProtocolBilling(reservation *service.BillingReservation, consumed int) {
+	if a == nil || a.billing == nil || reservation == nil {
+		return
+	}
+	a.billing.Settle(reservation, consumed)
+}
+
 func (a *App) decorateImageList(payload map[string]any) {
 	ownerNames := a.imageOwnerDisplayNames()
 	for _, item := range util.AsMapSlice(payload["items"]) {
@@ -1515,6 +1609,141 @@ func collectURLs(v any) []string {
 	default:
 		return nil
 	}
+}
+
+func protocolBillableUnits(endpoint string, body map[string]any) int {
+	switch endpoint {
+	case "/v1/images/generations", "/v1/images/edits":
+		return normalizedProtocolImageCount(body["n"])
+	case "/v1/chat/completions":
+		if protocol.IsImageChatRequest(body) {
+			return normalizedProtocolImageCount(body["n"])
+		}
+	case "/v1/responses":
+		if protocol.HasResponseImageGenerationTool(body) {
+			return normalizedProtocolImageCount(body["n"])
+		}
+	}
+	return 0
+}
+
+func normalizedProtocolImageCount(value any) int {
+	n := util.ToInt(value, 1)
+	if n < 1 {
+		return 1
+	}
+	if n > 4 {
+		return 4
+	}
+	return n
+}
+
+func billableProtocolOutputCount(endpoint string, result map[string]any) int {
+	if len(result) == 0 {
+		return 0
+	}
+	switch endpoint {
+	case "/v1/images/generations", "/v1/images/edits":
+		return billableImageDataCount(result["data"])
+	case "/v1/chat/completions":
+		return countChatCompletionImages(result)
+	case "/v1/responses":
+		return countResponseOutputImages(result)
+	default:
+		return billableURLCount(collectURLs(result))
+	}
+}
+
+func billableProtocolStreamItemCount(endpoint string, item map[string]any) int {
+	if len(item) == 0 {
+		return 0
+	}
+	switch endpoint {
+	case "/v1/images/generations", "/v1/images/edits":
+		if util.Clean(item["object"]) == "image.generation.result" {
+			return billableImageDataCount(item["data"])
+		}
+	case "/v1/chat/completions":
+		for _, choice := range util.AsMapSlice(item["choices"]) {
+			delta := util.StringMap(choice["delta"])
+			if len(delta) == 0 {
+				delta = util.StringMap(choice["message"])
+			}
+			if count := countImagesInChatContent(delta["content"]); count > 0 {
+				return count
+			}
+		}
+	case "/v1/responses":
+		eventType := util.Clean(item["type"])
+		switch eventType {
+		case "response.output_item.done", "response.output_item.added":
+			if count := countResponseOutputItemImages(util.StringMap(item["item"])); count > 0 {
+				return count
+			}
+		case "response.completed":
+			return countResponseOutputImages(util.StringMap(item["response"]))
+		}
+	}
+	return 0
+}
+
+func billableImageDataCount(value any) int {
+	count := 0
+	for _, item := range util.AsMapSlice(value) {
+		if util.Clean(item["url"]) != "" || util.Clean(item["b64_json"]) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countChatCompletionImages(result map[string]any) int {
+	count := 0
+	for _, choice := range util.AsMapSlice(result["choices"]) {
+		message := util.StringMap(choice["message"])
+		count += countImagesInChatContent(message["content"])
+	}
+	return count
+}
+
+func countImagesInChatContent(content any) int {
+	switch value := content.(type) {
+	case string:
+		return strings.Count(value, "![")
+	case []any:
+		count := 0
+		for _, raw := range value {
+			item := util.StringMap(raw)
+			if util.Clean(item["type"]) == "image_url" || util.Clean(item["image_url"]) != "" {
+				count++
+			}
+			if util.Clean(item["type"]) == "text" {
+				count += strings.Count(util.Clean(item["text"]), "![")
+			}
+		}
+		return count
+	default:
+		return 0
+	}
+}
+
+func countResponseOutputImages(result map[string]any) int {
+	count := 0
+	for _, item := range util.AsMapSlice(result["output"]) {
+		count += countResponseOutputItemImages(item)
+	}
+	return count
+}
+
+func countResponseOutputItemImages(item map[string]any) int {
+	if util.Clean(item["type"]) == "image_generation_call" && util.Clean(item["result"]) != "" {
+		return 1
+	}
+	return 0
+}
+
+func billableURLCount(urls []string) int {
+	return len(dedupe(urls))
 }
 
 func dedupe(items []string) []string {

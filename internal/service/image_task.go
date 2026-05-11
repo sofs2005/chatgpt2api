@@ -24,8 +24,9 @@ const (
 
 	defaultImageTaskTimeout = 5 * time.Minute
 
-	imageOutputCallbackPayloadKey     = "image_output_callback"
-	imageOutputSlotAcquirerPayloadKey = "image_output_slot_acquirer"
+	imageOutputCallbackPayloadKey      = "image_output_callback"
+	imageOutputSlotAcquirerPayloadKey  = "image_output_slot_acquirer"
+	imageTaskBillingBillablePayloadKey = "billing_billable"
 )
 
 type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
@@ -51,6 +52,7 @@ type ImageTaskService struct {
 	generation          ImageTaskHandler
 	edit                ImageTaskHandler
 	chat                ImageTaskHandler
+	billing             *BillingService
 	retentionGetter     func() int
 	taskTimeoutGetter   func() time.Duration
 	userConcurrentLimit func() int
@@ -105,6 +107,32 @@ func (s *ImageTaskService) SetTaskTimeoutGetter(getter func() time.Duration) {
 	s.taskTimeoutGetter = getter
 }
 
+func (s *ImageTaskService) SetBillingService(billing *BillingService) {
+	s.billing = billing
+	if billing == nil {
+		return
+	}
+	s.mu.Lock()
+	changed := false
+	for key, task := range s.tasks {
+		if util.Clean(task["billing_reservation_id"]) == "" || isActiveTaskStatus(util.Clean(task["status"])) {
+			continue
+		}
+		delete(task, "billing_reservation_id")
+		delete(task, "billing_reserved_amount")
+		if _, ok := task["billing_consumed_amount"]; !ok {
+			task["billing_consumed_amount"] = billableTaskOutputCount(task)
+		}
+		task["updated_at"] = util.NowLocal()
+		s.tasks[key] = task
+		changed = true
+	}
+	if changed {
+		_ = s.saveLocked()
+	}
+	s.mu.Unlock()
+}
+
 func (s *ImageTaskService) SubmitGeneration(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, n int, messages any, visibilityValues ...string) (map[string]any, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -153,7 +181,7 @@ func (s *ImageTaskService) SubmitEditWithOptions(ctx context.Context, identity I
 	return s.submitImageWithMetadataAndOptions(ctx, identity, clientTaskID, prompt, model, size, quality, baseURL, n, messages, metadata, "edit", images, options, toolOptions, visibilityValues...)
 }
 
-func (s *ImageTaskService) SubmitChat(ctx context.Context, identity Identity, clientTaskID, prompt, model string, messages any) (map[string]any, error) {
+func (s *ImageTaskService) SubmitChat(ctx context.Context, identity Identity, clientTaskID, prompt, model string, messages any, billable bool, nValues ...int) (map[string]any, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
@@ -161,7 +189,14 @@ func (s *ImageTaskService) SubmitChat(ctx context.Context, identity Identity, cl
 	if len(util.AsMapSlice(messages)) == 0 {
 		return nil, fmt.Errorf("messages are required")
 	}
-	payload := map[string]any{"prompt": prompt, "model": model, "messages": messages, "n": 1, "visibility": ImageVisibilityPrivate}
+	n := 1
+	if len(nValues) > 0 {
+		n = normalizedImageTaskCount(nValues[0])
+	}
+	payload := map[string]any{"prompt": prompt, "model": model, "messages": messages, "n": n, "visibility": ImageVisibilityPrivate}
+	if billable {
+		payload[imageTaskBillingBillablePayloadKey] = true
+	}
 	return s.submit(ctx, identity, clientTaskID, "chat", payload)
 }
 
@@ -236,6 +271,7 @@ func (s *ImageTaskService) CancelTask(identity Identity, clientTaskID string) (m
 	var cancel context.CancelFunc
 	s.mu.Lock()
 	task := s.tasks[key]
+	cancelled := false
 	if task == nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("creation task not found")
@@ -250,9 +286,13 @@ func (s *ImageTaskService) CancelTask(identity Identity, clientTaskID string) (m
 		cancel = s.cancels[key]
 		delete(s.cancels, key)
 		_ = s.saveLocked()
+		cancelled = true
 	}
 	result := publicTask(task)
 	s.mu.Unlock()
+	if cancelled {
+		s.settleTaskBilling(key)
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -278,7 +318,28 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 		return result, nil
 	}
 	count := taskCount(mode, payload)
+	var reservation *BillingReservation
+	if s.billing != nil && isBillableImageTaskMode(mode, payload) {
+		var err error
+		reservation, err = s.billing.Reserve(identity, count, BillingReference{
+			Endpoint:       creationTaskBillingEndpoint(mode),
+			Model:          firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto),
+			TaskID:         taskID,
+			CredentialID:   identity.CredentialID,
+			CredentialName: identity.CredentialName,
+		})
+		if err != nil {
+			if cleaned {
+				_ = s.saveLocked()
+			}
+			s.mu.Unlock()
+			return nil, err
+		}
+	}
 	if err := s.checkUserTaskLimitsLocked(identity, owner, count, time.Now()); err != nil {
+		if reservation != nil {
+			s.billing.Release(reservation)
+		}
 		if cleaned {
 			_ = s.saveLocked()
 		}
@@ -288,6 +349,10 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 	taskCtx, cancel := context.WithCancel(context.Background())
 	outputFormat := NormalizeImageOutputFormat(util.Clean(payload["output_format"]))
 	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": outputFormat, "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
+	if reservation != nil {
+		task["billing_reservation_id"] = reservation.ID
+		task["billing_reserved_amount"] = reservation.Amount
+	}
 	if mode == "generate" || mode == "edit" {
 		task["output_statuses"] = initialImageOutputStatuses(count)
 	}
@@ -386,6 +451,7 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 			updates["output_statuses"] = finalImageOutputStatuses(taskCount(mode, payload), data, status)
 		}
 		s.updateActiveTask(key, updates)
+		s.settleTaskBilling(key)
 		return
 	}
 	data := util.AsMapSlice(result["data"])
@@ -402,6 +468,7 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 			updates["output_type"] = outputType
 		}
 		s.updateActiveTask(key, updates)
+		s.settleTaskBilling(key)
 		return
 	}
 	updates := map[string]any{"status": TaskStatusSuccess, "data": data, "error": ""}
@@ -421,6 +488,7 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		updates["output_type"] = outputType
 	}
 	s.updateActiveTask(key, updates)
+	s.settleTaskBilling(key)
 }
 
 func finalImageOutputStatuses(count int, data []map[string]any, status string) []string {
@@ -636,6 +704,33 @@ func (s *ImageTaskService) updateImageTaskPartialData(key string, data []map[str
 	return true
 }
 
+func (s *ImageTaskService) settleTaskBilling(key string) {
+	if s.billing == nil {
+		return
+	}
+	reservationID := ""
+	consumed := 0
+	s.mu.Lock()
+	task := s.tasks[key]
+	if task != nil {
+		reservationID = util.Clean(task["billing_reservation_id"])
+		if reservationID != "" {
+			if task["status"] == TaskStatusSuccess {
+				consumed = billableTaskOutputCount(task)
+			}
+			delete(task, "billing_reservation_id")
+			delete(task, "billing_reserved_amount")
+			task["billing_consumed_amount"] = consumed
+			task["updated_at"] = util.NowLocal()
+			_ = s.saveLocked()
+		}
+	}
+	s.mu.Unlock()
+	if reservationID != "" {
+		s.billing.SettleReservationID(reservationID, consumed)
+	}
+}
+
 func (s *ImageTaskService) removeTaskCancel(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -689,6 +784,13 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 		if outputType := util.Clean(task["output_type"]); outputType != "" {
 			normalized["output_type"] = outputType
 		}
+		if reservationID := util.Clean(task["billing_reservation_id"]); reservationID != "" {
+			normalized["billing_reservation_id"] = reservationID
+			normalized["billing_reserved_amount"] = util.ToInt(task["billing_reserved_amount"], 0)
+		}
+		if consumed := util.ToInt(task["billing_consumed_amount"], -1); consumed >= 0 {
+			normalized["billing_consumed_amount"] = consumed
+		}
 		tasks[taskKey(owner, id)] = normalized
 	}
 	return tasks
@@ -719,6 +821,14 @@ func (s *ImageTaskService) recoverUnfinishedLocked() bool {
 	changed := false
 	for _, task := range s.tasks {
 		if task["status"] == TaskStatusQueued || task["status"] == TaskStatusRunning {
+			if reservationID := util.Clean(task["billing_reservation_id"]); reservationID != "" {
+				if s.billing != nil {
+					s.billing.ReleaseReservationID(reservationID)
+				}
+				delete(task, "billing_reservation_id")
+				delete(task, "billing_reserved_amount")
+				task["billing_consumed_amount"] = 0
+			}
 			task["status"] = TaskStatusError
 			task["error"] = "服务已重启，未完成的任务已中断"
 			task["updated_at"] = util.NowLocal()
@@ -777,6 +887,12 @@ func publicTask(task map[string]any) map[string]any {
 	if util.Clean(task["output_type"]) != "" {
 		item["output_type"] = task["output_type"]
 	}
+	if consumed := util.ToInt(task["billing_consumed_amount"], -1); consumed >= 0 {
+		item["billing_consumed_amount"] = consumed
+	}
+	if reserved := util.ToInt(task["billing_reserved_amount"], 0); reserved > 0 {
+		item["billing_reserved_amount"] = reserved
+	}
 	if visibility := util.Clean(task["visibility"]); visibility != "" {
 		item["visibility"] = visibility
 	}
@@ -822,9 +938,6 @@ func imageTaskCount(payload map[string]any) int {
 }
 
 func taskCount(mode string, payload map[string]any) int {
-	if mode == "chat" {
-		return 1
-	}
 	return imageTaskCount(payload)
 }
 
@@ -870,6 +983,44 @@ func hasImageTaskOutputData(item map[string]any) bool {
 		return false
 	}
 	return util.Clean(item["b64_json"]) != "" || util.Clean(item["url"]) != "" || util.Clean(item["text_response"]) != ""
+}
+
+func hasBillableImageTaskOutputData(item map[string]any) bool {
+	if item == nil {
+		return false
+	}
+	return util.Clean(item["b64_json"]) != "" || util.Clean(item["url"]) != ""
+}
+
+func billableTaskOutputCount(task map[string]any) int {
+	if task == nil || util.Clean(task["output_type"]) == "text" {
+		return 0
+	}
+	count := 0
+	for _, item := range util.AsMapSlice(task["data"]) {
+		if hasBillableImageTaskOutputData(item) {
+			count++
+		}
+	}
+	return count
+}
+
+func isBillableImageTaskMode(mode string, payload map[string]any) bool {
+	if mode == "generate" || mode == "edit" {
+		return true
+	}
+	return mode == "chat" && util.ToBool(payload[imageTaskBillingBillablePayloadKey])
+}
+
+func creationTaskBillingEndpoint(mode string) string {
+	switch mode {
+	case "edit":
+		return "/api/creation-tasks/image-edits"
+	case "chat":
+		return "/api/creation-tasks/chat-completions"
+	default:
+		return "/api/creation-tasks/image-generations"
+	}
 }
 
 func mergeImageTaskMetadata(payload map[string]any, metadata map[string]any) {

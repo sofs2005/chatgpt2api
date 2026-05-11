@@ -20,6 +20,8 @@ import {
   updateLoginPageImageSettings,
   updateRegisterConfig,
   updateSettingsConfig,
+  type BillingPeriod,
+  type BillingType,
   type CPAPool,
   type CPARemoteFile,
   type LogCleanupResult,
@@ -40,6 +42,17 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
+function normalizeDefaultBillingType(value: unknown): BillingType {
+  return value === "subscription" ? "subscription" : "standard";
+}
+
+function normalizeDefaultSubscriptionPeriod(value: unknown): BillingPeriod {
+  if (value === "daily" || value === "weekly" || value === "monthly") {
+    return value;
+  }
+  return "monthly";
+}
+
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   const loginImageTransform = normalizeLoginPageImageTransform({
     zoom: Number(config.login_page_image_zoom),
@@ -52,6 +65,10 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_task_timeout_seconds: Number(config.image_task_timeout_seconds || 300),
     user_default_concurrent_limit: Number(config.user_default_concurrent_limit || 0),
     user_default_rpm_limit: Number(config.user_default_rpm_limit || 0),
+    default_billing_type: normalizeDefaultBillingType(config.default_billing_type),
+    default_standard_balance: Math.max(0, Number(config.default_standard_balance) || 0),
+    default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
+    default_subscription_period: normalizeDefaultSubscriptionPeriod(config.default_subscription_period),
     image_retention_days: Number(config.image_retention_days || 30),
     log_retention_days: Number(config.log_retention_days || 7),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -137,6 +154,10 @@ type SettingsStore = {
   setImageTaskTimeoutSeconds: (value: string) => void;
   setUserDefaultConcurrentLimit: (value: string) => void;
   setUserDefaultRpmLimit: (value: string) => void;
+  setDefaultBillingType: (value: BillingType) => void;
+  setDefaultStandardBalance: (value: string) => void;
+  setDefaultSubscriptionQuota: (value: string) => void;
+  setDefaultSubscriptionPeriod: (value: BillingPeriod) => void;
   setImageRetentionDays: (value: string) => void;
   setLogRetentionDays: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
@@ -267,6 +288,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_task_timeout_seconds: Math.min(3600, Math.max(30, Number(config.image_task_timeout_seconds) || 300)),
         user_default_concurrent_limit: Math.max(0, Number(config.user_default_concurrent_limit) || 0),
         user_default_rpm_limit: Math.max(0, Number(config.user_default_rpm_limit) || 0),
+        default_billing_type: normalizeDefaultBillingType(config.default_billing_type),
+        default_standard_balance: Math.max(0, Number(config.default_standard_balance) || 0),
+        default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
+        default_subscription_period: normalizeDefaultSubscriptionPeriod(config.default_subscription_period),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         log_retention_days: Math.min(3650, Math.max(1, Number(config.log_retention_days) || 7)),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -335,6 +360,22 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setUserDefaultRpmLimit: (value) => {
     set((state) => state.config ? { config: { ...state.config, user_default_rpm_limit: value } } : {});
+  },
+
+  setDefaultBillingType: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_billing_type: value } } : {});
+  },
+
+  setDefaultStandardBalance: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_standard_balance: value } } : {});
+  },
+
+  setDefaultSubscriptionQuota: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_subscription_quota: value } } : {});
+  },
+
+  setDefaultSubscriptionPeriod: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_subscription_period: value } } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

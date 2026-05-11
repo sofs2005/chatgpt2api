@@ -223,6 +223,10 @@ export type SettingsConfig = {
   image_task_timeout_seconds?: number | string;
   user_default_concurrent_limit?: number | string;
   user_default_rpm_limit?: number | string;
+  default_billing_type?: BillingType;
+  default_standard_balance?: number | string;
+  default_subscription_quota?: number | string;
+  default_subscription_period?: BillingPeriod;
   image_retention_days?: number | string;
   log_retention_days?: number | string;
   auto_remove_invalid_accounts?: boolean;
@@ -409,6 +413,8 @@ export type LoginResponse = {
   credential_id?: string;
   credential_name?: string;
   creation_concurrent_limit: number;
+  creation_rpm_limit: number;
+  billing?: BillingState | null;
   menu_paths?: string[];
   api_permissions?: string[];
   menus?: PermissionMenu[];
@@ -451,6 +457,62 @@ export type UserKey = {
   api_permissions?: string[];
 };
 
+export type BillingType = "standard" | "subscription";
+export type BillingPeriod = "daily" | "weekly" | "monthly";
+
+export type BillingStandardState = {
+  balance: number;
+  balance_reserved: number;
+  lifetime_consumed: number;
+  available_balance?: number;
+};
+
+export type BillingSubscriptionState = {
+  quota_limit: number;
+  quota_used: number;
+  quota_reserved: number;
+  manual_delta: number;
+  quota_period: BillingPeriod;
+  quota_period_started_at?: string;
+  quota_period_ends_at?: string;
+  remaining_quota?: number;
+};
+
+export type BillingState = {
+  type: BillingType;
+  unit: "image";
+  unlimited: boolean;
+  available: number;
+  standard?: BillingStandardState | null;
+  subscription?: BillingSubscriptionState | null;
+  limit_state?: "ok" | "insufficient" | "unlimited" | string;
+  updated_at?: string;
+};
+
+export type BillingAdjustment = {
+  id: string;
+  user_id: string;
+  operator_id?: string;
+  operator_name?: string;
+  billing_type: BillingType;
+  type: string;
+  amount?: number;
+  reason: string;
+  before?: BillingState | Record<string, unknown>;
+  after?: BillingState | Record<string, unknown>;
+  created_at: string;
+};
+
+export type BillingAdjustmentPayload = {
+  type: string;
+  reason: string;
+  amount?: number;
+  balance?: number;
+  quota_limit?: number;
+  quota_period?: BillingPeriod;
+  unlimited?: boolean;
+};
+
 export type ManagedUser = {
   id: string;
   username?: string;
@@ -477,6 +539,7 @@ export type ManagedUser = {
   success_count?: number;
   failure_count?: number;
   quota_used?: number;
+  billing?: BillingState | null;
   usage_curve?: Array<{
     date: string;
     calls: number;
@@ -486,6 +549,7 @@ export type ManagedUser = {
   }>;
   menu_paths?: string[];
   api_permissions?: string[];
+  billing_adjustments?: BillingAdjustment[];
 };
 
 export type ManagedUsersQuery = {
@@ -586,6 +650,10 @@ export async function verifySession(token: string) {
     },
     redirectOnUnauthorized: false,
   });
+}
+
+export async function fetchProfile() {
+  return httpRequest<LoginResponse>("/api/profile");
 }
 
 export async function logout() {
@@ -1133,6 +1201,10 @@ export async function fetchManagedUsers(query: ManagedUsersQuery = {}) {
   };
 }
 
+export async function fetchManagedUser(userId: string) {
+  return httpRequest<{ item: ManagedUser }>(managedUserPath(userId));
+}
+
 export async function fetchPermissionCatalog() {
   return httpRequest<{ menus: PermissionMenu[]; apis: ApiPermission[] }>("/api/admin/permissions");
 }
@@ -1182,11 +1254,25 @@ export async function createManagedUser(payload: CreateManagedUserPayload) {
 
 export async function updateManagedUser(
   userId: string,
-  updates: { enabled?: boolean; name?: string; role_id?: string },
+  updates: { enabled?: boolean; name?: string; role_id?: string; billing?: BillingAdjustmentPayload },
 ) {
   return httpRequest<{ item: ManagedUser; items?: ManagedUser[] } & Partial<ManagedUsersResponse>>(managedUserPath(userId), {
     method: "POST",
     body: updates,
+  });
+}
+
+export async function fetchBillingAdjustments(userId: string, limit = 20) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return httpRequest<{ items: BillingAdjustment[] }>(`${managedUserPath(userId)}/billing-adjustments?${params.toString()}`);
+}
+
+export async function createBillingAdjustment(userId: string, payload: BillingAdjustmentPayload) {
+  return httpRequest<
+    { item?: ManagedUser; billing?: BillingState; adjustment?: BillingAdjustment; items?: ManagedUser[] } & Partial<ManagedUsersResponse>
+  >(`${managedUserPath(userId)}/billing-adjustments`, {
+    method: "POST",
+    body: payload,
   });
 }
 

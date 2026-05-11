@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 )
@@ -367,7 +368,8 @@ func (a *App) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireIdentity(w, r, ""); !ok {
+	operator, ok := a.requireIdentity(w, r, "")
+	if !ok {
 		return
 	}
 	base := "/api/admin/users"
@@ -483,11 +485,58 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		util.WriteJSON(w, http.StatusOK, response)
 		return
 	}
+	if len(parts) == 5 && parts[4] == "billing-adjustments" {
+		switch r.Method {
+		case http.MethodGet:
+			if findManagedUser(a.auth.ListUsers(), userID) == nil {
+				util.WriteError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.billing.ListAdjustments(userID, util.ToInt(r.URL.Query().Get("limit"), 20))})
+		case http.MethodPost:
+			body, err := readJSONMap(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, "invalid json body")
+				return
+			}
+			if findManagedUser(a.auth.ListUsers(), userID) == nil {
+				util.WriteError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			result, err := a.billing.ApplyAdjustment(userID, operator, body)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			response, err := a.managedUsersResponse(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if current := a.managedUser(userID); current != nil {
+				response["item"] = current
+			}
+			response["billing"] = result["billing"]
+			response["adjustment"] = result["adjustment"]
+			util.WriteJSON(w, http.StatusOK, response)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+		return
+	}
 	if len(parts) != 4 {
 		http.NotFound(w, r)
 		return
 	}
 	switch r.Method {
+	case http.MethodGet:
+		item := a.managedUser(userID)
+		if item == nil {
+			util.WriteError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		item["billing_adjustments"] = a.billing.ListAdjustments(userID, 10)
+		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item})
 	case http.MethodPost:
 		body, _ := readJSONMap(r)
 		updates := map[string]any{}
@@ -504,23 +553,32 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			}
 			updates["role_id"] = value
 		}
-		if len(updates) == 0 {
+		billingBody := util.StringMap(body["billing"])
+		if len(updates) == 0 && len(billingBody) == 0 {
 			util.WriteError(w, http.StatusBadRequest, "no updates provided")
 			return
 		}
-		item := a.auth.UpdateUser(userID, updates)
-		if item == nil {
+		if len(updates) > 0 {
+			if item := a.auth.UpdateUser(userID, updates); item == nil {
+				util.WriteError(w, http.StatusNotFound, "user not found")
+				return
+			}
+		} else if findManagedUser(a.auth.ListUsers(), userID) == nil {
 			util.WriteError(w, http.StatusNotFound, "user not found")
 			return
+		}
+		if len(billingBody) > 0 {
+			if _, err := a.billing.ApplyAdjustment(userID, operator, billingBody); err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		response, err := a.managedUsersResponse(r)
 		if err != nil {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if current := a.managedUser(userID); current != nil {
-			item = current
-		}
+		item := a.managedUser(userID)
 		response["item"] = item
 		util.WriteJSON(w, http.StatusOK, response)
 	case http.MethodDelete:
@@ -590,6 +648,13 @@ func (a *App) managedUser(id string) map[string]any {
 
 func (a *App) attachManagedUserUsage(items []map[string]any) {
 	stats := a.logs.UserUsageStats(14)
+	userIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if userID := util.Clean(item["id"]); userID != "" {
+			userIDs = append(userIDs, userID)
+		}
+	}
+	billingStates := a.billing.GetMany(userIDs)
 	for _, item := range items {
 		userID := util.Clean(item["id"])
 		usage := stats[userID]
@@ -599,6 +664,7 @@ func (a *App) attachManagedUserUsage(items []map[string]any) {
 		for key, value := range usage {
 			item[key] = value
 		}
+		item["billing"] = billingStates[userID]
 	}
 }
 
@@ -1143,7 +1209,7 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/creation-tasks/chat-completions" && r.Method == http.MethodPost {
 		body, _ := readJSONMap(r)
-		task, err := a.tasks.SubmitChat(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), body["messages"])
+		task, err := a.tasks.SubmitChat(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), body["messages"], protocol.IsImageChatRequest(body), util.ToInt(body["n"], 1))
 		if err != nil {
 			writeCreationTaskSubmitError(w, err)
 			return
@@ -1219,6 +1285,11 @@ func imageOutputCompressionFromBody(value any) (int, bool) {
 }
 
 func writeCreationTaskSubmitError(w http.ResponseWriter, err error) {
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		util.WriteJSON(w, http.StatusTooManyRequests, billingErr.OpenAIError())
+		return
+	}
 	var limitErr service.ImageTaskLimitError
 	if errors.As(err, &limitErr) {
 		util.WriteError(w, http.StatusTooManyRequests, limitErr.Error())

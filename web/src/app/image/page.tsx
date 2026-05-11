@@ -61,6 +61,7 @@ import {
   DEFAULT_CHAT_MODEL,
   DEFAULT_IMAGE_MODEL,
   fetchCreationTasks,
+  fetchProfile,
   IMAGE_CREATION_MODEL_OPTIONS,
   IMAGE_MODEL_ROUTE_DETAILS,
   IMAGE_OUTPUT_FORMAT_OPTIONS,
@@ -82,6 +83,7 @@ import {
 import { fetchAuthenticatedImageBlob } from "@/lib/authenticated-image";
 import { clearImageManagerCache } from "@/lib/image-manager-cache";
 import { getManagedImagePathFromUrl } from "@/lib/image-path";
+import { authSessionFromLoginResponse, setVerifiedAuthSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
@@ -697,6 +699,12 @@ function formatCreationTaskErrorMessage(message: string) {
   }
 
   const normalized = trimmed.toLowerCase();
+  if (normalized.includes("user balance insufficient")) {
+    return "用户余额不足";
+  }
+  if (normalized.includes("user quota exceeded")) {
+    return "用户配额不足";
+  }
   if (normalized.includes("an error occurred while processing your request")) {
     const requestId = trimmed.match(/request id\s+([a-z0-9-]+)/i)?.[1];
     return [
@@ -722,6 +730,25 @@ function formatCreationTaskErrorMessage(message: string) {
 
 function formatCreationTaskError(error: unknown, fallback = "生成图片失败") {
   return formatCreationTaskErrorMessage(error instanceof Error ? error.message : String(error || fallback));
+}
+
+function formatBillingSummary(session: NonNullable<ReturnType<typeof useAuthGuard>["session"]>) {
+  const billing = session.billing;
+  if (!billing) {
+    return "本地额度 --";
+  }
+  if (billing.unlimited) {
+    return "本地额度无限";
+  }
+  if (billing.type === "subscription") {
+    return `订阅剩余 ${billing.available}`;
+  }
+  return `余额 ${billing.available}`;
+}
+
+function hasEnoughBilling(session: NonNullable<ReturnType<typeof useAuthGuard>["session"]>, estimated: number) {
+  const billing = session.billing;
+  return !billing || billing.unlimited || Math.max(0, Number(billing.available) || 0) >= estimated;
 }
 
 function deriveTurnStatus(turn: ImageTurn): Pick<ImageTurn, "status" | "error"> {
@@ -1120,6 +1147,9 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
       }, 0),
     [conversations],
   );
+  const billingSummary = formatBillingSummary(session);
+  const estimatedBillingUnits = composerMode === "chat" ? 1 : parsedCount;
+  const billingBlocked = !hasEnoughBilling(session, estimatedBillingUnits);
   const deleteConfirmTitle = deleteConfirm?.type === "all" ? "清空历史记录" : deleteConfirm?.type === "one" ? "删除对话" : "";
   const deleteConfirmDescription =
     deleteConfirm?.type === "all"
@@ -2082,6 +2112,10 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
         if (activeTurn.mode !== "chat") {
           window.dispatchEvent(new Event(QUOTA_REFRESH_EVENT));
         }
+        if (session.role === "user") {
+          const data = await fetchProfile();
+          await setVerifiedAuthSession(authSessionFromLoginResponse(data, session.key));
+        }
       } catch (error) {
         const message = formatCreationTaskError(error, activeTurn.mode === "chat" ? "对话请求失败" : "生成图片失败");
         await updateConversation(conversationId, (current) => {
@@ -2122,7 +2156,7 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
         }
       }
     },
-    [clearTurnProgress, updateConversation, updateTurnProgress],
+    [clearTurnProgress, session.key, session.role, updateConversation, updateTurnProgress],
   );
   useEffect(() => {
     for (const conversation of conversations) {
@@ -2529,6 +2563,11 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
     const prompt = imagePrompt.trim();
     if (!prompt) {
       toast.error("请输入提示词");
+      return;
+    }
+    const estimatedUnits = composerMode === "chat" ? 1 : parsedCount;
+    if (!hasEnoughBilling(session, estimatedUnits)) {
+      toast.error(session.billing?.type === "subscription" ? "用户配额不足" : "用户余额不足");
       return;
     }
     isSubmitDispatchingRef.current = true;
@@ -3177,6 +3216,9 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
                 imageOutputFormat={imageOutputFormat}
                 imageOutputCompression={imageOutputCompression}
                 highResolutionHint={highResolutionHint}
+                billingSummary={billingSummary}
+                estimatedBillingUnits={estimatedBillingUnits}
+                billingBlocked={billingBlocked}
                 referenceImages={referenceImages}
                 textareaRef={textareaRef}
                 fileInputRef={fileInputRef}

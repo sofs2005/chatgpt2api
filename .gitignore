@@ -10,6 +10,7 @@ venv/
 __pycache__/
 docs/*
 !docs/image-generation-api.md
+!docs/user-quota-allocation-requirements.md
 !jshook/docs/
 
 .idea

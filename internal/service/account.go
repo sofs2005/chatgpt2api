@@ -245,7 +245,10 @@ func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]a
 		updates["name"] = name
 	}
 	if item := s.UpdateAccount(accessToken, updates); item != nil {
-		result["item"] = item
+		publicItems := publicAccounts([]map[string]any{item})
+		if len(publicItems) > 0 {
+			result["item"] = publicItems[0]
+		}
 		result["items"] = s.ListAccounts()
 	}
 	result["tokens"] = []string{accessToken}

@@ -974,6 +974,9 @@ func iterMultimodalSSEPayloads(ctx context.Context, reader io.Reader, out chan<-
 		if json.Unmarshal([]byte(payload), &event) != nil {
 			return nil
 		}
+		if isComplete, _ := event["is_complete"].(bool); isComplete {
+			return nil
+		}
 		for _, text := range extractMultimodalText(event) {
 			select {
 			case out <- text:
@@ -1040,8 +1043,8 @@ func extractMultimodalText(event map[string]any) []string {
 			for _, item := range val {
 				if op, ok := item.(map[string]any); ok {
 					if op["o"] == "append" {
-						if t := util.Clean(op["v"]); t != "" {
-							texts = append(texts, t)
+						if s, ok := op["v"].(string); ok && strings.TrimSpace(s) != "" {
+							texts = append(texts, s)
 						}
 					}
 				}
@@ -1056,8 +1059,8 @@ func extractMultimodalText(event map[string]any) []string {
 		}
 	}
 	if event["o"] == "append" {
-		if t := util.Clean(event["v"]); t != "" {
-			return []string{t}
+		if s, ok := event["v"].(string); ok && strings.TrimSpace(s) != "" {
+			return []string{s}
 		}
 	}
 	if msg, ok := event["message"].(map[string]any); ok {

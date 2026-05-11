@@ -1,6 +1,7 @@
 import axios, {AxiosError, type AxiosRequestConfig} from "axios";
 
 import webConfig from "@/constants/common-env";
+import {clearAuthenticatedImageCache} from "@/lib/authenticated-image";
 import {clearStoredAuthSession, getStoredSessionToken} from "@/store/auth";
 
 type RequestConfig = AxiosRequestConfig & {
@@ -54,6 +55,7 @@ request.interceptors.response.use(
         if (status === 401 && shouldRedirect && typeof window !== "undefined") {
             // Avoid redirect loop — only redirect if not already on /login
             if (!window.location.pathname.startsWith("/login")) {
+                clearAuthenticatedImageCache();
                 await clearStoredAuthSession();
                 window.location.replace("/login");
                 // Return a never-resolving promise to prevent further error handling

@@ -1,6 +1,7 @@
 "use client";
 
 import { verifySession, type LoginResponse } from "@/lib/api";
+import { clearAuthenticatedImageCache } from "@/lib/authenticated-image";
 import {
   clearStoredAuthSession,
   getStoredAuthSession,
@@ -53,6 +54,7 @@ export async function getVerifiedAuthSession(): Promise<StoredAuthSession | null
       if (verifiedSession) {
         await setStoredAuthSession(verifiedSession);
       } else {
+        clearAuthenticatedImageCache();
         await clearStoredAuthSession();
       }
       return verifiedSession;
@@ -67,6 +69,7 @@ export async function getVerifiedAuthSession(): Promise<StoredAuthSession | null
 
 export async function setVerifiedAuthSession(session: StoredAuthSession) {
   authSessionVersion += 1;
+  clearAuthenticatedImageCache();
   cachedAuthSession = session;
   verifyAuthSessionPromise = null;
   await setStoredAuthSession(session);
@@ -75,6 +78,7 @@ export async function setVerifiedAuthSession(session: StoredAuthSession) {
 
 export async function clearVerifiedAuthSession() {
   authSessionVersion += 1;
+  clearAuthenticatedImageCache();
   cachedAuthSession = null;
   verifyAuthSessionPromise = null;
   await clearStoredAuthSession();

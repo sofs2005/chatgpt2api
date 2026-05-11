@@ -922,7 +922,7 @@ func iterOfficialImageSSE(ctx context.Context, client *Client, reader io.Reader,
 	if shouldTreatOfficialImageEventAsFinalText(lastEvent) {
 		return nil
 	}
-	if strings.TrimSpace(lastEvent.Text) != "" && !isPendingOfficialImageText(lastEvent.Text) {
+	if strings.TrimSpace(lastEvent.Text) != "" && !isPendingOfficialImageText(lastEvent.Text) && !shouldResolveOfficialImageResults(lastEvent) {
 		lastEvent.Type = "image_text_response"
 		select {
 		case out <- lastEvent:
@@ -961,9 +961,6 @@ func iterOfficialImageSSE(ctx context.Context, client *Client, reader io.Reader,
 		}
 		return nil
 	}
-	if len(resolved) == 0 && strings.TrimSpace(lastEvent.Text) == "" {
-		return fmt.Errorf("image generation failed")
-	}
 	return nil
 }
 
@@ -996,6 +993,9 @@ func isOfficialImageTextResponseTurn(event ResponsesImageEvent) bool {
 	}
 	if strings.EqualFold(strings.TrimSpace(event.TurnUseCase), "text") {
 		return true
+	}
+	if shouldResolveOfficialImageResults(event) {
+		return false
 	}
 	return event.ToolInvoked != nil && !*event.ToolInvoked
 }
@@ -1032,7 +1032,36 @@ func shouldTreatOfficialImageEventAsFinalText(event ResponsesImageEvent) bool {
 	if strings.EqualFold(strings.TrimSpace(event.TurnUseCase), "text") {
 		return true
 	}
+	if shouldResolveOfficialImageResults(event) {
+		return false
+	}
+	if isOfficialImageGenerationUseCase(event.TurnUseCase) {
+		return false
+	}
 	return event.ToolInvoked != nil && !*event.ToolInvoked
+}
+
+func shouldResolveOfficialImageResults(event ResponsesImageEvent) bool {
+	if officialImageEventHasResultPointers(event) {
+		return true
+	}
+	if !isOfficialImageGenerationUseCase(event.TurnUseCase) {
+		return false
+	}
+	text := strings.TrimSpace(event.Text)
+	return text == "" || isPendingOfficialImageText(text)
+}
+
+func officialImageEventHasResultPointers(event ResponsesImageEvent) bool {
+	return len(filterOfficialImageIDs(event.FileIDs)) > 0 || len(filterOfficialImageIDs(event.SedimentIDs)) > 0
+}
+
+func isOfficialImageGenerationUseCase(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+	normalized = strings.ReplaceAll(normalized, "-", " ")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	return normalized == "image gen" || normalized == "image generation"
 }
 
 func parseOfficialImagePayload(payload string, state *imageConversationState) (ResponsesImageEvent, bool, error) {
@@ -1236,16 +1265,26 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 	conversationID := strings.TrimSpace(event.ConversationID)
 	fileIDs := filterOfficialImageIDs(event.FileIDs)
 	sedimentIDs := filterOfficialImageIDs(event.SedimentIDs)
+	text := ""
 	if conversationID != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 {
-		polledFiles, polledSediments, err := c.pollOfficialImageResults(ctx, conversationID, 120*time.Second)
+		polled, err := c.pollOfficialImageResults(ctx, conversationID)
 		if err != nil {
 			return nil, err
 		}
-		fileIDs = appendUniqueString(fileIDs, polledFiles...)
-		sedimentIDs = appendUniqueString(sedimentIDs, polledSediments...)
+		fileIDs = appendUniqueString(fileIDs, polled.FileIDs...)
+		sedimentIDs = appendUniqueString(sedimentIDs, polled.SedimentIDs...)
+		text = polled.Text
 	}
 	imageFileIDs := officialImageFileIDs(fileIDs, sedimentIDs)
 	if len(imageFileIDs) == 0 {
+		if strings.TrimSpace(text) != "" {
+			return []ResponsesImageEvent{{
+				Type:           "image_text_response",
+				Text:           strings.TrimSpace(text),
+				Created:        time.Now().Unix(),
+				ConversationID: conversationID,
+			}}, nil
+		}
 		return nil, nil
 	}
 	results := make([]ResponsesImageEvent, 0, len(imageFileIDs))
@@ -1289,29 +1328,52 @@ func filterOfficialImageIDs(values []string) []string {
 	return out
 }
 
-func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID string, timeout time.Duration) ([]string, []string, error) {
+type officialConversationPollResult struct {
+	FileIDs     []string
+	SedimentIDs []string
+	Text        string
+}
+
+func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID string) (officialConversationPollResult, error) {
 	if strings.TrimSpace(conversationID) == "" {
-		return nil, nil, nil
+		return officialConversationPollResult{}, nil
 	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		fileIDs, sedimentIDs, err := c.fetchOfficialConversationImageIDs(ctx, conversationID)
-		if err != nil {
-			return nil, nil, err
+	delay := 4 * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return officialConversationPollResult{}, ctx.Err()
+		default:
 		}
-		if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
-			return fileIDs, sedimentIDs, nil
+		result, err := c.fetchOfficialConversationImageResult(ctx, conversationID)
+		if err != nil {
+			if retry, ok := err.(officialConversationPollRetryError); ok {
+				delay = retry.Delay
+			} else {
+				return officialConversationPollResult{}, err
+			}
+		}
+		if len(result.FileIDs) > 0 || len(result.SedimentIDs) > 0 || strings.TrimSpace(result.Text) != "" {
+			return result, nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case <-time.After(4 * time.Second):
+			return officialConversationPollResult{}, ctx.Err()
+		case <-time.After(delay):
 		}
+		delay = 4 * time.Second
 	}
-	return nil, nil, nil
 }
 
-func (c *Client) fetchOfficialConversationImageIDs(ctx context.Context, conversationID string) ([]string, []string, error) {
+type officialConversationPollRetryError struct {
+	Delay time.Duration
+}
+
+func (e officialConversationPollRetryError) Error() string {
+	return "official conversation poll rate limited"
+}
+
+func (c *Client) fetchOfficialConversationImageResult(ctx context.Context, conversationID string) (officialConversationPollResult, error) {
 	path := "/backend-api/conversation/" + conversationID
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	for key, value := range c.headers(path, map[string]string{"Accept": "application/json"}) {
@@ -1319,16 +1381,21 @@ func (c *Client) fetchOfficialConversationImageIDs(ctx context.Context, conversa
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, nil, upstreamTransportError(path, err)
+		return officialConversationPollResult{}, upstreamTransportError(path, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		io.Copy(io.Discard, resp.Body)
+		return officialConversationPollResult{}, officialConversationPollRetryError{Delay: officialConversationPollRetryDelay(resp.Header.Get("Retry-After"))}
+	}
 	if err := ensureOK(resp, path); err != nil {
-		return nil, nil, err
+		return officialConversationPollResult{}, err
 	}
 	var data map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, nil, err
+		return officialConversationPollResult{}, err
 	}
+	text := officialConversationAssistantText(data)
 	mapping := util.StringMap(data["mapping"])
 	var fileIDs []string
 	var sedimentIDs []string
@@ -1371,7 +1438,33 @@ func (c *Client) fetchOfficialConversationImageIDs(ctx context.Context, conversa
 			}
 		}
 	}
-	return fileIDs, sedimentIDs, nil
+	if len(fileIDs) > 0 || len(sedimentIDs) > 0 || isPendingOfficialImageText(text) {
+		text = ""
+	}
+	return officialConversationPollResult{FileIDs: fileIDs, SedimentIDs: sedimentIDs, Text: text}, nil
+}
+
+func officialConversationPollRetryDelay(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 4 * time.Second
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		if seconds > 30 {
+			seconds = 30
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		delay := time.Until(when)
+		if delay > 0 {
+			if delay > 30*time.Second {
+				return 30 * time.Second
+			}
+			return delay
+		}
+	}
+	return 4 * time.Second
 }
 
 func (c *Client) fetchOfficialConversationText(ctx context.Context, conversationID string) (string, error) {

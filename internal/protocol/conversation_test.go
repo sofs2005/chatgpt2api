@@ -10,6 +10,8 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,11 +20,16 @@ import (
 	"time"
 
 	"chatgpt2api/internal/backend"
+	"chatgpt2api/internal/service"
 )
 
 type testProtocolImageConfig struct {
 	root string
 }
+
+type testProtocolProxyConfig struct{}
+
+func (testProtocolProxyConfig) Proxy() string { return "" }
 
 func (c testProtocolImageConfig) ImagesDir() string {
 	path := filepath.Join(c.root, "images")
@@ -327,7 +334,7 @@ func TestImageStreamErrorMessage(t *testing.T) {
 	if got := imageStreamErrorMessage(flowControl); got != "upstream image stream interrupted by HTTP/2 flow control; retry the request or change proxy if it repeats" {
 		t.Fatalf("flow control error = %q", got)
 	}
-	if got := imageStreamErrorMessage(""); got != "image generation failed" {
+	if got := imageStreamErrorMessage(""); got != "upstream image request failed without error detail" {
 		t.Fatalf("empty error = %q", got)
 	}
 }
@@ -366,6 +373,130 @@ func TestHandleImageGenerationsReturnsUpstreamTextResponse(t *testing.T) {
 	}
 	if result["message"] != "你好！我是 ChatGPT。" {
 		t.Fatalf("message = %#v, want upstream text", result["message"])
+	}
+}
+
+func TestHandleImageGenerationsReturnsArbitraryUpstreamImageText(t *testing.T) {
+	const upstreamText = "上游返回的任何非排队文本都应该原样返回。"
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "message", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Text: upstreamText, UpstreamEventType: "image_text_response"}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	result, _, err := engine.HandleImageGenerations(context.Background(), map[string]any{
+		"prompt": "draw",
+		"model":  "gpt-image-2",
+	})
+	if err == nil {
+		t.Fatal("HandleImageGenerations() error = nil, want text-response image error")
+	}
+	if result["output_type"] != "text" || result["message"] != upstreamText {
+		t.Fatalf("result = %#v, want arbitrary upstream text response", result)
+	}
+}
+
+func TestStreamResponsesImageOutputsCompletesWithUpstreamRefusalText(t *testing.T) {
+	const upstreamText = "非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。如果你认为此判断有误，请重试或修改提示语。"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation/prepare":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"title_generation\",\"title\":\"正在处理图片\",\"conversation_id\":\"conv-refused\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-refused\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-refused":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{
+				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + upstreamText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-5-5"}}}
+			}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(token string) *backend.Client {
+			client := backend.NewClient(token, nil, service.NewProxyService(testProtocolProxyConfig{}))
+			client.BaseURL = server.URL
+			return client
+		},
+	}
+
+	outputs, imageErr := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{
+		Prompt: "edit",
+		Model:  "gpt-image-2",
+		N:      1,
+	})
+	result, err := engine.CollectImageOutputs(outputs, imageErr)
+	if err != nil {
+		t.Fatalf("CollectImageOutputs() err = %v", err)
+	}
+	if result["output_type"] != "text" || result["message"] != upstreamText {
+		t.Fatalf("result = %#v, want upstream refusal text as text output", result)
+	}
+}
+
+func TestIsFinalImageTextEventIgnoresImageGenMetadataWithResultIDs(t *testing.T) {
+	toolFalse := false
+	event := backend.ResponsesImageEvent{
+		Type:           "server_ste_metadata",
+		Text:           "Here is the generated image.",
+		ToolInvoked:    &toolFalse,
+		TurnUseCase:    "image gen",
+		SedimentIDs:    []string{"file_image"},
+		ConversationID: "conv-image",
+	}
+
+	if isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = true, want false for image generation metadata", event)
+	}
+}
+
+func TestIsFinalImageTextEventWaitsForBackendTextMarkerOnImageGenRefusal(t *testing.T) {
+	event := backend.ResponsesImageEvent{
+		Type:        "message_stream_complete",
+		Text:        "非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。如果你认为此判断有误，请重试或修改提示语。",
+		TurnUseCase: "image gen",
+	}
+
+	if isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = true, want false before backend marks final text", event)
+	}
+
+	event.Type = "image_text_response"
+	if !isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = false, want true after backend marks final text", event)
+	}
+}
+
+func TestIsFinalImageTextEventKeepsQueuedImageNoticePending(t *testing.T) {
+	event := backend.ResponsesImageEvent{
+		Type:        "message_stream_complete",
+		Text:        "正在处理图片，目前有很多人在创建图片，因此可能需要一点时间。图片准备好后我们会通知你。",
+		TurnUseCase: "image gen",
+	}
+
+	if isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = true, want false for queued image notice", event)
 	}
 }
 

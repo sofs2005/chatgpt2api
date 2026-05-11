@@ -28,7 +28,11 @@ import {
   type ImageVisibility,
   type ManagedImage,
 } from "@/lib/api";
-import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
+import {
+  fetchAuthenticatedImageBlob,
+  invalidateAuthenticatedImageCacheForPaths,
+  shouldUseAuthenticatedImageFallback,
+} from "@/lib/authenticated-image";
 import {
   clearImageManagerCache,
   getImageManagerCache,
@@ -773,6 +777,7 @@ function ImageManagerContent({
     try {
       const data = await deleteManagedImages(paths);
       removeCachedManagedImages(paths);
+      invalidateAuthenticatedImageCacheForPaths(paths);
       setItems((current) => current.filter((item) => !pathSet.has(item.path)));
       setSelectedImageIds((current) => {
         const next = { ...current };

@@ -515,7 +515,7 @@ func TestStreamImageResponseErrorsWhenNoImageOutput(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("event count = %d, want response.created only", count)
 	}
-	if err := <-errCh; err == nil || err.Error() != "image generation failed" {
+	if err := <-errCh; err == nil || err.Error() != "upstream image stream completed without image output" {
 		t.Fatalf("err = %v", err)
 	}
 }

@@ -17,9 +17,31 @@ import (
 	"chatgpt2api/internal/util"
 )
 
-const maxAuditPayloadBytes = 8 * 1024
+const (
+	maxAuditRequestPayloadBytes  = 64 * 1024
+	maxAuditResponsePayloadBytes = 8 * 1024
+)
 
 type requestIdentityContextKey struct{}
+type auditRequestContextKey struct{}
+type businessLogContextKey struct{}
+
+type auditRequestCapture struct {
+	args      any
+	truncated bool
+}
+
+type auditBodyReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *auditBodyReadCloser) Close() error {
+	if r == nil || r.closer == nil {
+		return nil
+	}
+	return r.closer.Close()
+}
 
 type auditResponseWriter struct {
 	http.ResponseWriter
@@ -39,8 +61,8 @@ func (w *auditResponseWriter) Write(data []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	if w.body.Len() < maxAuditPayloadBytes {
-		remaining := maxAuditPayloadBytes - w.body.Len()
+	if w.body.Len() < maxAuditResponsePayloadBytes {
+		remaining := maxAuditResponsePayloadBytes - w.body.Len()
 		if len(data) > remaining {
 			_, _ = w.body.Write(data[:remaining])
 		} else {
@@ -72,7 +94,8 @@ func (a *App) serveObservedHTTP(w http.ResponseWriter, r *http.Request, routes [
 		return
 	}
 
-	requestArgs := captureAuditRequestArgs(r)
+	requestCapture := captureAuditRequest(r)
+	*r = *r.WithContext(withAuditRequestCapture(r.Context(), requestCapture))
 	recorder := &auditResponseWriter{ResponseWriter: w}
 	start := time.Now()
 	a.serveHTTP(recorder, r, routes)
@@ -80,7 +103,9 @@ func (a *App) serveObservedHTTP(w http.ResponseWriter, r *http.Request, routes [
 	status := recorder.statusCode()
 
 	a.logHTTPRequest(r, status, duration)
-	a.writeAuditLog(r, recorder, status, duration, requestArgs)
+	if shouldWriteAuditLog(r, status) {
+		a.writeAuditLog(r, recorder, status, duration, requestCapture)
+	}
 }
 
 func (a *App) logHTTPRequest(r *http.Request, status int, duration time.Duration) {
@@ -100,11 +125,11 @@ func (a *App) logHTTPRequest(r *http.Request, status int, duration time.Duration
 	case status >= http.StatusBadRequest:
 		a.logger.Warning("http request", attrs...)
 	default:
-		a.logger.Info("http request", attrs...)
+		a.logger.Debug("http request", attrs...)
 	}
 }
 
-func (a *App) writeAuditLog(r *http.Request, recorder *auditResponseWriter, status int, duration time.Duration, requestArgs any) {
+func (a *App) writeAuditLog(r *http.Request, recorder *auditResponseWriter, status int, duration time.Duration, requestCapture auditRequestCapture) {
 	if a.logs == nil {
 		return
 	}
@@ -119,9 +144,7 @@ func (a *App) writeAuditLog(r *http.Request, recorder *auditResponseWriter, stat
 		"operation_type": operationTypeForMethod(r.Method),
 		"log_level":      logLevelForStatus(status),
 	}
-	if requestArgs != nil {
-		detail["request_args"] = requestArgs
-	}
+	addAuditRequestDetail(detail, requestCapture)
 	if responseBody := normalizeAuditPayload(recorder.body.Bytes()); responseBody != nil {
 		detail["response_body"] = responseBody
 	}
@@ -148,27 +171,109 @@ func requestIdentity(ctx context.Context) (service.Identity, bool) {
 	return identity, ok
 }
 
-func captureAuditRequestArgs(r *http.Request) any {
+func withAuditRequestCapture(ctx context.Context, capture auditRequestCapture) context.Context {
+	return context.WithValue(ctx, auditRequestContextKey{}, capture)
+}
+
+func requestAuditCapture(ctx context.Context) auditRequestCapture {
+	capture, _ := ctx.Value(auditRequestContextKey{}).(auditRequestCapture)
+	return capture
+}
+
+func markRequestBusinessLogged(r *http.Request) {
 	if r == nil {
-		return nil
+		return
 	}
+	*r = *r.WithContext(context.WithValue(r.Context(), businessLogContextKey{}, true))
+}
+
+func requestBusinessLogged(ctx context.Context) bool {
+	value, _ := ctx.Value(businessLogContextKey{}).(bool)
+	return value
+}
+
+func addAuditRequestDetail(detail map[string]any, capture auditRequestCapture) {
+	if detail == nil {
+		return
+	}
+	if capture.args != nil {
+		detail["request_args"] = capture.args
+	}
+	if capture.truncated {
+		detail["request_truncated"] = true
+	}
+}
+
+func shouldWriteAuditLog(r *http.Request, status int) bool {
+	if r == nil {
+		return true
+	}
+	if requestBusinessLogged(r.Context()) {
+		return false
+	}
+	if status >= http.StatusBadRequest {
+		return true
+	}
+	return !isNoisySuccessfulAuditRequest(r)
+}
+
+func isNoisySuccessfulAuditRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := r.URL.Path
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		switch {
+		case path == "/api/logs",
+			path == "/api/logs/governance",
+			path == "/api/creation-tasks",
+			path == "/api/app-meta",
+			path == "/api/admin/permissions",
+			path == "/auth/session":
+			return true
+		}
+	}
+	return false
+}
+
+func captureAuditRequest(r *http.Request) auditRequestCapture {
+	if r == nil {
+		return auditRequestCapture{}
+	}
+	query := captureAuditQuery(r)
 	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
-		return "[multipart/form-data]"
+		return auditRequestCapture{args: combineAuditArgs(query, "[multipart/form-data]")}
 	}
 	if r.Method != http.MethodGet && r.Body != nil {
-		if r.ContentLength < 0 {
-			return "[body omitted: unknown size]"
+		body, truncated, ok := captureAuditBody(r)
+		if ok {
+			if bodyPayload := normalizeAuditPayload(body); bodyPayload != nil {
+				return auditRequestCapture{args: combineAuditArgs(query, bodyPayload), truncated: truncated}
+			}
 		}
-		if r.ContentLength > maxAuditPayloadBytes {
-			return "[body omitted: too large]"
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			r.Body = io.NopCloser(bytes.NewReader(nil))
-			return nil
-		}
-		r.Body = io.NopCloser(bytes.NewBuffer(body))
-		return normalizeAuditPayload(body)
+	}
+	return auditRequestCapture{args: query}
+}
+
+func captureAuditBody(r *http.Request) ([]byte, bool, bool) {
+	if r == nil || r.Body == nil {
+		return nil, false, true
+	}
+	captured, err := io.ReadAll(io.LimitReader(r.Body, int64(maxAuditRequestPayloadBytes)+1))
+	r.Body = &auditBodyReadCloser{Reader: io.MultiReader(bytes.NewReader(captured), r.Body), closer: r.Body}
+	if err != nil {
+		return nil, false, false
+	}
+	if len(captured) > maxAuditRequestPayloadBytes {
+		return captured[:maxAuditRequestPayloadBytes], true, true
+	}
+	return captured, false, true
+}
+
+func captureAuditQuery(r *http.Request) any {
+	if r == nil || r.URL == nil {
+		return nil
 	}
 	if strings.TrimSpace(r.URL.RawQuery) == "" {
 		return nil
@@ -188,13 +293,23 @@ func captureAuditRequestArgs(r *http.Request) any {
 	return service.SanitizeLogValue(payload)
 }
 
+func combineAuditArgs(query, body any) any {
+	if query == nil {
+		return body
+	}
+	if body == nil {
+		return query
+	}
+	return map[string]any{"query": query, "body": body}
+}
+
 func normalizeAuditPayload(raw []byte) any {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil
 	}
-	if len(trimmed) > maxAuditPayloadBytes {
-		trimmed = append([]byte(nil), trimmed[:maxAuditPayloadBytes]...)
+	if len(trimmed) > maxAuditRequestPayloadBytes {
+		trimmed = append([]byte(nil), trimmed[:maxAuditRequestPayloadBytes]...)
 	}
 	if json.Valid(trimmed) {
 		var decoded any

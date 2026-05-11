@@ -610,6 +610,10 @@ func TestImageTaskServicePreservesPartialDataOnFailure(t *testing.T) {
 	if item["error"] != "second image failed" {
 		t.Fatalf("partial failure error = %#v", item)
 	}
+	statuses := util.AsStringSlice(item["output_statuses"])
+	if len(statuses) != 2 || statuses[0] != "success" || statuses[1] != "error" {
+		t.Fatalf("output_statuses = %#v, want partial success and failed remainder", statuses)
+	}
 }
 
 func TestImageTaskServiceMarksTimedOutTaskAsError(t *testing.T) {

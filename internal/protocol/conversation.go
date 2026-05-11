@@ -277,7 +277,7 @@ func imageStreamErrorMessage(message string) string {
 		return "codex-gpt-image-2 需要 Plus / Team / Pro 账号；Free 账号无权访问 Codex 图片接口"
 	}
 	if text == "" {
-		return "image generation failed"
+		return "upstream image request failed without error detail"
 	}
 	return text
 }
@@ -694,6 +694,7 @@ func (e *Engine) StreamResponsesImageOutputs(ctx context.Context, client *backen
 				continue
 			}
 			if isFinalImageTextEvent(event) {
+				emitted = true
 				out <- ImageOutput{Kind: "message", Model: request.Model, Index: index, Total: total, Created: firstNonZeroInt64(event.Created, time.Now().Unix()), Text: strings.TrimSpace(event.Text), UpstreamEventType: event.Type}
 				continue
 			}
@@ -726,7 +727,7 @@ func (e *Engine) StreamResponsesImageOutputs(ctx context.Context, client *backen
 			return
 		}
 		if !emitted {
-			errCh <- fmt.Errorf("image generation failed")
+			errCh <- fmt.Errorf("upstream image stream completed without image output")
 			return
 		}
 		errCh <- nil
@@ -805,7 +806,39 @@ func isFinalImageTextEvent(event backend.ResponsesImageEvent) bool {
 	if strings.EqualFold(strings.TrimSpace(event.TurnUseCase), "text") {
 		return true
 	}
+	if responsesImageEventHasResultPointers(event) || isResponsesImageGenerationUseCase(event.TurnUseCase) {
+		return false
+	}
 	return event.ToolInvoked != nil && !*event.ToolInvoked
+}
+
+func responsesImageEventHasResultPointers(event backend.ResponsesImageEvent) bool {
+	return len(filterResponsesImageIDs(event.FileIDs)) > 0 || len(filterResponsesImageIDs(event.SedimentIDs)) > 0
+}
+
+func filterResponsesImageIDs(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "file_upload" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func isResponsesImageGenerationUseCase(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+	normalized = strings.ReplaceAll(normalized, "-", " ")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	return normalized == "image gen" || normalized == "image generation"
 }
 
 func (e *Engine) CollectImageOutputs(outputs <-chan ImageOutput, errCh <-chan error) (map[string]any, error) {
@@ -845,7 +878,10 @@ func (e *Engine) CollectImageOutputsWithProgress(outputs <-chan ImageOutput, err
 	}
 	result := map[string]any{"created": created, "data": data}
 	if len(data) == 0 {
-		if text := firstNonEmpty(message, strings.TrimSpace(strings.Join(progress, ""))); text != "" {
+		if text := strings.TrimSpace(message); text != "" {
+			result["message"] = text
+			result["output_type"] = "text"
+		} else if text := strings.TrimSpace(strings.Join(progress, "")); text != "" {
 			result["message"] = text
 		}
 	}

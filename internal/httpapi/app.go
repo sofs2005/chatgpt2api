@@ -266,15 +266,18 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string) {
 	start := time.Now()
+	requestCapture := requestAuditCapture(r.Context())
 	if err != nil {
-		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil)
+		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture)
+		markRequestBusinessLogged(r)
 		a.writeProtocolError(w, err)
 		return
 	}
 	if stream == nil {
 		urls := collectURLs(result)
 		a.recordGeneratedImages(identity, urls, visibility)
-		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls)
+		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
+		markRequestBusinessLogged(r)
 		util.WriteJSON(w, http.StatusOK, result)
 		return
 	}
@@ -294,13 +297,15 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		}
 		if err := <-stream.Err; err != nil {
 			a.recordGeneratedImages(identity, urls, visibility)
-			a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls)
+			a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
+			markRequestBusinessLogged(r)
 			fmt.Fprintf(w, "event: error\n")
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
 			return
 		}
 		a.recordGeneratedImages(identity, urls, visibility)
-		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls)
+		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
+		markRequestBusinessLogged(r)
 		return
 	}
 	fmt.Fprint(w, ": stream-open\n\n")
@@ -317,11 +322,13 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 	}
 	if err := <-stream.Err; err != nil {
 		a.recordGeneratedImages(identity, urls, visibility)
-		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls)
+		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
+		markRequestBusinessLogged(r)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
 		a.recordGeneratedImages(identity, urls, visibility)
-		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls)
+		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
+		markRequestBusinessLogged(r)
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 }
@@ -1161,7 +1168,7 @@ func openAIErrorForStream(err error) map[string]any {
 	return map[string]any{"error": map[string]any{"message": err.Error(), "type": fmt.Sprintf("%T", err)}}
 }
 
-func (a *App) logCall(identity service.Identity, summary, method, endpoint, model string, started time.Time, outcome string, status int, errText string, urls []string) {
+func (a *App) logCall(identity service.Identity, summary, method, endpoint, model string, started time.Time, outcome string, status int, errText string, urls []string, requestCapture auditRequestCapture) {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if status <= 0 {
 		status = http.StatusOK
@@ -1194,6 +1201,7 @@ func (a *App) logCall(identity service.Identity, summary, method, endpoint, mode
 	if len(urls) > 0 {
 		detail["urls"] = dedupe(urls)
 	}
+	addAuditRequestDetail(detail, requestCapture)
 	suffix := "调用完成"
 	if outcome == "failed" {
 		suffix = "调用失败"
@@ -1202,7 +1210,16 @@ func (a *App) logCall(identity service.Identity, summary, method, endpoint, mode
 }
 
 func addIdentityLogDetail(detail map[string]any, identity service.Identity) {
-	if name := util.Clean(firstNonEmpty(identity.CredentialName, identity.Name)); name != "" {
+	kind := util.Clean(identity.Kind)
+	if kind != "" {
+		detail["auth_kind"] = kind
+	}
+	credentialName := util.Clean(identity.CredentialName)
+	if identity.Kind == service.AuthKindSession {
+		if credentialName != "" {
+			detail["session_name"] = credentialName
+		}
+	} else if name := util.Clean(firstNonEmpty(identity.CredentialName, identity.Name)); name != "" {
 		detail["key_name"] = name
 	}
 	if role := util.Clean(identity.Role); role != "" {
@@ -1216,6 +1233,64 @@ func addIdentityLogDetail(detail map[string]any, identity service.Identity) {
 	}
 	if provider := util.Clean(identity.Provider); provider != "" {
 		detail["provider"] = provider
+	}
+}
+
+func payloadAuditCapture(payload map[string]any) auditRequestCapture {
+	args := cleanAuditPayloadMap(payload)
+	if len(args) == 0 {
+		return auditRequestCapture{}
+	}
+	return auditRequestCapture{args: service.SanitizeLogValue(args)}
+}
+
+func cleanAuditPayloadMap(payload map[string]any) map[string]any {
+	out := make(map[string]any, len(payload))
+	for key, value := range payload {
+		switch key {
+		case "owner_id", "owner_name", "base_url":
+			continue
+		}
+		if isInternalPayloadValue(value) {
+			continue
+		}
+		out[key] = cleanAuditPayloadValue(value)
+	}
+	return out
+}
+
+func cleanAuditPayloadValue(value any) any {
+	switch x := value.(type) {
+	case []protocol.UploadedImage:
+		items := make([]map[string]any, 0, len(x))
+		for _, image := range x {
+			items = append(items, map[string]any{
+				"filename":     image.Filename,
+				"content_type": image.ContentType,
+				"size_bytes":   len(image.Data),
+			})
+		}
+		return items
+	case protocol.UploadedImage:
+		return map[string]any{
+			"filename":     x.Filename,
+			"content_type": x.ContentType,
+			"size_bytes":   len(x.Data),
+		}
+	default:
+		return value
+	}
+}
+
+func isInternalPayloadValue(value any) bool {
+	if value == nil {
+		return false
+	}
+	switch value.(type) {
+	case func(context.Context, int) (func(), error), func([]map[string]any):
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1323,6 +1398,7 @@ func (a *App) imageOwnerDisplayNames() map[string]string {
 
 func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity, payload map[string]any, endpoint, summary string, run func(context.Context, map[string]any) (map[string]any, error)) (map[string]any, error) {
 	start := time.Now()
+	requestCapture := payloadAuditCapture(payload)
 	payload["owner_id"] = identityScope(identity)
 	payload["owner_name"] = identityDisplayName(identity)
 	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
@@ -1330,15 +1406,15 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	urls := collectURLs(result)
 	a.recordGeneratedImagesForPayload(identity, urls, util.Clean(payload["visibility"]), payload)
 	if err != nil {
-		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls)
+		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 		return result, err
 	}
 	if len(util.AsMapSlice(result["data"])) == 0 {
 		message := firstNonEmpty(util.Clean(result["message"]), "image task returned no image data")
-		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", http.StatusBadGateway, message, urls)
+		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", http.StatusBadGateway, message, urls, requestCapture)
 		return result, nil
 	}
-	a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "success", http.StatusOK, "", urls)
+	a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 	return result, nil
 }
 
@@ -1353,6 +1429,7 @@ func (a *App) attachCreationTaskLimiter(body map[string]any, identity service.Id
 
 func (a *App) runLoggedChatTask(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
 	start := time.Now()
+	requestCapture := payloadAuditCapture(payload)
 	payload["owner_id"] = identityScope(identity)
 	payload["owner_name"] = identityDisplayName(identity)
 	payload["stream"] = false
@@ -1362,16 +1439,16 @@ func (a *App) runLoggedChatTask(ctx context.Context, identity service.Identity, 
 		err = errors.New("chat task streaming is not supported")
 	}
 	if err != nil {
-		a.logCall(identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil)
+		a.logCall(identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture)
 		return result, err
 	}
 	text := chatCompletionResultText(result)
 	if text == "" {
 		err = errors.New("模型没有返回文本内容")
-		a.logCall(identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", http.StatusBadGateway, err.Error(), nil)
+		a.logCall(identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", http.StatusBadGateway, err.Error(), nil, requestCapture)
 		return result, err
 	}
-	a.logCall(identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "success", http.StatusOK, "", nil)
+	a.logCall(identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "success", http.StatusOK, "", nil, requestCapture)
 	return map[string]any{
 		"created":     result["created"],
 		"output_type": "text",

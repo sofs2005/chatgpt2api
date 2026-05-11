@@ -9,7 +9,11 @@ import type { ImagePromptPreset } from "@/app/image/image-presets";
 import { formatImageSizeDisplay, getImageSizeRequirementLabel, isHighResolutionImageSize } from "@/app/image/image-options";
 import { IMAGE_MODEL_ROUTE_DETAILS, supportsImageOutputCompression } from "@/lib/api";
 import type { ImageVisibility } from "@/lib/api";
-import { fetchAuthenticatedImageBlob, shouldUseAuthenticatedImageFallback } from "@/lib/authenticated-image";
+import {
+  fetchAuthenticatedImageBlob,
+  getCachedAuthenticatedImageByteSize,
+  shouldUseAuthenticatedImageFallback,
+} from "@/lib/authenticated-image";
 import { formatBase64ImageFileSize, formatImageFileSize } from "@/lib/image-size";
 import { cn } from "@/lib/utils";
 import {
@@ -234,6 +238,10 @@ function sleep(ms: number) {
 async function fetchImageSizeLabel(src: string) {
   if (!src || src.startsWith("data:")) {
     return "";
+  }
+  const cachedByteSize = getCachedAuthenticatedImageByteSize(src);
+  if (cachedByteSize > 0) {
+    return formatImageFileSize(cachedByteSize);
   }
 
   try {
@@ -708,6 +716,10 @@ export function ImageResults({
                             <AuthenticatedImage
                               src={imageSrc}
                               alt={`Generated result ${index + 1}`}
+                              width={image.width || undefined}
+                              height={image.height || undefined}
+                              loading="lazy"
+                              decoding="async"
                               className="block h-auto w-full transition duration-200 group-hover:brightness-95"
                               onLoad={(event) => {
                                 updateImageDimensions(

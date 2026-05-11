@@ -382,17 +382,8 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		if outputType != "" {
 			updates["output_type"] = outputType
 		}
-		if status == TaskStatusSuccess && (mode == "generate" || mode == "edit") {
-			statuses := initialImageOutputStatuses(taskCount(mode, payload))
-			for index, item := range data {
-				if index >= len(statuses) {
-					break
-				}
-				if hasImageTaskOutputData(item) {
-					statuses[index] = "success"
-				}
-			}
-			updates["output_statuses"] = statuses
+		if mode == "generate" || mode == "edit" {
+			updates["output_statuses"] = finalImageOutputStatuses(taskCount(mode, payload), data, status)
 		}
 		s.updateActiveTask(key, updates)
 		return
@@ -430,6 +421,29 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		updates["output_type"] = outputType
 	}
 	s.updateActiveTask(key, updates)
+}
+
+func finalImageOutputStatuses(count int, data []map[string]any, status string) []string {
+	statuses := initialImageOutputStatuses(count)
+	if len(statuses) == 0 {
+		return statuses
+	}
+	fallback := status
+	if fallback != TaskStatusCancelled {
+		fallback = TaskStatusError
+	}
+	for index := range statuses {
+		statuses[index] = fallback
+	}
+	for index, item := range data {
+		if index >= len(statuses) {
+			break
+		}
+		if hasImageTaskOutputData(item) {
+			statuses[index] = TaskStatusSuccess
+		}
+	}
+	return statuses
 }
 
 func (s *ImageTaskService) taskTimeout() time.Duration {

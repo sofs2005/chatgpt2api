@@ -208,7 +208,7 @@ docker buildx build \
   --builder "$builder_name" \
   --load \
   --tag "$CHATGPT2API_LOCAL_IMAGE" \
-  --file "$repo_root/deploy/Dockerfile.release" \
+  --file "$repo_root/deploy/Dockerfile" \
   --build-arg "VERSION=$CHATGPT2API_VERSION" \
   --build-arg "BUILD_GOMAXPROCS=$BUILD_GOMAXPROCS" \
   --build-arg "BUILD_GOMEMLIMIT=$BUILD_GOMEMLIMIT" \

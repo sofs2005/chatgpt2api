@@ -148,6 +148,58 @@ func TestSelectWorkspaceForConsentCodeUsesCookieFallback(t *testing.T) {
 	}
 }
 
+func TestLoginAndExchangeTokensSubmitsEmailBeforePassword(t *testing.T) {
+	var sequence []string
+	worker := &registerWorker{
+		service:  &RegisterService{},
+		deviceID: "device-1",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/api/accounts/authorize":
+				sequence = append(sequence, "authorize")
+				return registerJSONResponse(req, http.StatusOK, `{}`), nil
+			case "/backend-api/sentinel/req":
+				return registerJSONResponse(req, http.StatusOK, `{"token":"challenge-token","proofofwork":{"required":false}}`), nil
+			case "/api/accounts/authorize/continue":
+				sequence = append(sequence, "email")
+				var body map[string]any
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatalf("decode authorize/continue body: %v", err)
+				}
+				username := body["username"].(map[string]any)
+				if username["kind"] != "email" || username["value"] != "user@example.test" {
+					t.Fatalf("authorize/continue body = %#v", body)
+				}
+				return registerJSONResponse(req, http.StatusOK, `{}`), nil
+			case "/api/accounts/password/verify":
+				sequence = append(sequence, "password")
+				return registerJSONResponse(req, http.StatusOK, `{"continue_url":"`+registerPlatformOAuthRedirectURI+`?code=callback-code&state=state"}`), nil
+			case "/auth/callback":
+				sequence = append(sequence, "callback")
+				return registerJSONResponse(req, http.StatusOK, `{}`), nil
+			case "/oauth/token":
+				sequence = append(sequence, "token")
+				return registerJSONResponse(req, http.StatusOK, `{"access_token":"access","refresh_token":"refresh","id_token":"id"}`), nil
+			default:
+				t.Fatalf("unexpected request path: %s", req.URL.Path)
+				return nil, nil
+			}
+		})},
+	}
+
+	tokens, err := worker.loginAndExchangeTokens(context.Background(), "user@example.test", "Password123!", map[string]any{"address": "user@example.test"})
+	if err != nil {
+		t.Fatalf("loginAndExchangeTokens() error = %v", err)
+	}
+	if tokens["access_token"] != "access" || tokens["refresh_token"] != "refresh" || tokens["id_token"] != "id" {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	want := []string{"authorize", "email", "password", "callback", "token"}
+	if strings.Join(sequence, ",") != strings.Join(want, ",") {
+		t.Fatalf("request sequence = %#v, want %#v", sequence, want)
+	}
+}
+
 func TestRegisterHTTPClientUsesSOCKSTransport(t *testing.T) {
 	client, err := registerHTTPClient("socks5h://127.0.0.1:1", time.Second, "device-1")
 	if err != nil {

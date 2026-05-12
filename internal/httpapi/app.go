@@ -80,6 +80,9 @@ func NewApp() (*App, error) {
 	accounts := service.NewAccountService(storageBackend, cfg, proxy, logs)
 	auth := service.NewAuthService(storageBackend)
 	billing := service.NewBillingService(cfg.DataDir, storageBackend, cfg)
+	auth.SetUserCreatedHook(func(userID string) {
+		billing.InitializeUserDefaults(userID)
+	})
 	bootstrap, err := auth.EnsureBootstrapAdmin(cfg.AdminUsername(), cfg.AdminPassword())
 	if err != nil {
 		cancel()

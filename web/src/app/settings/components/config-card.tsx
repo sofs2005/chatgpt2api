@@ -190,6 +190,7 @@ export function ConfigCard() {
     (state) => state.setRegistrationEnabled,
   );
   const saveConfig = useSettingsStore((state) => state.saveConfig);
+  const defaultBillingType = config?.default_billing_type || "standard";
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -363,7 +364,7 @@ export function ConfigCard() {
         <section className={configSectionClassName}>
           <SectionHeading
             title="默认计费"
-            tip="新普通用户首次获得本地计费状态时使用这些默认值；管理员不受本地计费限制。"
+            tip="创建或注册新普通用户时使用这些默认值；管理员不受本地计费限制。"
           />
           <div className="grid gap-3 sm:grid-cols-2">
             <Field className={configFieldClassName}>
@@ -390,61 +391,66 @@ export function ConfigCard() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field className={configFieldClassName}>
-              <ConfigFieldLabel htmlFor="settings-default-standard-balance">
-                默认标准余额
-              </ConfigFieldLabel>
-              <NumberInputWithUnit
-                id="settings-default-standard-balance"
-                min={0}
-                value={config?.default_standard_balance ?? ""}
-                onChange={setDefaultStandardBalance}
-                placeholder="0"
-                unit="点"
-              />
-            </Field>
-            <Field className={configFieldClassName}>
-              <ConfigFieldLabel htmlFor="settings-default-subscription-quota">
-                默认订阅配额
-              </ConfigFieldLabel>
-              <NumberInputWithUnit
-                id="settings-default-subscription-quota"
-                min={0}
-                value={config?.default_subscription_quota ?? ""}
-                onChange={setDefaultSubscriptionQuota}
-                placeholder="0"
-                unit="点"
-              />
-            </Field>
-            <Field className={configFieldClassName}>
-              <ConfigFieldLabel htmlFor="settings-default-subscription-period">
-                默认订阅周期
-              </ConfigFieldLabel>
-              <Select
-                value={config?.default_subscription_period || "monthly"}
-                onValueChange={(value) => {
-                  if (
-                    value === "daily" ||
-                    value === "weekly" ||
-                    value === "monthly"
-                  ) {
-                    setDefaultSubscriptionPeriod(value);
-                  }
-                }}
-              >
-                <SelectTrigger
-                  id="settings-default-subscription-period"
-                  className={settingsInputClassName}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="daily">每日</SelectItem>
-                  <SelectItem value="weekly">每周</SelectItem>
-                  <SelectItem value="monthly">每月</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
+            {defaultBillingType === "standard" ? (
+              <Field className={configFieldClassName}>
+                <ConfigFieldLabel htmlFor="settings-default-standard-balance">
+                  默认标准余额
+                </ConfigFieldLabel>
+                <NumberInputWithUnit
+                  id="settings-default-standard-balance"
+                  min={0}
+                  value={config?.default_standard_balance ?? ""}
+                  onChange={setDefaultStandardBalance}
+                  placeholder="0"
+                  unit="点"
+                />
+              </Field>
+            ) : (
+              <>
+                <Field className={configFieldClassName}>
+                  <ConfigFieldLabel htmlFor="settings-default-subscription-quota">
+                    默认订阅配额
+                  </ConfigFieldLabel>
+                  <NumberInputWithUnit
+                    id="settings-default-subscription-quota"
+                    min={0}
+                    value={config?.default_subscription_quota ?? ""}
+                    onChange={setDefaultSubscriptionQuota}
+                    placeholder="0"
+                    unit="点"
+                  />
+                </Field>
+                <Field className={configFieldClassName}>
+                  <ConfigFieldLabel htmlFor="settings-default-subscription-period">
+                    默认订阅周期
+                  </ConfigFieldLabel>
+                  <Select
+                    value={config?.default_subscription_period || "monthly"}
+                    onValueChange={(value) => {
+                      if (
+                        value === "daily" ||
+                        value === "weekly" ||
+                        value === "monthly"
+                      ) {
+                        setDefaultSubscriptionPeriod(value);
+                      }
+                    }}
+                  >
+                    <SelectTrigger
+                      id="settings-default-subscription-period"
+                      className={settingsInputClassName}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="daily">每日</SelectItem>
+                      <SelectItem value="weekly">每周</SelectItem>
+                      <SelectItem value="monthly">每月</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </>
+            )}
           </div>
         </section>
 

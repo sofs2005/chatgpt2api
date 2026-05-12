@@ -15,6 +15,7 @@ import {
   ShieldCheck,
   Trash2,
   UserRound,
+  UsersRound,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -23,6 +24,7 @@ import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -36,6 +38,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   createBillingAdjustment,
+  createBulkBillingAdjustment,
   createManagedUser,
   deleteManagedUser,
   fetchBillingAdjustments,
@@ -47,6 +50,8 @@ import {
   type BillingAdjustmentPayload,
   type BillingPeriod,
   type BillingType,
+  type BulkBillingAdjustmentResult,
+  type BulkBillingAdjustmentSummary,
   type CreateManagedUserPayload,
   type ManagedUser,
   type ManagedRole,
@@ -106,6 +111,17 @@ type BillingAdjustmentType =
   | "decrease_quota"
   | "reset_quota"
   | "clear_quota_used";
+
+type BulkBillingForm = {
+  scope: "users" | "role";
+  roleId: string;
+  operation: "adjust" | "switch_type";
+  billingType: BillingType;
+  adjustmentType: BillingAdjustmentType;
+  amount: string;
+  subscriptionPeriod: BillingPeriod;
+  reason: string;
+};
 
 const standardBillingAdjustmentOptions: Array<{ value: BillingAdjustmentType; label: string }> = [
   { value: "increase_balance", label: "增加余额" },
@@ -179,14 +195,33 @@ function createUserPayload(values: CreateUserForm): CreateManagedUserPayload {
   };
 }
 
-function providerLabel(provider?: string) {
+function providerFilterLabel(provider?: string) {
   if (provider === "linuxdo") {
     return "Linuxdo";
   }
   if (provider === "local") {
-    return "本地";
+    return "账号/API Key";
   }
   return provider || "未知";
+}
+
+function userSourceLabel(user: Pick<ManagedUser, "provider" | "username" | "has_api_key" | "has_session">) {
+  if (user.provider === "linuxdo") {
+    return "Linuxdo";
+  }
+  if (user.provider === "local") {
+    if (user.username) {
+      return "账号用户";
+    }
+    if (user.has_api_key) {
+      return "API Key";
+    }
+    if (user.has_session) {
+      return "登录会话";
+    }
+    return "本地凭据";
+  }
+  return user.provider || "未知";
 }
 
 const linuxDoLevelColors: Record<string, string> = {
@@ -311,7 +346,7 @@ function UsageSparkline({ points }: { points?: ManagedUser["usage_curve"] }) {
   const label = `近 ${safePoints.length} 日调用曲线，今日 ${latestPoint.calls} 次，峰值 ${peakPoint.calls} 次`;
 
   return (
-    <div className="w-[230px] space-y-1.5" aria-label={label}>
+    <div className="w-[180px] space-y-1.5" aria-label={label}>
       <div className="h-16 overflow-hidden rounded-lg border border-border/70 bg-background">
         <svg viewBox={`0 0 ${width} ${height}`} role="img" className="h-full w-full">
           <title>{label}</title>
@@ -402,6 +437,23 @@ function billingFormFromUser(user: ManagedUser): BillingEditForm {
   };
 }
 
+function createBulkBillingForm(roleId = ""): BulkBillingForm {
+  return {
+    scope: "users",
+    roleId,
+    operation: "adjust",
+    billingType: "standard",
+    adjustmentType: defaultBillingAdjustmentType("standard"),
+    amount: "",
+    subscriptionPeriod: "monthly",
+    reason: "",
+  };
+}
+
+function isBulkAdjustmentNoAmount(type: BillingAdjustmentType) {
+  return type === "reset_quota" || type === "clear_quota_used";
+}
+
 function UsersContent() {
   const rolesLoadedRef = useRef(false);
   const [items, setItems] = useState<ManagedUser[]>([]);
@@ -415,6 +467,7 @@ function UsersContent() {
   const [totalPages, setTotalPages] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(() => new Set());
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [createForm, setCreateForm] = useState<CreateUserForm>(() => createEmptyUserForm());
   const [createErrors, setCreateErrors] = useState<CreateUserErrors>({});
@@ -428,6 +481,11 @@ function UsersContent() {
   const [billingAdjustments, setBillingAdjustments] = useState<BillingAdjustment[]>([]);
   const [isLoadingBilling, setIsLoadingBilling] = useState(false);
   const [isSavingBilling, setIsSavingBilling] = useState(false);
+  const [isBulkBillingDialogOpen, setIsBulkBillingDialogOpen] = useState(false);
+  const [bulkBillingForm, setBulkBillingForm] = useState<BulkBillingForm>(() => createBulkBillingForm());
+  const [bulkBillingSummary, setBulkBillingSummary] = useState<BulkBillingAdjustmentSummary | null>(null);
+  const [bulkBillingResults, setBulkBillingResults] = useState<BulkBillingAdjustmentResult[]>([]);
+  const [isApplyingBulkBilling, setIsApplyingBulkBilling] = useState(false);
 
   const loadUsers = useCallback(async (overrides: { page?: number; includeRoles?: boolean } = {}) => {
     const requestedPage = overrides.page ?? page;
@@ -459,6 +517,10 @@ function UsersContent() {
           ...current,
           role_id: current.role_id || nextRoles[0]?.id || "",
         }));
+        setBulkBillingForm((current) => ({
+          ...current,
+          roleId: current.roleId || nextRoles[0]?.id || "",
+        }));
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载用户失败");
@@ -471,10 +533,23 @@ function UsersContent() {
     void loadUsers();
   }, [loadUsers]);
 
+  useEffect(() => {
+    const visibleIds = new Set(items.map((item) => item.id));
+    setSelectedUserIds((current) => {
+      const next = new Set([...current].filter((id) => visibleIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [items]);
+
   const safePage = Math.min(page, totalPages);
   const startIndex = total === 0 ? 0 : (safePage - 1) * Number(pageSize) + 1;
   const endIndex = Math.min(safePage * Number(pageSize), total);
   const hasActiveFilters = searchText.trim() !== "" || providerFilter !== "all" || statusFilter !== "all";
+  const pageUserIds = useMemo(() => items.map((item) => item.id), [items]);
+  const selectedUsers = useMemo(() => items.filter((item) => selectedUserIds.has(item.id)), [items, selectedUserIds]);
+  const selectedCount = selectedUserIds.size;
+  const allPageSelected = pageUserIds.length > 0 && pageUserIds.every((id) => selectedUserIds.has(id));
+  const somePageSelected = pageUserIds.some((id) => selectedUserIds.has(id));
   const paginationItems = useMemo(() => {
     const nextItems: (number | "...")[] = [];
     const start = Math.max(1, safePage - 1);
@@ -499,6 +574,43 @@ function UsersContent() {
       }
       return next;
     });
+  };
+
+  const toggleSelectedUser = (userId: string, checked: boolean) => {
+    setSelectedUserIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(userId);
+      } else {
+        next.delete(userId);
+      }
+      return next;
+    });
+  };
+
+  const togglePageSelection = (checked: boolean) => {
+    setSelectedUserIds((current) => {
+      const next = new Set(current);
+      for (const id of pageUserIds) {
+        if (checked) {
+          next.add(id);
+        } else {
+          next.delete(id);
+        }
+      }
+      return next;
+    });
+  };
+
+  const openBulkBillingDialog = () => {
+    setBulkBillingForm((current) => ({
+      ...current,
+      scope: selectedCount > 0 ? "users" : current.scope,
+      roleId: current.roleId || roles[0]?.id || "",
+    }));
+    setBulkBillingSummary(null);
+    setBulkBillingResults([]);
+    setIsBulkBillingDialogOpen(true);
   };
 
   const updateCreateField = <Key extends keyof CreateUserForm>(field: Key, value: CreateUserForm[Key]) => {
@@ -600,6 +712,23 @@ function UsersContent() {
     });
   };
 
+  const updateBulkBillingForm = <Key extends keyof BulkBillingForm>(key: Key, value: BulkBillingForm[Key]) => {
+    setBulkBillingForm((current) => {
+      if (key === "billingType") {
+        const billingType = value as BillingType;
+        return {
+          ...current,
+          billingType,
+          adjustmentType: normalizeBillingAdjustmentType(billingType, current.adjustmentType),
+          amount: "",
+        };
+      }
+      return { ...current, [key]: value };
+    });
+    setBulkBillingSummary(null);
+    setBulkBillingResults([]);
+  };
+
   const handleBillingAdjustment = async (payload: BillingAdjustmentPayload, successMessage: string) => {
     if (!billingUser) {
       return;
@@ -681,6 +810,65 @@ function UsersContent() {
     await handleBillingAdjustment(payload, "计费调整已执行");
   };
 
+  const handleApplyBulkBilling = async () => {
+    const adjustmentType = normalizeBillingAdjustmentType(bulkBillingForm.billingType, bulkBillingForm.adjustmentType);
+    const needsAmount = bulkBillingForm.operation === "switch_type" || !isBulkAdjustmentNoAmount(adjustmentType);
+    const amount = Math.max(0, Number(bulkBillingForm.amount) || 0);
+    if (bulkBillingForm.scope === "users" && selectedUserIds.size === 0) {
+      toast.error("请先选择用户");
+      return;
+    }
+    if (bulkBillingForm.scope === "role" && !bulkBillingForm.roleId) {
+      toast.error("请选择角色");
+      return;
+    }
+    if (needsAmount && amount <= 0) {
+      toast.error("请输入大于 0 的调整数量");
+      return;
+    }
+
+    setIsApplyingBulkBilling(true);
+    try {
+      const reason = bulkBillingForm.reason.trim();
+      const payload: BillingAdjustmentPayload = bulkBillingForm.operation === "switch_type"
+        ? bulkBillingForm.billingType === "subscription"
+          ? {
+              type: "switch_to_subscription",
+              quota_limit: amount,
+              quota_period: bulkBillingForm.subscriptionPeriod,
+              reason,
+            }
+          : {
+              type: "switch_to_standard",
+              balance: amount,
+              reason,
+            }
+        : {
+            type: adjustmentType,
+            reason,
+          };
+      if (bulkBillingForm.operation === "adjust" && needsAmount) {
+        payload.amount = amount;
+      }
+      const data = await createBulkBillingAdjustment({
+        scope: bulkBillingForm.scope,
+        user_ids: bulkBillingForm.scope === "users" ? [...selectedUserIds] : undefined,
+        role_id: bulkBillingForm.scope === "role" ? bulkBillingForm.roleId : undefined,
+        billing: payload,
+      });
+      setBulkBillingSummary(data.summary || null);
+      setBulkBillingResults(Array.isArray(data.results) ? data.results : []);
+      await loadUsers({ includeRoles: false });
+      const succeeded = data.summary?.succeeded ?? 0;
+      const failed = data.summary?.failed ?? 0;
+      toast.success(failed > 0 ? `批量调整完成：成功 ${succeeded}，失败 ${failed}` : `批量调整完成：成功 ${succeeded}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "批量调整失败");
+    } finally {
+      setIsApplyingBulkBilling(false);
+    }
+  };
+
   const handleSaveRole = async () => {
     if (!roleUser || !selectedRoleId) {
       return;
@@ -737,6 +925,10 @@ function UsersContent() {
               <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
               刷新
             </Button>
+            <Button variant="outline" onClick={openBulkBillingDialog} className="h-10 rounded-lg">
+              <UsersRound className="size-4" />
+              批量计费
+            </Button>
             <Button onClick={openCreateDialog} className="h-10 rounded-lg">
               <Plus className="size-4" />
               创建用户
@@ -750,6 +942,7 @@ function UsersContent() {
           <div className="flex flex-col gap-3 border-b border-border px-5 py-4">
             <div className="flex items-center justify-between text-sm text-muted-foreground">
               <span>共 {total} 个用户</span>
+              <span>{selectedCount > 0 ? `已选择 ${selectedCount} 个` : "未选择用户"}</span>
             </div>
             <div className="grid gap-2 lg:grid-cols-[minmax(18rem,1fr)_160px_160px_auto]">
               <div className="relative">
@@ -777,7 +970,7 @@ function UsersContent() {
                 <SelectContent>
                   <SelectItem value="all">全部来源</SelectItem>
                   <SelectItem value="linuxdo">Linuxdo</SelectItem>
-                  <SelectItem value="local">本地</SelectItem>
+                  <SelectItem value="local">{providerFilterLabel("local")}</SelectItem>
                 </SelectContent>
               </Select>
               <Select
@@ -814,18 +1007,22 @@ function UsersContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[1500px]">
+            <Table className="min-w-[1180px]">
               <TableHeader>
                 <TableRow>
-                  <TableHead>用户</TableHead>
-                  <TableHead>角色</TableHead>
-                  <TableHead>来源</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>本地计费</TableHead>
-                  <TableHead>额度消耗</TableHead>
-                  <TableHead className="w-[340px]">调用曲线</TableHead>
-                  <TableHead>时间</TableHead>
-                  <TableHead className="w-[260px]">操作</TableHead>
+                  <TableHead className="w-12">
+                    <Checkbox
+                      checked={allPageSelected || (somePageSelected ? "indeterminate" : false)}
+                      onCheckedChange={(checked) => togglePageSelection(checked === true)}
+                      aria-label="选择当前页用户"
+                    />
+                  </TableHead>
+                  <TableHead className="w-[280px]">用户</TableHead>
+                  <TableHead className="w-[180px]">角色</TableHead>
+                  <TableHead className="w-[170px]">本地计费</TableHead>
+                  <TableHead className="w-[280px]">近 14 日调用</TableHead>
+                  <TableHead className="w-[170px]">时间</TableHead>
+                  <TableHead className="w-[180px] text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -835,15 +1032,38 @@ function UsersContent() {
                   return (
                     <TableRow key={user.id} className="text-muted-foreground">
                       <TableCell>
-                        <div className="min-w-0 space-y-1">
-                          <div className="truncate font-medium text-foreground">{user.name || "普通用户"}</div>
-                          {user.username ? (
-                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                              <UserRound className="size-3.5" />
-                              <span className="truncate">{user.username}</span>
-                            </div>
-                          ) : null}
-                          <code className="block max-w-[260px] truncate font-mono text-xs text-muted-foreground">{user.id}</code>
+                        <Checkbox
+                          checked={selectedUserIds.has(user.id)}
+                          onCheckedChange={(checked) => toggleSelectedUser(user.id, checked === true)}
+                          aria-label={`选择 ${user.name || user.username || user.id}`}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <div className="min-w-0 space-y-1.5">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="truncate font-medium text-foreground">{user.name || "普通用户"}</div>
+                            <Badge variant={user.enabled ? "success" : "danger"} className="shrink-0 rounded-md">
+                              {user.enabled ? "启用" : "禁用"}
+                            </Badge>
+                          </div>
+                          <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                            {user.username ? (
+                              <>
+                                <UserRound className="size-3.5" />
+                                <span className="truncate">{user.username}</span>
+                              </>
+                            ) : null}
+                            <Badge variant={user.provider === "linuxdo" ? "info" : "secondary"} className="rounded-md px-1.5 py-0 text-[11px]">
+                              {userSourceLabel(user)}
+                              {user.provider === "linuxdo" && (() => {
+                                const level = String(user.linuxdo_level || "").trim();
+                                return level ? (
+                                  <span className={`ml-1 ${linuxDoLevelColors[level] || "text-muted-foreground"}`}>· Lv{level}</span>
+                                ) : null;
+                              })()}
+                            </Badge>
+                          </div>
+                          <code className="block max-w-[260px] truncate font-mono text-[11px] text-muted-foreground">{user.id}</code>
                         </div>
                       </TableCell>
                       <TableCell>
@@ -851,28 +1071,10 @@ function UsersContent() {
                           <Badge variant="secondary" className="rounded-md">
                             {roleLabel(user, roles)}
                           </Badge>
-                          <code className="max-w-[160px] truncate font-mono text-xs text-muted-foreground">
+                          <code className="max-w-[170px] truncate font-mono text-[11px] text-muted-foreground">
                             {user.role_id || "default-user"}
                           </code>
                         </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex flex-col items-start gap-1.5">
-                          <Badge variant={user.provider === "linuxdo" ? "info" : "secondary"} className="rounded-md">
-                            {providerLabel(user.provider)}
-                            {user.provider === "linuxdo" && (() => {
-                              const level = String(user.linuxdo_level || "").trim();
-                              return level ? (
-                                <span className={`ml-1 ${linuxDoLevelColors[level] || "text-muted-foreground"}`}>· Lv{level}</span>
-                              ) : null;
-                            })()}
-                          </Badge>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={user.enabled ? "success" : "danger"} className="rounded-md">
-                          {user.enabled ? "已启用" : "已禁用"}
-                        </Badge>
                       </TableCell>
                       <TableCell>
                         <div className="space-y-1">
@@ -889,33 +1091,28 @@ function UsersContent() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="space-y-1">
-                          <div className="text-base font-semibold text-foreground">{numeric(user.quota_used)}</div>
-                          <div className="text-xs text-muted-foreground">今日 {todayQuotaUsed(user)}</div>
-                        </div>
-                      </TableCell>
-                      <TableCell className="w-[340px]">
-                        <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-3">
                           <UsageSparkline points={user.usage_curve} />
-                          <div className="min-w-[72px] space-y-1 text-xs text-muted-foreground">
+                          <div className="min-w-[70px] space-y-1 text-xs text-muted-foreground">
                             <div>总计 {formatCompactNumber(user.call_count)}</div>
                             <div>今日 {formatCompactNumber(todayCallCount(user))}</div>
+                            <div>额度 {formatCompactNumber(user.quota_used)}</div>
                             <div>失败 {formatCompactNumber(user.failure_count)}</div>
                           </div>
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="space-y-1 text-xs">
+                        <div className="space-y-1 text-xs leading-5">
                           <div>创建 {formatDateTime(user.created_at)}</div>
                           <div>使用 {formatDateTime(user.last_used_at)}</div>
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="flex flex-wrap justify-end gap-2">
+                        <div className="grid grid-cols-2 justify-items-end gap-2">
                           <Button
                             type="button"
                             variant="outline"
-                            className="h-8 rounded-lg px-3"
+                            className="h-8 w-full rounded-lg px-2"
                             onClick={() => void openBillingDialog(user)}
                             disabled={isPending}
                           >
@@ -925,7 +1122,7 @@ function UsersContent() {
                           <Button
                             type="button"
                             variant="outline"
-                            className="h-8 rounded-lg px-3"
+                            className="h-8 w-full rounded-lg px-2"
                             onClick={() => openRoleDialog(user)}
                             disabled={isPending}
                           >
@@ -935,7 +1132,7 @@ function UsersContent() {
                           <Button
                             type="button"
                             variant="outline"
-                            className="h-8 rounded-lg px-3"
+                            className="h-8 w-full rounded-lg px-2"
                             onClick={() => void handleToggle(user)}
                             disabled={isPending}
                           >
@@ -951,7 +1148,7 @@ function UsersContent() {
                           <Button
                             type="button"
                             variant="outline"
-                            className="h-8 rounded-lg border-rose-200 px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                            className="h-8 w-full rounded-lg border-rose-200 px-2 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
                             onClick={() => setDeletingUser(user)}
                             disabled={isPending}
                           >
@@ -1137,6 +1334,223 @@ function UsersContent() {
             <Button type="button" className="h-10 rounded-xl px-5" onClick={() => void handleCreate()} disabled={isCreating}>
               {isCreating ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
               创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isBulkBillingDialogOpen} onOpenChange={setIsBulkBillingDialogOpen}>
+        <DialogContent className="max-h-[88dvh] overflow-y-auto rounded-2xl p-6 sm:max-w-2xl">
+          <DialogHeader className="gap-2">
+            <DialogTitle className="flex items-center gap-2">
+              <UsersRound className="size-5 text-[#1456f0]" />
+              批量计费调整
+            </DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              选中用户或某个角色下的用户会被统一增加或扣减余额/配额。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700 dark:text-foreground">操作范围</label>
+                <Select value={bulkBillingForm.scope} onValueChange={(value) => updateBulkBillingForm("scope", value as BulkBillingForm["scope"])}>
+                  <SelectTrigger className="h-11 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="users">已选用户（{selectedCount}）</SelectItem>
+                    <SelectItem value="role">按角色</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {bulkBillingForm.scope === "role" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">目标角色</label>
+                  <Select value={bulkBillingForm.roleId} onValueChange={(value) => updateBulkBillingForm("roleId", value)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue placeholder="选择角色" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {roles.map((role) => (
+                        <SelectItem key={role.id} value={role.id}>
+                          {role.name}（{role.user_count || 0}）
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-border bg-muted/30 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-sm">
+                    <span className="font-medium text-foreground">已选用户</span>
+                    <span className="text-muted-foreground">{selectedCount} 个</span>
+                  </div>
+                  {selectedUsers.length === 0 ? (
+                    <div className="mt-2 text-sm leading-6 text-muted-foreground">请先在用户列表中勾选需要调整的用户。</div>
+                  ) : (
+                    <div className="mt-2 max-h-44 space-y-2 overflow-y-auto pr-1">
+                      {selectedUsers.map((user) => {
+                        const billing = billingSummary(user);
+                        return (
+                          <div key={user.id} className="rounded-lg border border-border/70 bg-background px-3 py-2">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-medium text-foreground">{user.name || "普通用户"}</div>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                                  <span>{user.username || userSourceLabel(user)}</span>
+                                  <span>·</span>
+                                  <span>{roleLabel(user, roles)}</span>
+                                </div>
+                              </div>
+                              <div className="shrink-0 text-right text-xs text-muted-foreground">
+                                <div className="font-medium text-foreground">{billing.title}</div>
+                                <div>{billing.detail}</div>
+                              </div>
+                            </div>
+                            <code className="mt-1 block truncate font-mono text-[11px] text-muted-foreground">{user.id}</code>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700 dark:text-foreground">操作类型</label>
+                <Select value={bulkBillingForm.operation} onValueChange={(value) => updateBulkBillingForm("operation", value as BulkBillingForm["operation"])}>
+                  <SelectTrigger className="h-11 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="adjust">调整余额/配额</SelectItem>
+                    <SelectItem value="switch_type">切换计费类型</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700 dark:text-foreground">
+                  {bulkBillingForm.operation === "switch_type" ? "目标计费类型" : "计费类型"}
+                </label>
+                <Select value={bulkBillingForm.billingType} onValueChange={(value) => updateBulkBillingForm("billingType", value as BillingType)}>
+                  <SelectTrigger className="h-11 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="standard">标准余额制</SelectItem>
+                    <SelectItem value="subscription">订阅配额制</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {bulkBillingForm.operation === "adjust" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">调整方式</label>
+                  <Select
+                    value={normalizeBillingAdjustmentType(bulkBillingForm.billingType, bulkBillingForm.adjustmentType)}
+                    onValueChange={(value) => updateBulkBillingForm("adjustmentType", value as BillingAdjustmentType)}
+                  >
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {billingAdjustmentOptions(bulkBillingForm.billingType).map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+              {(bulkBillingForm.operation === "switch_type" || !isBulkAdjustmentNoAmount(normalizeBillingAdjustmentType(bulkBillingForm.billingType, bulkBillingForm.adjustmentType))) ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">
+                    {bulkBillingForm.billingType === "subscription" ? "配额上限" : "标准余额"}
+                  </label>
+                  <Input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    value={bulkBillingForm.amount}
+                    onChange={(event) => updateBulkBillingForm("amount", event.target.value)}
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+              ) : null}
+              {bulkBillingForm.operation === "switch_type" && bulkBillingForm.billingType === "subscription" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">订阅周期</label>
+                  <Select value={bulkBillingForm.subscriptionPeriod} onValueChange={(value) => updateBulkBillingForm("subscriptionPeriod", value as BillingPeriod)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="daily">每日</SelectItem>
+                      <SelectItem value="weekly">每周</SelectItem>
+                      <SelectItem value="monthly">每月</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700 dark:text-foreground">调整原因</label>
+              <Input
+                value={bulkBillingForm.reason}
+                onChange={(event) => updateBulkBillingForm("reason", event.target.value)}
+                placeholder="可选"
+                className="h-11 rounded-xl"
+              />
+            </div>
+
+            {bulkBillingSummary ? (
+              <div className="rounded-2xl border border-border p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span className="font-semibold text-foreground">执行结果</span>
+                  <span className="text-muted-foreground">
+                    共 {bulkBillingSummary.total} 个，成功 {bulkBillingSummary.succeeded} 个，失败 {bulkBillingSummary.failed} 个
+                  </span>
+                </div>
+                {bulkBillingResults.some((result) => result.error) ? (
+                  <div className="mt-3 max-h-40 space-y-2 overflow-y-auto pr-1">
+                    {bulkBillingResults.filter((result) => result.error).map((result) => (
+                      <div key={result.user_id} className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
+                        <code className="font-mono">{result.user_id}</code>
+                        <span className="mx-1">·</span>
+                        {result.error}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-10 rounded-xl px-5"
+              onClick={() => setIsBulkBillingDialogOpen(false)}
+              disabled={isApplyingBulkBilling}
+            >
+              关闭
+            </Button>
+            <Button
+              type="button"
+              className="h-10 rounded-xl px-5"
+              onClick={() => void handleApplyBulkBilling()}
+              disabled={
+                isApplyingBulkBilling
+                || (bulkBillingForm.scope === "users" && selectedCount === 0)
+                || (bulkBillingForm.scope === "role" && !bulkBillingForm.roleId)
+              }
+            >
+              {isApplyingBulkBilling ? <LoaderCircle className="size-4 animate-spin" /> : <UsersRound className="size-4" />}
+              执行批量调整
             </Button>
           </DialogFooter>
         </DialogContent>

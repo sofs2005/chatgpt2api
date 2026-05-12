@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1258,6 +1259,227 @@ func TestProfileAndManagedUsersExposeBillingState(t *testing.T) {
 	billing = util.StringMap(item["billing"])
 	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], 0) != 12 {
 		t.Fatalf("managed user billing = %#v", item["billing"])
+	}
+}
+
+func TestDefaultBillingSettingsOnlyInitializeNewUsers(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+
+	existing, existingKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "existing user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey(existing) error = %v", err)
+	}
+	existingID := util.Clean(existing["id"])
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{
+		"default_billing_type": "subscription",
+		"default_standard_balance": 7,
+		"default_subscription_quota": 12,
+		"default_subscription_period": "weekly"
+	}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("update default billing settings status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var users map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &users); err != nil {
+		t.Fatalf("admin users json: %v", err)
+	}
+	item := findHTTPItem(logItems(users), existingID)
+	if item == nil {
+		t.Fatalf("existing user %q missing from %#v", existingID, users)
+	}
+	billing := util.StringMap(item["billing"])
+	if billing["type"] != service.BillingTypeStandard || util.ToInt(billing["available"], -1) != 0 {
+		t.Fatalf("existing listed billing changed after settings update = %#v", billing)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+existingKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("existing profile status = %d body = %s", res.Code, res.Body.String())
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("existing profile json: %v", err)
+	}
+	billing = util.StringMap(profile["billing"])
+	if billing["type"] != service.BillingTypeStandard || util.ToInt(billing["available"], -1) != 0 {
+		t.Fatalf("existing profile billing changed after settings update = %#v", billing)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/users", strings.NewReader(`{"username":"newuser","password":"Password123","name":"New User"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("create new user status = %d body = %s", res.Code, res.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create user json: %v", err)
+	}
+	newUser := util.StringMap(created["item"])
+	billing = util.StringMap(newUser["billing"])
+	subscription := util.StringMap(billing["subscription"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], -1) != 12 || subscription["quota_period"] != service.BillingPeriodWeekly {
+		t.Fatalf("new user billing did not use updated defaults = %#v", billing)
+	}
+}
+
+func TestRegistrationInitializesDefaultBillingForNewUser(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeSubscription, "0", "9", service.BillingPeriodDaily)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"registration_enabled":true}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("enable registration status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"username":"alice","password":"Password123","name":"Alice"}`))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("register status = %d body = %s", res.Code, res.Body.String())
+	}
+	var registered map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &registered); err != nil {
+		t.Fatalf("register json: %v", err)
+	}
+	billing := util.StringMap(registered["billing"])
+	subscription := util.StringMap(billing["subscription"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], -1) != 9 || subscription["quota_period"] != service.BillingPeriodDaily {
+		t.Fatalf("registered billing = %#v", billing)
+	}
+}
+
+func TestAdminBulkBillingAdjustmentTargetsExplicitUsers(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "2", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+
+	alice, err := app.auth.CreatePasswordUser("bulk_alice", "Password123", "Bulk Alice", service.DefaultManagedRoleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(alice) error = %v", err)
+	}
+	bob, err := app.auth.CreatePasswordUser("bulk_bob", "Password123", "Bulk Bob", service.DefaultManagedRoleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(bob) error = %v", err)
+	}
+	aliceID := util.Clean(alice["id"])
+	bobID := util.Clean(bob["id"])
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/users/billing-adjustments/bulk", strings.NewReader(`{
+		"scope": "users",
+		"user_ids": [`+strconv.Quote(aliceID)+`, `+strconv.Quote(bobID)+`, `+strconv.Quote(aliceID)+`],
+		"billing": {"type":"increase_balance","amount":5,"reason":"batch topup"}
+	}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("bulk users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("bulk users json: %v", err)
+	}
+	summary := util.StringMap(payload["summary"])
+	if util.ToInt(summary["total"], 0) != 2 || util.ToInt(summary["succeeded"], 0) != 2 || util.ToInt(summary["failed"], -1) != 0 {
+		t.Fatalf("bulk users summary = %#v", summary)
+	}
+	for _, userID := range []string{aliceID, bobID} {
+		billing := app.billing.Get(userID)
+		if util.ToInt(billing["available"], -1) != 7 {
+			t.Fatalf("%s billing = %#v, want available 7", userID, billing)
+		}
+	}
+	if adjustments := app.billing.ListAdjustments("", 10); len(adjustments) != 2 {
+		t.Fatalf("bulk adjustments len = %d, want 2: %#v", len(adjustments), adjustments)
+	}
+}
+
+func TestAdminBulkBillingAdjustmentTargetsRoleAndReportsFailures(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "2", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+
+	role, err := app.auth.CreateRole(map[string]any{
+		"name":            "bulk role",
+		"menu_paths":      []string{},
+		"api_permissions": []string{},
+	})
+	if err != nil {
+		t.Fatalf("CreateRole() error = %v", err)
+	}
+	roleID := util.Clean(role["id"])
+	alice, err := app.auth.CreatePasswordUser("bulk_role_alice", "Password123", "Bulk Role Alice", roleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(alice) error = %v", err)
+	}
+	bob, err := app.auth.CreatePasswordUser("bulk_role_bob", "Password123", "Bulk Role Bob", roleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(bob) error = %v", err)
+	}
+	other, err := app.auth.CreatePasswordUser("bulk_role_other", "Password123", "Bulk Role Other", service.DefaultManagedRoleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(other) error = %v", err)
+	}
+	aliceID := util.Clean(alice["id"])
+	bobID := util.Clean(bob["id"])
+	otherID := util.Clean(other["id"])
+	if _, err := app.billing.ApplyAdjustment(bobID, service.Identity{ID: "admin", Name: "Admin", Role: service.AuthRoleAdmin}, map[string]any{"type": "decrease_balance", "amount": 1}); err != nil {
+		t.Fatalf("pre-adjust bob error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/users/billing-adjustments/bulk", strings.NewReader(`{
+		"scope": "role",
+		"role_id": `+strconv.Quote(roleID)+`,
+		"billing": {"type":"decrease_balance","amount":2,"reason":"batch debit"}
+	}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("bulk role status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("bulk role json: %v", err)
+	}
+	summary := util.StringMap(payload["summary"])
+	if util.ToInt(summary["total"], 0) != 2 || util.ToInt(summary["succeeded"], 0) != 1 || util.ToInt(summary["failed"], 0) != 1 {
+		t.Fatalf("bulk role summary = %#v", summary)
+	}
+	results := logItems(map[string]any{"items": payload["results"]})
+	if len(results) != 2 {
+		t.Fatalf("bulk role results = %#v", payload["results"])
+	}
+	if failed := findHTTPBulkBillingResult(results, bobID); failed == nil || util.Clean(failed["error"]) == "" {
+		t.Fatalf("bob failed result = %#v", failed)
+	}
+	if got := app.billing.Get(aliceID); util.ToInt(got["available"], -1) != 0 {
+		t.Fatalf("alice billing = %#v, want debited to 0", got)
+	}
+	if got := app.billing.Get(bobID); util.ToInt(got["available"], -1) != 1 {
+		t.Fatalf("bob billing = %#v, want unchanged at 1", got)
+	}
+	if got := app.billing.Get(otherID); util.ToInt(got["available"], -1) != 2 {
+		t.Fatalf("other billing = %#v, want unchanged at 2", got)
 	}
 }
 
@@ -3346,6 +3568,15 @@ func findLogBySummary(items []map[string]any, summary string) map[string]any {
 func findHTTPItem(items []map[string]any, id string) map[string]any {
 	for _, item := range items {
 		if item["id"] == id {
+			return item
+		}
+	}
+	return nil
+}
+
+func findHTTPBulkBillingResult(items []map[string]any, userID string) map[string]any {
+	for _, item := range items {
+		if item["user_id"] == userID {
 			return item
 		}
 	}

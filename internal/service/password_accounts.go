@@ -120,8 +120,8 @@ func (s *AuthService) RegisterPasswordUser(username, password, name string) (*Id
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := passwordAccountByUsernameLocked(s.accounts, username); ok {
+		s.mu.Unlock()
 		return nil, "", authError("username already exists")
 	}
 	now := util.NowISO()
@@ -139,12 +139,17 @@ func (s *AuthService) RegisterPasswordUser(username, password, name string) (*Id
 	s.accounts = append(s.accounts, account)
 	item, raw := s.issuePasswordSessionLocked(account, now)
 	if err := s.savePasswordAccountsLocked(); err != nil {
+		s.mu.Unlock()
 		return nil, "", err
 	}
 	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
 		return nil, "", err
 	}
-	return identityForAuthItem(item), raw, nil
+	identity := identityForAuthItem(item)
+	s.mu.Unlock()
+	s.notifyUserCreated(account.ID)
+	return identity, raw, nil
 }
 
 func (s *AuthService) CreatePasswordUser(username, password, name, roleID string, enabled bool) (map[string]any, error) {
@@ -166,12 +171,13 @@ func (s *AuthService) CreatePasswordUser(username, password, name, roleID string
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := passwordAccountByUsernameLocked(s.accounts, username); ok {
+		s.mu.Unlock()
 		return nil, authError("username already exists")
 	}
 	role, ok := managedRoleByIDLocked(s.roles, roleID)
 	if !ok {
+		s.mu.Unlock()
 		return nil, authError("role not found")
 	}
 	now := util.NowISO()
@@ -188,9 +194,13 @@ func (s *AuthService) CreatePasswordUser(username, password, name, roleID string
 	}
 	s.accounts = append(s.accounts, account)
 	if err := s.savePasswordAccountsLocked(); err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
-	return managedAuthUserByIDLocked(s.items, s.roles, s.accounts, account.ID), nil
+	item := managedAuthUserByIDLocked(s.items, s.roles, s.accounts, account.ID)
+	s.mu.Unlock()
+	s.notifyUserCreated(account.ID)
+	return item, nil
 }
 
 func (s *AuthService) LoginPassword(username, password string) (*Identity, string, error) {

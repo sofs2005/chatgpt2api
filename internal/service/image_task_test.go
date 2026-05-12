@@ -619,6 +619,12 @@ func TestImageTaskServicePreservesPartialDataOnFailure(t *testing.T) {
 func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) {
 	operator := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
 	user := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+	newBilling := func(t *testing.T, defaults testBillingDefaults) *BillingService {
+		t.Helper()
+		billing := newTestBillingService(t, defaults)
+		billing.InitializeUserDefaults("alice")
+		return billing
+	}
 
 	t.Run("partial success consumes actual outputs", func(t *testing.T) {
 		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
@@ -632,7 +638,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 			failingImageTaskHandler,
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 4})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 4})
 		svc.SetBillingService(billing)
 		if _, err := svc.SubmitGeneration(context.Background(), user, "success", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 4, nil); err != nil {
 			t.Fatalf("SubmitGeneration() error = %v", err)
@@ -659,7 +665,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 			failingImageTaskHandler,
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 2})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 2})
 		svc.SetBillingService(billing)
 		if _, err := svc.SubmitGeneration(context.Background(), user, "failed", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
 			t.Fatalf("SubmitGeneration() error = %v", err)
@@ -689,7 +695,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 			failingImageTaskHandler,
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 2})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 2})
 		svc.SetBillingService(billing)
 		if _, err := svc.SubmitGeneration(context.Background(), user, "cancel", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
 			t.Fatalf("SubmitGeneration() error = %v", err)
@@ -728,7 +734,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 			failingImageTaskHandler,
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 1})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 1})
 		svc.SetBillingService(billing)
 		if _, err := svc.SubmitGeneration(context.Background(), user, "text", "who are you", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
 			t.Fatalf("SubmitGeneration() error = %v", err)
@@ -750,7 +756,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 			failingImageTaskHandler,
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 0})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 0})
 		if _, err := billing.ApplyAdjustment("alice", operator, map[string]any{"type": "switch_to_subscription", "quota_limit": 2, "quota_period": BillingPeriodMonthly, "reason": "test"}); err != nil {
 			t.Fatalf("switch_to_subscription error = %v", err)
 		}
@@ -786,7 +792,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 			failingImageTaskHandler,
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 3})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 3})
 		svc.SetBillingService(billing)
 		if _, err := svc.SubmitGeneration(context.Background(), user, "delivery-drain-protected", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
 			t.Fatalf("SubmitGeneration() error = %v", err)
@@ -832,7 +838,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 			failingImageTaskHandler,
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 0})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 0})
 		svc.SetBillingService(billing)
 		_, err := svc.SubmitGeneration(context.Background(), user, "delivery-drain-empty", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil)
 		var limitErr BillingLimitError
@@ -857,6 +863,12 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 	user := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
 	messages := []map[string]any{{"role": "user", "content": "hello"}}
+	newBilling := func(t *testing.T, defaults testBillingDefaults) *BillingService {
+		t.Helper()
+		billing := newTestBillingService(t, defaults)
+		billing.InitializeUserDefaults("alice")
+		return billing
+	}
 
 	t.Run("pure text chat does not require billing", func(t *testing.T) {
 		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
@@ -867,7 +879,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 			},
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{})
+		billing := newBilling(t, testBillingDefaults{})
 		svc.SetBillingService(billing)
 		if _, err := svc.SubmitChat(context.Background(), user, "text-chat", "hello", "auto", messages, false); err != nil {
 			t.Fatalf("SubmitChat() error = %v", err)
@@ -888,7 +900,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 			},
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 2})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 2})
 		svc.SetBillingService(billing)
 		if _, err := svc.SubmitChat(context.Background(), user, "image-chat", "draw", "auto", messages, true, 2); err != nil {
 			t.Fatalf("SubmitChat() error = %v", err)
@@ -912,7 +924,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 			},
 			func() int { return 30 },
 		)
-		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 1})
+		billing := newBilling(t, testBillingDefaults{standardBalance: 1})
 		svc.SetBillingService(billing)
 		_, err := svc.SubmitChat(context.Background(), user, "image-chat-rejected", "draw", "auto", messages, true, 2)
 		var limitErr BillingLimitError

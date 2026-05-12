@@ -40,7 +40,10 @@ func newTestBillingService(t *testing.T, defaults testBillingDefaults) *BillingS
 	t.Helper()
 	dir := t.TempDir()
 	backend := storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json"))
-	return NewBillingService(dir, backend, defaults)
+	svc := NewBillingService(dir, backend, defaults)
+	svc.InitializeUserDefaults("alice")
+	svc.InitializeUserDefaults("bob")
+	return svc
 }
 
 func newTestBillingServiceAt(t *testing.T, dir string, defaults testBillingDefaults) *BillingService {
@@ -94,6 +97,83 @@ func TestBillingServiceDefaultBoundaryNormalization(t *testing.T) {
 	sub := util.StringMap(got["subscription"])
 	if got["type"] != BillingTypeSubscription || util.ToInt(got["available"], -1) != 0 || util.ToInt(sub["quota_limit"], -1) != 0 || sub["quota_period"] != BillingPeriodMonthly {
 		t.Fatalf("normalized subscription defaults = %#v", got)
+	}
+}
+
+func TestBillingServiceApplyBulkAdjustment(t *testing.T) {
+	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 4})
+	results, err := svc.ApplyBulkAdjustment([]string{"alice", "bob", "alice"}, billingTestUser("admin"), map[string]any{
+		"type":   "increase_balance",
+		"amount": 3,
+		"reason": "promo",
+	})
+	if err != nil {
+		t.Fatalf("ApplyBulkAdjustment() error = %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results len = %d, want 2: %#v", len(results), results)
+	}
+	for _, userID := range []string{"alice", "bob"} {
+		got := svc.Get(userID)
+		standard := util.StringMap(got["standard"])
+		if util.ToInt(standard["balance"], -1) != 7 {
+			t.Fatalf("%s balance = %#v, want 7", userID, got)
+		}
+	}
+	if adjustments := svc.ListAdjustments("", 10); len(adjustments) != 2 {
+		t.Fatalf("adjustments len = %d, want 2: %#v", len(adjustments), adjustments)
+	}
+}
+
+func TestBillingServiceApplyBulkAdjustmentReportsPerUserFailures(t *testing.T) {
+	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 2})
+	if _, err := svc.ApplyAdjustment("bob", billingTestUser("admin"), map[string]any{"type": "decrease_balance", "amount": 1}); err != nil {
+		t.Fatalf("ApplyAdjustment(bob) error = %v", err)
+	}
+
+	results, err := svc.ApplyBulkAdjustment([]string{"alice", "bob"}, billingTestUser("admin"), map[string]any{
+		"type":   "decrease_balance",
+		"amount": 2,
+	})
+	if err != nil {
+		t.Fatalf("ApplyBulkAdjustment() error = %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results len = %d, want 2: %#v", len(results), results)
+	}
+	if results[0].UserID != "alice" || results[0].Error != "" {
+		t.Fatalf("alice result = %#v", results[0])
+	}
+	if results[1].UserID != "bob" || results[1].Error == "" {
+		t.Fatalf("bob result = %#v, want per-user error", results[1])
+	}
+	if got := svc.Get("alice"); util.ToInt(util.StringMap(got["standard"])["balance"], -1) != 0 {
+		t.Fatalf("alice billing = %#v, want successful decrease", got)
+	}
+	if got := svc.Get("bob"); util.ToInt(util.StringMap(got["standard"])["balance"], -1) != 1 {
+		t.Fatalf("bob billing = %#v, want unchanged after failed decrease", got)
+	}
+}
+
+func TestBillingServiceMissingStateDoesNotUseCurrentDefaults(t *testing.T) {
+	dir := t.TempDir()
+	backend := storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json"))
+	svc := NewBillingService(dir, backend, testBillingDefaults{
+		billingType:        BillingTypeSubscription,
+		standardBalance:    7,
+		subscriptionQuota:  12,
+		subscriptionPeriod: BillingPeriodWeekly,
+	})
+
+	got := svc.Get("legacy-user")
+	if got["type"] != BillingTypeStandard || util.ToInt(got["available"], -1) != 0 {
+		t.Fatalf("missing user billing should not inherit current defaults = %#v", got)
+	}
+
+	initialized := svc.InitializeUserDefaults("new-user")
+	subscription := util.StringMap(initialized["subscription"])
+	if initialized["type"] != BillingTypeSubscription || util.ToInt(initialized["available"], -1) != 12 || subscription["quota_period"] != BillingPeriodWeekly {
+		t.Fatalf("initialized user billing should use current defaults = %#v", initialized)
 	}
 }
 
@@ -395,6 +475,7 @@ func TestBillingServiceAdminAndUnlimitedBypass(t *testing.T) {
 
 func TestBillingServiceOwnerIDScopesBillingState(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 2})
+	svc.InitializeUserDefaults("linuxdo:123")
 	oldKey := Identity{ID: "key-old", OwnerID: "linuxdo:123", Name: "Alice", Role: AuthRoleUser}
 	newKey := Identity{ID: "key-new", OwnerID: "linuxdo:123", Name: "Alice", Role: AuthRoleUser}
 	if err := svc.CheckAvailable(oldKey, 2); err != nil {

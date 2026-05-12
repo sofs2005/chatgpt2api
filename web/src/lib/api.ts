@@ -565,6 +565,26 @@ export type BillingAdjustmentPayload = {
   unlimited?: boolean;
 };
 
+export type BulkBillingAdjustmentPayload = {
+  scope: "users" | "role";
+  user_ids?: string[];
+  role_id?: string;
+  billing: BillingAdjustmentPayload;
+};
+
+export type BulkBillingAdjustmentResult = {
+  user_id: string;
+  billing?: BillingState | null;
+  adjustment?: BillingAdjustment;
+  error?: string;
+};
+
+export type BulkBillingAdjustmentSummary = {
+  total: number;
+  succeeded: number;
+  failed: number;
+};
+
 export type ManagedUser = {
   id: string;
   username?: string;
@@ -1352,6 +1372,19 @@ export async function createBillingAdjustment(userId: string, payload: BillingAd
   return httpRequest<
     { item?: ManagedUser; billing?: BillingState; adjustment?: BillingAdjustment; items?: ManagedUser[] } & Partial<ManagedUsersResponse>
   >(`${managedUserPath(userId)}/billing-adjustments`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function createBulkBillingAdjustment(payload: BulkBillingAdjustmentPayload) {
+  return httpRequest<
+    {
+      results?: BulkBillingAdjustmentResult[];
+      summary?: BulkBillingAdjustmentSummary;
+      items?: ManagedUser[];
+    } & Partial<ManagedUsersResponse>
+  >("/api/admin/users/billing-adjustments/bulk", {
     method: "POST",
     body: payload,
   });

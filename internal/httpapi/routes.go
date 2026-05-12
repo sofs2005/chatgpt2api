@@ -424,6 +424,40 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if len(parts) == 5 && parts[3] == "billing-adjustments" && parts[4] == "bulk" {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		targets, err := a.bulkBillingTargetUserIDs(body)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		billingBody := util.StringMap(body["billing"])
+		if len(billingBody) == 0 {
+			billingBody = body
+		}
+		results, err := a.billing.ApplyBulkAdjustment(targets, operator, billingBody)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		response, err := a.managedUsersResponse(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		response["results"] = publicBulkBillingAdjustmentResults(results)
+		response["summary"] = bulkBillingAdjustmentSummary(results)
+		util.WriteJSON(w, http.StatusOK, response)
+		return
+	}
 	userID := parts[3]
 	if len(parts) == 5 && parts[4] == "key" {
 		if r.Method != http.MethodGet {
@@ -665,6 +699,113 @@ func (a *App) attachManagedUserUsage(items []map[string]any) {
 			item[key] = value
 		}
 		item["billing"] = billingStates[userID]
+	}
+}
+
+func (a *App) bulkBillingTargetUserIDs(body map[string]any) ([]string, error) {
+	scope := strings.ToLower(strings.TrimSpace(util.Clean(body["scope"])))
+	if scope == "" {
+		scope = "users"
+	}
+	users := a.auth.ListUsers()
+	switch scope {
+	case "users":
+		rawIDs := util.AsStringSlice(body["user_ids"])
+		if len(rawIDs) == 0 {
+			rawIDs = util.AsStringSlice(body["ids"])
+		}
+		return existingManagedUserIDs(users, rawIDs)
+	case "role":
+		roleID := util.Clean(body["role_id"])
+		if roleID == "" {
+			return nil, fmt.Errorf("role id is required")
+		}
+		if !a.auth.RoleExists(roleID) {
+			return nil, fmt.Errorf("role not found")
+		}
+		return managedUserIDsByRole(users, roleID)
+	default:
+		return nil, fmt.Errorf("unsupported billing target scope: %s", scope)
+	}
+}
+
+func existingManagedUserIDs(items []map[string]any, requested []string) ([]string, error) {
+	available := map[string]struct{}{}
+	for _, item := range items {
+		if id := util.Clean(item["id"]); id != "" {
+			available[id] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(requested))
+	for _, id := range requested {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if _, ok := available[id]; !ok {
+			return nil, fmt.Errorf("user not found: %s", id)
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("user ids are required")
+	}
+	return out, nil
+}
+
+func managedUserIDsByRole(items []map[string]any, roleID string) ([]string, error) {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if util.Clean(item["role_id"]) != roleID {
+			continue
+		}
+		if id := util.Clean(item["id"]); id != "" {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("role has no users")
+	}
+	return out, nil
+}
+
+func publicBulkBillingAdjustmentResults(results []service.BillingBulkAdjustmentResult) []map[string]any {
+	out := make([]map[string]any, 0, len(results))
+	for _, result := range results {
+		item := map[string]any{
+			"user_id": result.UserID,
+			"billing": result.Billing,
+		}
+		if result.Adjustment != nil {
+			item["adjustment"] = result.Adjustment
+		}
+		if result.Error != "" {
+			item["error"] = result.Error
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func bulkBillingAdjustmentSummary(results []service.BillingBulkAdjustmentResult) map[string]any {
+	succeeded := 0
+	failed := 0
+	for _, result := range results {
+		if result.Error != "" {
+			failed++
+			continue
+		}
+		succeeded++
+	}
+	return map[string]any{
+		"total":     len(results),
+		"succeeded": succeeded,
+		"failed":    failed,
 	}
 }
 

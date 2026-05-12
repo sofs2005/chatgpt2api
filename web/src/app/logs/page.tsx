@@ -67,26 +67,40 @@ const detailLabels: Record<string, string> = {
   removed: "删除",
 };
 
-const primaryDetailKeys = [
+const summaryDetailKeys = new Set([
   "method",
   "path",
   "endpoint",
   "module",
-  "operation_type",
   "status",
   "outcome",
   "log_level",
   "duration_ms",
-  "username",
-  "key_name",
-  "session_name",
-  "auth_kind",
-  "subject_id",
-  "key_id",
-  "ip_address",
-  "started_at",
-  "ended_at",
-];
+  "response_time",
+]);
+
+const detailSectionDefinitions = [
+  {
+    title: "请求",
+    keys: ["operation_type", "ip_address", "user_agent", "model"],
+  },
+  {
+    title: "身份",
+    keys: ["username", "key_name", "session_name", "auth_kind", "key_role", "subject_id", "key_id", "provider"],
+  },
+  {
+    title: "时间",
+    keys: ["started_at", "ended_at"],
+  },
+] as const;
+
+type DetailFieldSection = {
+  title: string;
+  entries: Array<readonly [string, unknown]>;
+};
+
+const groupedDetailKeys = new Set(detailSectionDefinitions.flatMap((section) => section.keys));
+const payloadDetailKeys = new Set(["request_args", "request_body", "response_body"]);
 
 function primitiveText(value: unknown) {
   return typeof value === "string" || typeof value === "number" ? String(value) : "";
@@ -176,6 +190,10 @@ function isPrimitiveDetail(value: unknown) {
   return value === null || ["string", "number", "boolean"].includes(typeof value);
 }
 
+function isDisplayableDetailValue(value: unknown) {
+  return isPrimitiveDetail(value) && value !== null && value !== undefined && value !== "";
+}
+
 function formatDetailValue(key: string, value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
   if ((key === "duration_ms" || key === "response_time") && typeof value === "number") return `${(value / 1000).toFixed(2)} s`;
@@ -191,17 +209,45 @@ function formatDetailValue(key: string, value: unknown) {
   return String(value);
 }
 
-function getPrimaryDetailEntries(item: SystemLog | null) {
+function isRedundantDetailEntry(item: SystemLog | null, key: string, value: unknown) {
+  if (summaryDetailKeys.has(key)) {
+    return true;
+  }
+  const text = primitiveText(value);
+  if (key === "session_name" && detailText(item, "auth_kind") === "session" && text === "登录会话") {
+    return true;
+  }
+  if (text && ["username", "key_name", "session_name", "subject_id", "key_id"].includes(key)) {
+    return actorText(item) === text;
+  }
+  return false;
+}
+
+function getDetailGroupEntries(item: SystemLog | null, keys: readonly string[]) {
   const detail = item?.detail || {};
-  return primaryDetailKeys
-    .filter((key) => key in detail && isPrimitiveDetail(detail[key]))
+  return keys
+    .filter((key) => key in detail && isDisplayableDetailValue(detail[key]) && !isRedundantDetailEntry(item, key, detail[key]))
     .map((key) => [key, detail[key]] as const);
 }
 
 function getExtraDetailEntries(item: SystemLog | null) {
   const detail = item?.detail || {};
-  const skipped = new Set([...primaryDetailKeys, "urls", "error"]);
-  return Object.entries(detail).filter(([key, value]) => !skipped.has(key) && isPrimitiveDetail(value));
+  const skipped = new Set([...summaryDetailKeys, ...groupedDetailKeys, ...payloadDetailKeys, "urls", "error"]);
+  return Object.entries(detail).filter(([key, value]) => !skipped.has(key) && isDisplayableDetailValue(value));
+}
+
+function getDetailFieldSections(item: SystemLog | null) {
+  const sections: DetailFieldSection[] = detailSectionDefinitions
+    .map((section) => ({
+      title: section.title,
+      entries: getDetailGroupEntries(item, section.keys),
+    }))
+    .filter((section) => section.entries.length > 0);
+  const extraEntries = getExtraDetailEntries(item);
+  if (extraEntries.length > 0) {
+    sections.push({ title: "其他", entries: extraEntries });
+  }
+  return sections;
 }
 
 function detailJSON(item: SystemLog | null) {
@@ -235,6 +281,8 @@ function LogsContent() {
   const [isLoading, setIsLoading] = useState(true);
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
+  const detailMethod = detailText(detailLog, "method");
+  const detailFieldSections = getDetailFieldSections(detailLog);
   const pageSize = 15;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
@@ -451,7 +499,10 @@ function LogsContent() {
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">接口</div>
-                      <div className="mt-1 truncate font-medium text-foreground">{pathText(detailLog)}</div>
+                      <div className="mt-1 flex min-w-0 items-center gap-2 font-medium text-foreground">
+                        {detailMethod ? <Badge variant={methodBadgeVariant(detailMethod)} className="shrink-0 rounded-md">{detailMethod}</Badge> : null}
+                        <span className="truncate">{pathText(detailLog)}</span>
+                      </div>
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">耗时</div>
@@ -461,22 +512,26 @@ function LogsContent() {
                 </div>
               </section>
 
-              <section className="space-y-3">
-                <div className="text-sm font-semibold text-foreground">关键字段</div>
-                <div className="grid gap-2 md:grid-cols-2">
-                  {[...getPrimaryDetailEntries(detailLog), ...getExtraDetailEntries(detailLog)].map(([key, value]) => (
-                    <div key={key} className="flex min-w-0 items-start justify-between gap-4 rounded-lg border border-border bg-background px-3 py-2 text-sm">
-                      <span className="shrink-0 text-muted-foreground">{detailLabel(key)}</span>
-                      <span className="min-w-0 break-words text-right font-medium text-foreground">{formatDetailValue(key, value)}</span>
-                    </div>
-                  ))}
-                  {getPrimaryDetailEntries(detailLog).length === 0 && getExtraDetailEntries(detailLog).length === 0 ? (
-                    <div className="rounded-lg border border-border bg-background px-3 py-6 text-center text-sm text-muted-foreground md:col-span-2">
-                      没有可展示的字段
-                    </div>
-                  ) : null}
-                </div>
-              </section>
+              {detailFieldSections.length > 0 ? (
+                <section className="space-y-3">
+                  <div className="text-sm font-semibold text-foreground">补充信息</div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {detailFieldSections.map((section) => (
+                      <div key={section.title} className="rounded-xl border border-border bg-background p-3">
+                        <div className="mb-2 text-xs font-semibold text-muted-foreground">{section.title}</div>
+                        <div className="space-y-2">
+                          {section.entries.map(([key, value]) => (
+                            <div key={key} className="flex min-w-0 items-start justify-between gap-4 text-sm">
+                              <span className="shrink-0 text-muted-foreground">{detailLabel(key)}</span>
+                              <span className="min-w-0 break-words text-right font-medium text-foreground">{formatDetailValue(key, value)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
 
               {typeof detailLog?.detail?.error === "string" && detailLog.detail.error ? (
                 <section className="space-y-3">
@@ -513,13 +568,6 @@ function LogsContent() {
                   </div>
                 </section>
               ) : null}
-
-              <section className="space-y-3">
-                <div className="text-sm font-semibold text-foreground">完整 JSON</div>
-                <pre className="max-h-72 overflow-auto rounded-xl border border-border bg-muted/40 p-4 text-xs leading-6 text-foreground">
-                  {detailJSON(detailLog)}
-                </pre>
-              </section>
             </div>
           </div>
         </DialogContent>

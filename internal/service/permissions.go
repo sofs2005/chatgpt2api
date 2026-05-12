@@ -53,6 +53,8 @@ var apiPermissionCatalog = []APIPermission{
 	apiPermission("GET", "/api/images", "查看图片库", "图片库", false),
 	apiPermission("PATCH", "/api/images/visibility", "发布/收回图片", "图片库", false),
 	apiPermission("DELETE", "/api/images", "删除图片", "图片库", false),
+	apiPermission("GET", "/api/images/storage-governance", "查看图片存储治理", "图片库", false),
+	apiPermission("POST", "/api/images/storage-governance", "清理图片存储", "图片库", false),
 	apiPermission("GET", "/api/auth/users", "查看个人 API 令牌", "用户令牌", true),
 	apiPermission("POST", "/api/auth/users", "创建/更新个人 API 令牌", "用户令牌", true),
 	apiPermission("DELETE", "/api/auth/users", "删除个人 API 令牌", "用户令牌", true),

@@ -47,10 +47,6 @@ func (c testProtocolImageConfig) BaseURL() string {
 	return "https://example.test"
 }
 
-func (c testProtocolImageConfig) CleanupOldImages() int {
-	return 0
-}
-
 func TestFormatImageResultStoresOwnerName(t *testing.T) {
 	config := testProtocolImageConfig{root: t.TempDir()}
 	engine := &Engine{Config: config}

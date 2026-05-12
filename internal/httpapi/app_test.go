@@ -525,6 +525,83 @@ func TestRunLoggedImageTaskLogsTextOutputAsFailure(t *testing.T) {
 	}
 }
 
+func TestRecordGeneratedImagesForPayloadStoresReusableRequestMetadata(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	rel := "2026/05/12/reusable.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("writeHTTPTestPNG() error = %v", err)
+	}
+
+	app.recordGeneratedImagesForPayload(
+		service.Identity{ID: "admin", Role: service.AuthRoleAdmin, Name: "Admin"},
+		[]string{rel},
+		service.ImageVisibilityPublic,
+		map[string]any{
+			"prompt":             "复用这个提示词",
+			"model":              "gpt-image-2",
+			"quality":            "high",
+			"image_resolution":   "2k",
+			"size":               "2048x2048",
+			"output_format":      "jpeg",
+			"output_compression": 42,
+			"background":         "transparent",
+			"moderation":         "low",
+			"style":              "vivid",
+			"partial_images":     2,
+			"input_image_mask":   "mask-id",
+			"images": []protocol.UploadedImage{
+				{Filename: "source.png", ContentType: "image/png", Data: []byte("reference-bytes")},
+			},
+			"share_prompt_parameters": true,
+			"share_reference_images":  true,
+		},
+	)
+
+	list := app.images.ListImages("http://127.0.0.1:8000", "", "", service.ImageAccessScope{Public: true})
+	items := list["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("ListImages() = %#v", list)
+	}
+	item := items[0]
+	if item["prompt"] != "复用这个提示词" ||
+		item["model"] != "gpt-image-2" ||
+		item["quality"] != "high" ||
+		item["resolution_preset"] != "2k" ||
+		item["requested_size"] != "2048x2048" ||
+		item["output_format"] != "jpeg" ||
+		item["output_compression"] != 42 ||
+		item["background"] != "transparent" ||
+		item["moderation"] != "low" ||
+		item["style"] != "vivid" ||
+		item["partial_images"] != 2 ||
+		item["input_image_mask"] != "mask-id" {
+		t.Fatalf("reusable metadata = %#v", item)
+	}
+	referenceURLs, ok := item["reference_image_urls"].([]string)
+	if !ok || len(referenceURLs) != 1 || !strings.Contains(referenceURLs[0], "/image-references/") {
+		t.Fatalf("reference_image_urls = %#v", item["reference_image_urls"])
+	}
+	parsedReferenceURL, err := url.Parse(referenceURLs[0])
+	if err != nil {
+		t.Fatalf("parse reference url: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, parsedReferenceURL.RequestURI(), nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "reference-bytes" {
+		t.Fatalf("public reference status/body = %d %q", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("reference Content-Type = %q, want image/png", got)
+	}
+}
+
 func TestDirectImageGenerationUsesCreationLimiter(t *testing.T) {
 	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
 	app := newTestApp(t)
@@ -689,6 +766,498 @@ func TestDirectImageGenerationDoesNotLimitAdminToken(t *testing.T) {
 	}
 	if res.Code != http.StatusOK {
 		t.Fatalf("admin image generation status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestProtocolImageBillingInsufficientErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		billingType       string
+		standardBalance   string
+		subscriptionQuota string
+		wantCode          string
+		wantMessage       string
+	}{
+		{
+			name:              "standard",
+			billingType:       service.BillingTypeStandard,
+			standardBalance:   "0",
+			subscriptionQuota: "100",
+			wantCode:          "user_balance_insufficient",
+			wantMessage:       "user balance insufficient",
+		},
+		{
+			name:              "subscription",
+			billingType:       service.BillingTypeSubscription,
+			standardBalance:   "100",
+			subscriptionQuota: "0",
+			wantCode:          "user_quota_exceeded",
+			wantMessage:       "user quota exceeded",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newTestAppWithBillingDefaults(t, tc.billingType, tc.standardBalance, tc.subscriptionQuota, service.BillingPeriodMonthly)
+			defer app.Close()
+
+			_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+			if err != nil {
+				t.Fatalf("CreateAPIKey() error = %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+			req.Header.Set("Authorization", "Bearer "+rawKey)
+			res := httptest.NewRecorder()
+			app.Handler().ServeHTTP(res, req)
+			if res.Code != http.StatusTooManyRequests {
+				t.Fatalf("image generation status = %d body = %s", res.Code, res.Body.String())
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("error json: %v", err)
+			}
+			errorBody := util.StringMap(payload["error"])
+			if errorBody["type"] != "insufficient_quota" || errorBody["code"] != tc.wantCode || errorBody["message"] != tc.wantMessage {
+				t.Fatalf("error body = %#v", payload)
+			}
+		})
+	}
+}
+
+func TestProtocolBillableUnitsBoundaryAndEquivalenceClasses(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		body     map[string]any
+		want     int
+	}{
+		{
+			name:     "image generation defaults to one",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{},
+			want:     1,
+		},
+		{
+			name:     "image generation zero clamps to one",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": 0},
+			want:     1,
+		},
+		{
+			name:     "image generation negative clamps to one",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": -3},
+			want:     1,
+		},
+		{
+			name:     "image generation upper bound",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": 4},
+			want:     4,
+		},
+		{
+			name:     "image generation above upper bound clamps",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": 5},
+			want:     4,
+		},
+		{
+			name:     "text chat is free even with n",
+			endpoint: "/v1/chat/completions",
+			body: map[string]any{
+				"model":    "gpt-5",
+				"n":        4,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			},
+			want: 0,
+		},
+		{
+			name:     "image chat defaults to one",
+			endpoint: "/v1/chat/completions",
+			body: map[string]any{
+				"model":      "gpt-5",
+				"modalities": []any{"image"},
+				"messages":   []any{map[string]any{"role": "user", "content": "draw"}},
+			},
+			want: 1,
+		},
+		{
+			name:     "image chat above upper bound clamps",
+			endpoint: "/v1/chat/completions",
+			body: map[string]any{
+				"model":      "gpt-5",
+				"modalities": []any{"image"},
+				"n":          7,
+				"messages":   []any{map[string]any{"role": "user", "content": "draw"}},
+			},
+			want: 4,
+		},
+		{
+			name:     "text responses are free",
+			endpoint: "/v1/responses",
+			body: map[string]any{
+				"model": "gpt-5",
+				"input": "hello",
+			},
+			want: 0,
+		},
+		{
+			name:     "responses image tool defaults to one",
+			endpoint: "/v1/responses",
+			body: map[string]any{
+				"model": "gpt-image-2",
+				"input": "draw",
+				"tools": []any{map[string]any{"type": "image_generation"}},
+			},
+			want: 1,
+		},
+		{
+			name:     "responses image tool choice uses n upper bound",
+			endpoint: "/v1/responses",
+			body: map[string]any{
+				"model":       "gpt-image-2",
+				"input":       "draw",
+				"n":           4,
+				"tool_choice": map[string]any{"type": "image_generation"},
+			},
+			want: 4,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := protocolBillableUnits(tc.endpoint, tc.body); got != tc.want {
+				t.Fatalf("protocolBillableUnits(%q, %#v) = %d, want %d", tc.endpoint, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProtocolImageBillingStandardBalanceBoundary(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "4", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	installHTTPTestImageStream(t, app)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":4,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("image generation exact-balance status = %d body = %s", res.Code, res.Body.String())
+	}
+	state := profileBillingState(t, app, rawKey)
+	standard := util.StringMap(state["standard"])
+	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 4 || util.ToInt(state["available"], -1) != 0 {
+		t.Fatalf("billing after exact-balance image generation = %#v", state)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusTooManyRequests {
+		t.Fatalf("image generation drained-balance status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestProtocolImageBillingRejectsBeforeUpstream(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "3", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	streamCalls := 0
+	installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		streamCalls++
+		return httpTestImageOutputStream(request, index)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":4,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusTooManyRequests {
+		t.Fatalf("image generation insufficient status = %d body = %s", res.Code, res.Body.String())
+	}
+	if streamCalls != 0 {
+		t.Fatalf("insufficient request reached upstream stream %d times", streamCalls)
+	}
+	state := profileBillingState(t, app, rawKey)
+	standard := util.StringMap(state["standard"])
+	if util.ToInt(standard["balance"], -1) != 3 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 3 {
+		t.Fatalf("billing after rejected image generation = %#v", state)
+	}
+}
+
+func TestProtocolImageBillingChargesBeforeDelivery(t *testing.T) {
+	t.Run("non-stream does not return generated image when delivery charge fails", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "1", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		userID := util.Clean(user["id"])
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if _, err := app.billing.ChargeUserID(userID, 1, service.BillingReference{ChargeKey: "external:protocol:non-stream-drain"}); err != nil {
+				t.Errorf("external ChargeUserID() error = %v", err)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("image generation delivery charge status = %d body = %s", res.Code, res.Body.String())
+		}
+		if strings.Contains(res.Body.String(), "https://example.test/1.png") || strings.Contains(res.Body.String(), "image-1") {
+			t.Fatalf("unpaid generated image leaked in response body: %s", res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing after failed delivery charge = %#v", state)
+		}
+	})
+
+	t.Run("stream stops before unpaid image event", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "1", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		userID := util.Clean(user["id"])
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if _, err := app.billing.ChargeUserID(userID, 1, service.BillingReference{ChargeKey: "external:protocol:stream-drain"}); err != nil {
+				t.Errorf("external ChargeUserID() error = %v", err)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url","stream":true}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		body := res.Body.String()
+		if res.Code != http.StatusOK {
+			t.Fatalf("stream image generation status = %d body = %s", res.Code, body)
+		}
+		if strings.Contains(body, "image.generation.result") || strings.Contains(body, "https://example.test/1.png") || strings.Contains(body, "image-1") {
+			t.Fatalf("unpaid generated image leaked in stream body: %s", body)
+		}
+		if !strings.Contains(body, `"code":"user_balance_insufficient"`) || !strings.Contains(body, "data: [DONE]") {
+			t.Fatalf("stream body missing billing error or done marker: %s", body)
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing after failed stream delivery charge = %#v", state)
+		}
+	})
+}
+
+func TestProtocolBillingChatAndResponsesEquivalenceClasses(t *testing.T) {
+	t.Run("text chat does not require billing", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code == http.StatusTooManyRequests {
+			t.Fatalf("text chat was rejected by billing: %s", res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing changed after text chat = %#v", state)
+		}
+	})
+
+	t.Run("image chat consumes actual outputs", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "2", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if index > 1 {
+				return httpTestMessageOnlyImageOutputStream(request, index)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-image-2","messages":[{"role":"user","content":"draw"}],"n":2}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("image chat status = %d body = %s", res.Code, res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 1 {
+			t.Fatalf("billing after partial image chat = %#v", state)
+		}
+	})
+
+	t.Run("image chat insufficient rejects before upstream", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		streamCalls := 0
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			streamCalls++
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","modalities":["image"],"messages":[{"role":"user","content":"draw"}],"n":1}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("image chat insufficient status = %d body = %s", res.Code, res.Body.String())
+		}
+		if streamCalls != 0 {
+			t.Fatalf("insufficient image chat reached upstream stream %d times", streamCalls)
+		}
+	})
+
+	t.Run("text responses do not require billing", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5","input":"hello"}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code == http.StatusTooManyRequests {
+			t.Fatalf("text responses was rejected by billing: %s", res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing changed after text responses = %#v", state)
+		}
+	})
+
+	t.Run("responses image tool insufficient rejects before upstream", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		streamCalls := 0
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			streamCalls++
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-image-2","input":"draw","tools":[{"type":"image_generation"}]}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("responses image insufficient status = %d body = %s", res.Code, res.Body.String())
+		}
+		if streamCalls != 0 {
+			t.Fatalf("insufficient responses image reached upstream stream %d times", streamCalls)
+		}
+	})
+}
+
+func TestProtocolBillingAdminBypassAndUserAdjustmentPermission(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+	installHTTPTestImageStream(t, app)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":4,"response_format":"url"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin image generation status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/users/"+url.PathEscape(util.Clean(user["id"]))+"/billing-adjustments", strings.NewReader(`{"type":"increase_balance","amount":1,"reason":"user attempt"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("user billing adjustment status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestProfileAndManagedUsersExposeBillingState(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeSubscription, "0", "12", service.BillingPeriodWeekly)
+	defer app.Close()
+
+	user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	userID, _ := user["id"].(string)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("profile status = %d body = %s", res.Code, res.Body.String())
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("profile json: %v", err)
+	}
+	billing := util.StringMap(profile["billing"])
+	subscription := util.StringMap(billing["subscription"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], 0) != 12 || subscription["quota_period"] != service.BillingPeriodWeekly {
+		t.Fatalf("profile billing = %#v", billing)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var users map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &users); err != nil {
+		t.Fatalf("admin users json: %v", err)
+	}
+	item := findHTTPItem(logItems(users), userID)
+	if item == nil {
+		t.Fatalf("managed user %q missing from %#v", userID, users)
+	}
+	billing = util.StringMap(item["billing"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], 0) != 12 {
+		t.Fatalf("managed user billing = %#v", item["billing"])
 	}
 }
 
@@ -1161,16 +1730,8 @@ func TestImageManagementIsScopedByOwner(t *testing.T) {
 		t.Fatalf("admin public gallery json: %v", err)
 	}
 	items = logItems(list)
-	if len(items) != 3 {
-		t.Fatalf("admin public gallery should see all images, got %#v", list)
-	}
-	seenPaths := make(map[string]bool, len(items))
-	for _, item := range items {
-		path, _ := item["path"].(string)
-		seenPaths[path] = true
-	}
-	if !seenPaths[aliceRel] || !seenPaths[bobRel] || !seenPaths[legacyRel] {
-		t.Fatalf("admin public gallery paths = %#v", items)
+	if len(items) != 0 {
+		t.Fatalf("admin public gallery should only show public images, got %#v", list)
 	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/images", strings.NewReader(`{"paths":["`+bobRel+`","`+aliceRel+`"]}`))
@@ -1254,7 +1815,25 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	if err := writeHTTPTestPNG(imagePath); err != nil {
 		t.Fatalf("write image: %v", err)
 	}
-	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate)
+	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate, service.GeneratedImageMetadata{
+		ReferenceImages: []service.GeneratedImageReference{
+			{Filename: "private-source.png", ContentType: "image/png", Data: []byte("private-reference")},
+		},
+	})
+	privateList := app.images.ListImages("http://127.0.0.1:8000", "", "", service.ImageAccessScope{All: true})
+	privateItems := privateList["items"].([]map[string]any)
+	if len(privateItems) != 1 {
+		t.Fatalf("private image list = %#v", privateList)
+	}
+	privateReferenceURLs, ok := privateItems[0]["reference_image_urls"].([]string)
+	if !ok || len(privateReferenceURLs) != 1 {
+		t.Fatalf("private reference urls = %#v", privateItems[0])
+	}
+	parsedPrivateReferenceURL, err := url.Parse(privateReferenceURLs[0])
+	if err != nil {
+		t.Fatalf("parse private reference url: %v", err)
+	}
+	privateReferencePath := parsedPrivateReferenceURL.RequestURI()
 
 	req := httptest.NewRequest(http.MethodGet, "/images/2026/05/01", nil)
 	res := httptest.NewRecorder()
@@ -1268,6 +1847,29 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous private image status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private reference status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	req.Header.Set("Authorization", "Bearer "+bobKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("other user private reference status = %d body = %q, want 404", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "private-reference" {
+		t.Fatalf("owner private reference status/body = %d %q", res.Code, res.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
@@ -1316,6 +1918,23 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("anonymous public image status = %d body = %q", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous unshared public reference status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	if _, err := app.images.UpdateImageVisibility(rel, service.ImageVisibilityPublic, service.ImageAccessScope{OwnerID: owner.ID}, service.ImageVisibilityUpdateOptions{SharePromptParams: true, ShareReferences: true}); err != nil {
+		t.Fatalf("publish reference metadata: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "private-reference" {
+		t.Fatalf("anonymous shared public reference status/body = %d %q", res.Code, res.Body.String())
 	}
 }
 
@@ -2638,6 +3257,64 @@ func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
 	}
 }
 
+func TestImageStorageGovernanceEndpointCleansThumbnails(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	rel := "2026/04/29/sample.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("mkdir image dir: %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	app.images.RecordGeneratedImages([]string{rel}, "admin", "Admin", service.ImageVisibilityPrivate)
+	app.images.EnsureThumbnails([]string{rel})
+	thumbPath := filepath.Join(app.config.ImageThumbnailsDir(), filepath.FromSlash(rel)+".jpg")
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("thumbnail was not created: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/images/storage-governance", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("storage governance status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("storage governance json: %v", err)
+	}
+	governance, _ := payload["governance"].(map[string]any)
+	if governance["images_count"] != float64(1) || governance["thumbnail_files"] != float64(1) {
+		t.Fatalf("storage governance = %#v", governance)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/images/storage-governance", strings.NewReader(`{"action":"thumbnails"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("thumbnail cleanup status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("thumbnail cleanup json: %v", err)
+	}
+	cleanup, _ := payload["cleanup"].(map[string]any)
+	if cleanup["deleted_thumbnails"] != float64(1) || cleanup["deleted_images"] != float64(0) {
+		t.Fatalf("thumbnail cleanup = %#v", cleanup)
+	}
+	if _, err := os.Stat(imagePath); err != nil {
+		t.Fatalf("image should remain after thumbnail cleanup: %v", err)
+	}
+	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
+		t.Fatalf("thumbnail still exists, stat error = %v", err)
+	}
+}
+
 func logItems(payload map[string]any) []map[string]any {
 	rawItems, _ := payload["items"].([]any)
 	items := make([]map[string]any, 0, len(rawItems))
@@ -2745,11 +3422,19 @@ func waitForHTTPTestCondition(t *testing.T, ok func() bool) {
 }
 
 func newTestApp(t *testing.T) *App {
+	return newTestAppWithBillingDefaults(t, "standard", "1000", "1000", "monthly")
+}
+
+func newTestAppWithBillingDefaults(t *testing.T, billingType, standardBalance, subscriptionQuota, subscriptionPeriod string) *App {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)
 	t.Setenv("CHATGPT2API_ADMIN_USERNAME", testAdminUsername)
 	t.Setenv("CHATGPT2API_ADMIN_PASSWORD", testAdminPassword)
+	t.Setenv("CHATGPT2API_DEFAULT_BILLING_TYPE", billingType)
+	t.Setenv("CHATGPT2API_DEFAULT_STANDARD_BALANCE", standardBalance)
+	t.Setenv("CHATGPT2API_DEFAULT_SUBSCRIPTION_QUOTA", subscriptionQuota)
+	t.Setenv("CHATGPT2API_DEFAULT_SUBSCRIPTION_PERIOD", subscriptionPeriod)
 	unsetTestEnv(t, "CHATGPT2API_REGISTRATION_ENABLED")
 	t.Setenv("STORAGE_BACKEND", "json")
 	t.Setenv("DATABASE_URL", "")
@@ -2761,6 +3446,77 @@ func newTestApp(t *testing.T) *App {
 		return map[string]any{"object": "list", "data": []map[string]any{}}, nil
 	}
 	return app
+}
+
+func installHTTPTestImageStream(t *testing.T, app *App) {
+	t.Helper()
+	installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		return httpTestImageOutputStream(request, index)
+	})
+}
+
+func installHTTPTestImageStreamFunc(t *testing.T, app *App, fn func(context.Context, *backend.Client, protocol.ConversationRequest, int, int) (<-chan protocol.ImageOutput, <-chan error)) {
+	t.Helper()
+	app.engine.ImageTokenProvider = func(context.Context) (string, error) {
+		return "test-token", nil
+	}
+	app.engine.ImageClientFactory = func(string) *backend.Client {
+		return nil
+	}
+	app.engine.StreamImageOutputsFunc = fn
+}
+
+func httpTestImageOutputStream(request protocol.ConversationRequest, index int) (<-chan protocol.ImageOutput, <-chan error) {
+	out := make(chan protocol.ImageOutput, 1)
+	errCh := make(chan error, 1)
+	out <- protocol.ImageOutput{
+		Kind:    "result",
+		Model:   request.Model,
+		Index:   index,
+		Total:   request.N,
+		Created: int64(index),
+		Data: []map[string]any{{
+			"url":      fmt.Sprintf("https://example.test/%d.png", index),
+			"b64_json": fmt.Sprintf("image-%d", index),
+		}},
+	}
+	close(out)
+	errCh <- nil
+	close(errCh)
+	return out, errCh
+}
+
+func httpTestMessageOnlyImageOutputStream(request protocol.ConversationRequest, index int) (<-chan protocol.ImageOutput, <-chan error) {
+	out := make(chan protocol.ImageOutput, 1)
+	errCh := make(chan error, 1)
+	out <- protocol.ImageOutput{
+		Kind:    "message",
+		Model:   request.Model,
+		Index:   index,
+		Total:   request.N,
+		Created: int64(index),
+		Text:    "text only",
+	}
+	close(out)
+	errCh <- nil
+	close(errCh)
+	return out, errCh
+}
+
+func profileBillingState(t *testing.T, app *App, rawKey string) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("profile status = %d body = %s", res.Code, res.Body.String())
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("profile json: %v", err)
+	}
+	return util.StringMap(profile["billing"])
 }
 
 func unsetTestEnv(t *testing.T, key string) {

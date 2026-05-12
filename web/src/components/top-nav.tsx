@@ -21,7 +21,7 @@ import {
 } from "@/store/auth";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { fetchAccounts, logout, type Account } from "@/lib/api";
+import { fetchAccounts, logout, type Account, type BillingState } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   applyColorTheme,
@@ -57,6 +57,16 @@ const reducedNavActiveTransition: Transition = {
 function formatAvailableQuota(accounts: Account[]) {
   const availableAccounts = accounts.filter((account) => account.status !== "禁用");
   return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+}
+
+function formatBillingQuota(billing?: BillingState | null) {
+  if (!billing) {
+    return "--";
+  }
+  if (billing.unlimited) {
+    return "无限";
+  }
+  return String(Math.max(0, Number(billing.available) || 0));
 }
 
 function ThemeToggleButton({
@@ -298,6 +308,10 @@ export function TopNav() {
   }, []);
 
   useEffect(() => {
+    if (session?.role === "user") {
+      setAvailableQuota(formatBillingQuota(session.billing));
+      return;
+    }
     if (!hasAPIPermission(session, "GET", "/api/accounts")) {
       setAvailableQuota("--");
       return;

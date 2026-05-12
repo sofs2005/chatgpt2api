@@ -59,13 +59,12 @@ const (
 )
 
 type Store struct {
-	mu              sync.RWMutex
-	RootDir         string
-	DataDir         string
-	EnvFile         string
-	data            map[string]any
-	externalEnvKeys map[string]struct{}
-	storageBackend  storage.Backend
+	mu             sync.RWMutex
+	RootDir        string
+	DataDir        string
+	EnvFile        string
+	data           map[string]any
+	storageBackend storage.Backend
 }
 
 type LinuxDoOAuthConfig struct {
@@ -94,18 +93,10 @@ func NewStore() (*Store, error) {
 	envFile := filepath.Join(root, ".env")
 	envFileValues := readEnvObject(envFile)
 	s := &Store{
-		RootDir:         root,
-		DataDir:         filepath.Join(root, "data"),
-		EnvFile:         envFile,
-		data:            map[string]any{},
-		externalEnvKeys: map[string]struct{}{},
-	}
-	for _, item := range os.Environ() {
-		key, value, _ := strings.Cut(item, "=")
-		if fileValue, ok := envFileValues[key]; ok && value == fileValue {
-			continue
-		}
-		s.externalEnvKeys[key] = struct{}{}
+		RootDir: root,
+		DataDir: filepath.Join(root, "data"),
+		EnvFile: envFile,
+		data:    map[string]any{},
 	}
 	if err := os.MkdirAll(s.DataDir, 0o755); err != nil {
 		return nil, err
@@ -549,32 +540,27 @@ func (s *Store) StorageBackend() (storage.Backend, error) {
 
 func (s *Store) settingValue(key string, fallback any) any {
 	envKey := settingEnvKeys[key]
-	if value, ok := os.LookupEnv(envKey); ok {
+	s.mu.RLock()
+	if value, ok := s.data[key]; ok {
+		s.mu.RUnlock()
 		return value
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if value, ok := s.data[key]; ok {
-		return value
+	s.mu.RUnlock()
+	if envKey != "" {
+		if value, ok := os.LookupEnv(envKey); ok {
+			return value
+		}
 	}
 	return fallback
 }
 
 func (s *Store) settingValueFromData(data map[string]any, key string, fallback any) any {
-	envKey := settingEnvKeys[key]
-	if envKey != "" {
-		if value, ok := os.LookupEnv(envKey); ok {
-			if _, external := s.externalEnvKeys[envKey]; external {
-				return value
-			}
-		}
-	}
 	if data != nil {
 		if value, ok := data[key]; ok {
 			return value
 		}
 	}
-	if envKey != "" {
+	if envKey := settingEnvKeys[key]; envKey != "" {
 		if value, ok := os.LookupEnv(envKey); ok {
 			return value
 		}
@@ -689,9 +675,7 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	for key, value := range updates {
-		if _, external := s.externalEnvKeys[key]; !external {
-			_ = os.Setenv(key, value)
-		}
+		_ = os.Setenv(key, value)
 	}
 	return nil
 }

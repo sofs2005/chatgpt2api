@@ -263,6 +263,9 @@ export type ManagedImage = {
   owner_id?: string;
   owner_name?: string;
   visibility: ImageVisibility;
+  prompt?: string;
+  model?: ImageModel;
+  quality?: ImageQuality;
   date: string;
   size: number;
   url: string;
@@ -272,6 +275,23 @@ export type ManagedImage = {
   resolution?: string;
   resolution_preset?: string;
   requested_size?: string;
+  output_format?: ImageOutputFormat;
+  output_compression?: number;
+  background?: string;
+  moderation?: string;
+  style?: string;
+  partial_images?: number;
+  input_image_mask?: string;
+  reference_image_urls?: string[];
+  reference_images?: Array<{
+    path: string;
+    url?: string;
+    filename?: string;
+    content_type?: string;
+    size?: number;
+  }>;
+  share_prompt_parameters?: boolean;
+  share_reference_images?: boolean;
   aspect_ratio?: string;
   orientation?: string;
   megapixels?: number;
@@ -1031,12 +1051,21 @@ export async function fetchManagedImages(
   };
 }
 
-export async function updateManagedImageVisibility(path: string, visibility: ImageVisibility) {
+export async function updateManagedImageVisibility(
+  path: string,
+  visibility: ImageVisibility,
+  options: { sharePromptParameters?: boolean; shareReferenceImages?: boolean } = {},
+) {
   return httpRequest<{ item: Partial<ManagedImage> & { path: string; visibility: ImageVisibility } }>(
     "/api/images/visibility",
     {
       method: "PATCH",
-      body: { path, visibility },
+      body: {
+        path,
+        visibility,
+        ...(visibility === "public" && options.sharePromptParameters ? { share_prompt_parameters: true } : {}),
+        ...(visibility === "public" && options.sharePromptParameters && options.shareReferenceImages ? { share_reference_images: true } : {}),
+      },
     },
   );
 }

@@ -492,6 +492,127 @@ func TestImageServiceListImagesReturnsRequestedResolutionPreset(t *testing.T) {
 	}
 }
 
+func TestImageServiceListImagesReturnsGenerationReuseMetadata(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	rel := "2026/04/29/reusable.png"
+	path := filepath.Join(config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeTestPNG(path); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	outputCompression := 42
+	partialImages := 2
+	service := NewImageService(config)
+	service.RecordGeneratedImages([]string{rel}, "linuxdo:123", "alice", ImageVisibilityPublic, GeneratedImageMetadata{
+		Prompt:            "draw a reusable image",
+		Model:             "gpt-image-2",
+		Quality:           "high",
+		ResolutionPreset:  "2k",
+		RequestedSize:     "2048x2048",
+		OutputFormat:      "jpeg",
+		OutputCompression: &outputCompression,
+		Background:        "transparent",
+		Moderation:        "low",
+		Style:             "vivid",
+		PartialImages:     &partialImages,
+		InputImageMask:    "mask-id",
+		ReferenceImages: []GeneratedImageReference{
+			{Filename: "原始参考图.png", ContentType: "image/png", Data: []byte("reference-bytes")},
+		},
+		SharePromptParams: true,
+		ShareReferences:   true,
+	})
+
+	list := service.ListImages("http://127.0.0.1:8000", "", "", ImageAccessScope{Public: true})
+	items := list["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("ListImages() = %#v", list)
+	}
+	item := items[0]
+	if item["prompt"] != "draw a reusable image" ||
+		item["model"] != "gpt-image-2" ||
+		item["quality"] != "high" ||
+		item["resolution_preset"] != "2k" ||
+		item["requested_size"] != "2048x2048" ||
+		item["output_format"] != "jpeg" ||
+		item["output_compression"] != 42 ||
+		item["background"] != "transparent" ||
+		item["moderation"] != "low" ||
+		item["style"] != "vivid" ||
+		item["partial_images"] != 2 ||
+		item["input_image_mask"] != "mask-id" {
+		t.Fatalf("reuse metadata = %#v", item)
+	}
+	referenceURLs, ok := item["reference_image_urls"].([]string)
+	if !ok || len(referenceURLs) != 1 || !strings.Contains(referenceURLs[0], "/image-references/") {
+		t.Fatalf("reference_image_urls = %#v", item["reference_image_urls"])
+	}
+	referenceItems, ok := item["reference_images"].([]map[string]any)
+	if !ok || len(referenceItems) != 1 || referenceItems[0]["url"] != referenceURLs[0] {
+		t.Fatalf("reference_images = %#v", item["reference_images"])
+	}
+	access, err := service.ImageReferenceFileAccess(referenceURLs[0])
+	if err != nil {
+		t.Fatalf("ImageReferenceFileAccess() error = %v", err)
+	}
+	if access.SourceRel != rel || access.ContentType != "image/png" {
+		t.Fatalf("reference access = %#v", access)
+	}
+	data, err := os.ReadFile(access.Path)
+	if err != nil {
+		t.Fatalf("ReadFile(reference) error = %v", err)
+	}
+	if string(data) != "reference-bytes" {
+		t.Fatalf("reference data = %q", data)
+	}
+	if _, err := service.DeleteImages([]string{rel}, ImageAccessScope{OwnerID: "linuxdo:123"}); err != nil {
+		t.Fatalf("DeleteImages() error = %v", err)
+	}
+	if _, err := os.Stat(access.Path); !os.IsNotExist(err) {
+		t.Fatalf("reference path still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestImageServicePublicListHidesUnsharedGenerationMetadata(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	rel := "2026/04/29/unshared.png"
+	path := filepath.Join(config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeTestPNG(path); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(config)
+	service.RecordGeneratedImages([]string{rel}, "linuxdo:123", "alice", ImageVisibilityPublic, GeneratedImageMetadata{
+		Prompt: "private recipe",
+		ReferenceImages: []GeneratedImageReference{
+			{Filename: "source.png", ContentType: "image/png", Data: []byte("reference-bytes")},
+		},
+	})
+
+	publicList := service.ListImages("http://127.0.0.1:8000", "", "", ImageAccessScope{Public: true})
+	publicItems := publicList["items"].([]map[string]any)
+	if len(publicItems) != 1 {
+		t.Fatalf("public ListImages() = %#v", publicList)
+	}
+	if publicItems[0]["prompt"] != nil || publicItems[0]["reference_image_urls"] != nil {
+		t.Fatalf("public item exposed unshared metadata = %#v", publicItems[0])
+	}
+
+	ownerList := service.ListImages("http://127.0.0.1:8000", "", "", ImageAccessScope{OwnerID: "linuxdo:123"})
+	ownerItems := ownerList["items"].([]map[string]any)
+	if len(ownerItems) != 1 || ownerItems[0]["prompt"] != "private recipe" || ownerItems[0]["reference_image_urls"] == nil {
+		t.Fatalf("owner item did not include private metadata = %#v", ownerList)
+	}
+}
+
 func TestImageServiceDeleteImagesRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
 	outsidePath := filepath.Join(root, "outside.png")

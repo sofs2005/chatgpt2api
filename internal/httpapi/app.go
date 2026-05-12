@@ -184,7 +184,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	billingRef := a.protocolBillingReference(identity, "/v1/images/generations", model)
 	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, billingRef)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, billingRef, body)
 }
 
 func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +209,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	a.attachCreationTaskLimiter(body, identity)
+	body["images"] = images
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
@@ -222,7 +223,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	billingRef := a.protocolBillingReference(identity, "/v1/images/edits", model)
 	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, billingRef)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, billingRef, body)
 }
 
 func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -292,7 +293,7 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})
 }
 
-func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, billingRef service.BillingReference) {
+func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, billingRef service.BillingReference, imagePayloads ...map[string]any) {
 	start := time.Now()
 	requestCapture := requestAuditCapture(r.Context())
 	if err != nil {
@@ -303,7 +304,7 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 	}
 	if stream == nil {
 		urls := collectURLs(result)
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
 		util.WriteJSON(w, http.StatusOK, result)
@@ -324,14 +325,14 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			}
 		}
 		if err := <-stream.Err; err != nil {
-			a.recordGeneratedImages(identity, urls, visibility)
+			a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 			a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 			markRequestBusinessLogged(r)
 			fmt.Fprintf(w, "event: error\n")
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
 			return
 		}
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
 		return
@@ -349,12 +350,12 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		}
 	}
 	if err := <-stream.Err; err != nil {
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 		markRequestBusinessLogged(r)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
 	}
@@ -781,11 +782,16 @@ func (a *App) handleImageVisibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	visibility := util.Clean(body["visibility"])
+	sharePromptParams := util.ToBool(body["share_prompt_parameters"])
+	shareReferences := sharePromptParams && util.ToBool(body["share_reference_images"])
 	scope := service.ImageAccessScope{OwnerID: identityScope(identity)}
 	if identity.Role == service.AuthRoleAdmin {
 		scope = service.ImageAccessScope{All: true}
 	}
-	item, err := a.images.UpdateImageVisibility(path, visibility, scope)
+	item, err := a.images.UpdateImageVisibility(path, visibility, scope, service.ImageVisibilityUpdateOptions{
+		SharePromptParams: sharePromptParams,
+		ShareReferences:   shareReferences,
+	})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err.Error() == "image not found" {
@@ -811,6 +817,42 @@ func (a *App) handleImageFile(w http.ResponseWriter, r *http.Request) {
 	ref, ok := a.authorizeImageFileRequest(w, r, rel)
 	if !ok {
 		return
+	}
+	http.ServeFile(w, r, ref.Path)
+}
+
+func (a *App) handleImageReferenceFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	rel, err := imageReferenceFileRequestPath(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ref, err := a.images.ImageReferenceFileAccess(rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if ref.Visibility == service.ImageVisibilityPublic && ref.Shared {
+		if ref.ContentType != "" {
+			w.Header().Set("Content-Type", ref.ContentType)
+		}
+		http.ServeFile(w, r, ref.Path)
+		return
+	}
+	identity, ok := a.imageRequestIdentity(w, r)
+	if !ok {
+		return
+	}
+	if identity.Role != service.AuthRoleAdmin && (ref.OwnerID == "" || ref.OwnerID != identityScope(identity)) {
+		http.NotFound(w, r)
+		return
+	}
+	if ref.ContentType != "" {
+		w.Header().Set("Content-Type", ref.ContentType)
 	}
 	http.ServeFile(w, r, ref.Path)
 }
@@ -870,6 +912,18 @@ func (a *App) handleImageThumbnail(w http.ResponseWriter, r *http.Request) {
 
 func imageFileRequestPath(r *http.Request) (string, error) {
 	raw := strings.TrimPrefix(r.URL.EscapedPath(), "/images/")
+	if raw == "" || raw == r.URL.EscapedPath() {
+		return "", errors.New("invalid image path")
+	}
+	rel, err := url.PathUnescape(raw)
+	if err != nil {
+		return "", err
+	}
+	return rel, nil
+}
+
+func imageReferenceFileRequestPath(r *http.Request) (string, error) {
+	raw := strings.TrimPrefix(r.URL.EscapedPath(), "/image-references/")
 	if raw == "" || raw == r.URL.EscapedPath() {
 		return "", errors.New("invalid image path")
 	}
@@ -1151,22 +1205,25 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 		return nil, nil, err
 	}
 	body := map[string]any{
-		"client_task_id":     firstForm(r.MultipartForm, "client_task_id"),
-		"prompt":             firstForm(r.MultipartForm, "prompt"),
-		"model":              firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
-		"n":                  util.ToInt(firstForm(r.MultipartForm, "n"), 1),
-		"size":               firstForm(r.MultipartForm, "size"),
-		"quality":            firstForm(r.MultipartForm, "quality"),
-		"background":         firstForm(r.MultipartForm, "background"),
-		"moderation":         firstForm(r.MultipartForm, "moderation"),
-		"style":              firstForm(r.MultipartForm, "style"),
-		"partial_images":     firstForm(r.MultipartForm, "partial_images"),
-		"input_image_mask":   firstForm(r.MultipartForm, "input_image_mask"),
-		"output_format":      firstForm(r.MultipartForm, "output_format"),
-		"output_compression": firstForm(r.MultipartForm, "output_compression"),
-		"visibility":         firstForm(r.MultipartForm, "visibility"),
-		"response_format":    firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
-		"stream":             util.ToBool(firstForm(r.MultipartForm, "stream")),
+		"client_task_id":          firstForm(r.MultipartForm, "client_task_id"),
+		"prompt":                  firstForm(r.MultipartForm, "prompt"),
+		"model":                   firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
+		"n":                       util.ToInt(firstForm(r.MultipartForm, "n"), 1),
+		"size":                    firstForm(r.MultipartForm, "size"),
+		"image_resolution":        firstForm(r.MultipartForm, "image_resolution"),
+		"quality":                 firstForm(r.MultipartForm, "quality"),
+		"background":              firstForm(r.MultipartForm, "background"),
+		"moderation":              firstForm(r.MultipartForm, "moderation"),
+		"style":                   firstForm(r.MultipartForm, "style"),
+		"partial_images":          firstForm(r.MultipartForm, "partial_images"),
+		"input_image_mask":        firstForm(r.MultipartForm, "input_image_mask"),
+		"output_format":           firstForm(r.MultipartForm, "output_format"),
+		"output_compression":      firstForm(r.MultipartForm, "output_compression"),
+		"share_prompt_parameters": firstForm(r.MultipartForm, "share_prompt_parameters"),
+		"share_reference_images":  firstForm(r.MultipartForm, "share_reference_images"),
+		"visibility":              firstForm(r.MultipartForm, "visibility"),
+		"response_format":         firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
+		"stream":                  util.ToBool(firstForm(r.MultipartForm, "stream")),
 	}
 	if rawMessages := strings.TrimSpace(firstForm(r.MultipartForm, "messages")); rawMessages != "" {
 		var messages any
@@ -1390,9 +1447,6 @@ func imageListAccessScope(identity service.Identity, value string) (service.Imag
 	case "mine":
 		return service.ImageAccessScope{OwnerID: identityScope(identity)}, 0, ""
 	case "public":
-		if identity.Role == service.AuthRoleAdmin {
-			return service.ImageAccessScope{All: true}, 0, ""
-		}
 		return service.ImageAccessScope{Public: true}, 0, ""
 	case "all":
 		if identity.Role != service.AuthRoleAdmin {
@@ -1412,16 +1466,82 @@ func (a *App) recordGeneratedImages(identity service.Identity, urls []string, vi
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility)
 }
 
+func (a *App) recordProtocolGeneratedImages(identity service.Identity, urls []string, visibility string, payloads ...map[string]any) {
+	if len(payloads) > 0 && payloads[0] != nil {
+		a.recordGeneratedImagesForPayload(identity, urls, visibility, payloads[0])
+		return
+	}
+	a.recordGeneratedImages(identity, urls, visibility)
+}
+
 func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []string, visibility string, payload map[string]any) {
 	if len(urls) == 0 || a.images == nil {
 		return
 	}
 	ownerID := identityScope(identity)
+	outputCompression, hasOutputCompression := imageOutputCompressionFromBody(payload["output_compression"])
+	var outputCompressionPtr *int
+	if hasOutputCompression {
+		outputCompressionPtr = &outputCompression
+	}
+	var partialImagesPtr *int
+	if partialImages := util.ToInt(payload["partial_images"], 0); partialImages > 0 {
+		partialImagesPtr = &partialImages
+	}
+	sharePromptParams := util.ToBool(payload["share_prompt_parameters"])
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility, service.GeneratedImageMetadata{
-		ResolutionPreset: util.Clean(payload["image_resolution"]),
-		RequestedSize:    util.Clean(payload["size"]),
-		OutputFormat:     service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
+		Prompt:            util.Clean(payload["prompt"]),
+		Model:             firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto),
+		Quality:           util.Clean(payload["quality"]),
+		ResolutionPreset:  util.Clean(payload["image_resolution"]),
+		RequestedSize:     util.Clean(payload["size"]),
+		OutputFormat:      service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
+		OutputCompression: outputCompressionPtr,
+		Background:        util.Clean(payload["background"]),
+		Moderation:        util.Clean(payload["moderation"]),
+		Style:             util.Clean(payload["style"]),
+		PartialImages:     partialImagesPtr,
+		InputImageMask:    util.Clean(payload["input_image_mask"]),
+		ReferenceImages:   imageReferenceMetadataFromPayload(payload),
+		SharePromptParams: sharePromptParams,
+		ShareReferences:   sharePromptParams && util.ToBool(payload["share_reference_images"]),
 	})
+}
+
+func imageReferenceMetadataFromPayload(payload map[string]any) []service.GeneratedImageReference {
+	if payload == nil {
+		return nil
+	}
+	images := uploadedImagesFromPayload(payload["images"])
+	if len(images) == 0 {
+		images = protocol.ExtractChatContextImages(payload)
+	}
+	if len(images) == 0 {
+		return nil
+	}
+	refs := make([]service.GeneratedImageReference, 0, len(images))
+	for _, image := range images {
+		if len(image.Data) == 0 {
+			continue
+		}
+		refs = append(refs, service.GeneratedImageReference{
+			Filename:    image.Filename,
+			ContentType: image.ContentType,
+			Data:        append([]byte(nil), image.Data...),
+		})
+	}
+	return refs
+}
+
+func uploadedImagesFromPayload(value any) []protocol.UploadedImage {
+	switch images := value.(type) {
+	case []protocol.UploadedImage:
+		return images
+	case protocol.UploadedImage:
+		return []protocol.UploadedImage{images}
+	default:
+		return nil
+	}
 }
 
 func (a *App) checkProtocolBilling(identity service.Identity, amount int) error {

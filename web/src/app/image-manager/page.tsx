@@ -1,15 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Copy, Download, Eye, Globe2, ImageIcon, LoaderCircle, Lock, MoreHorizontal, RefreshCw, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { Check, Copy, Download, Eye, Globe2, ImageIcon, LoaderCircle, Lock, MoreHorizontal, RefreshCw, Search, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
+import { writeSimilarImageIntent } from "@/app/image/similar-image-intent";
 import { AuthenticatedImage } from "@/components/authenticated-image";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -45,7 +48,7 @@ import {
 import { formatImageFileSize } from "@/lib/image-size";
 import { cn } from "@/lib/utils";
 import { useAuthGuard } from "@/lib/use-auth-guard";
-import { hasAPIPermission, type StoredAuthSession } from "@/store/auth";
+import { canAccessPath, hasAPIPermission, type StoredAuthSession } from "@/store/auth";
 
 function getManagedImageFormatLabel(item: ManagedImage) {
   const normalized = (item.name || item.url).split("?")[0]?.match(/\.([a-z0-9]+)$/i)?.[1] || "image";
@@ -105,6 +108,15 @@ type DeleteImageTarget = {
   paths: string[];
 };
 
+type PublishImageTarget = {
+  items: ManagedImage[];
+};
+
+type PublishRecipeOptions = {
+  sharePromptParameters: boolean;
+  shareReferenceImages: boolean;
+};
+
 type ImageVisibilityFilter = "all" | ImageVisibility;
 type ImageFormatFilter = "all" | "png" | "jpg" | "webp" | "gif" | "other";
 type ImageOrientationFilter = "all" | "landscape" | "portrait" | "square" | "unknown";
@@ -148,6 +160,22 @@ function getManagedImageFormat(item: ManagedImage) {
 
 function imageOwnerLabel(item: ManagedImage) {
   return item.owner_name?.trim() || "未知用户";
+}
+
+function reusableImagePrompt(item: ManagedImage) {
+  return item.share_prompt_parameters && item.prompt?.trim()
+    ? item.prompt.trim()
+    : "参考这张图，生成一张风格、主体和构图相近的新图片。";
+}
+
+function reusableImageReferenceUrls(item: ManagedImage) {
+  if (!item.share_reference_images) {
+    return [item.url];
+  }
+  const urls = item.reference_image_urls?.length
+    ? item.reference_image_urls
+    : item.reference_images?.map((reference) => reference.url || "").filter(Boolean);
+  return urls && urls.length > 0 ? Array.from(new Set(urls.map((url) => url.trim()).filter(Boolean))) : [item.url];
 }
 
 function getManagedImageOrientation(item: ManagedImage): ImageOrientationFilter {
@@ -317,6 +345,10 @@ function matchesManagedImageKeyword(item: ManagedImage, keyword: string) {
     item.url,
     item.owner_name,
     item.owner_id,
+    item.prompt,
+    item.model,
+    item.quality,
+    item.output_format,
     item.created_at,
     item.date,
     getManagedImageResolution(item),
@@ -398,12 +430,15 @@ function useOrderedImageMasonryColumns(items: ManagedImage[]) {
 function ImageManagerContent({
   cacheScope,
   canDeleteImages,
+  canGenerateSimilar,
   isAdmin,
 }: {
   cacheScope: string;
   canDeleteImages: boolean;
+  canGenerateSimilar: boolean;
   isAdmin: boolean;
 }) {
+  const navigate = useNavigate();
   const activeLoadRef = useRef<AbortController | null>(null);
   const autoRefreshAbortRef = useRef<AbortController | null>(null);
   const loadMoreTargetRef = useRef<HTMLDivElement | null>(null);
@@ -417,6 +452,11 @@ function ImageManagerContent({
   const [selectedImageIds, setSelectedImageIds] = useState<Record<string, boolean>>({});
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteImageTarget | null>(null);
+  const [publishTarget, setPublishTarget] = useState<PublishImageTarget | null>(null);
+  const [publishRecipeOptions, setPublishRecipeOptions] = useState<PublishRecipeOptions>({
+    sharePromptParameters: false,
+    shareReferenceImages: false,
+  });
   const [isDeleting, setIsDeleting] = useState(false);
   const [visibilityMutatingPath, setVisibilityMutatingPath] = useState<string | null>(null);
   const [focusedImagePath, setFocusedImagePath] = useState<string | null>(null);
@@ -754,6 +794,29 @@ function ImageManagerContent({
     }
   };
 
+  const handleGenerateSimilar = (item: ManagedImage) => {
+    if (!canGenerateSimilar) {
+      toast.error("当前账号没有创作台权限");
+      return;
+    }
+    const sourceImageUrls = reusableImageReferenceUrls(item);
+    writeSimilarImageIntent({
+      prompt: reusableImagePrompt(item),
+      sourceImageUrl: sourceImageUrls[0] || item.url,
+      sourceImageUrls,
+      sourceKind: sourceImageUrls[0] === item.url ? "public_image" : "original_references",
+      sourceImageName: item.name,
+      model: item.share_prompt_parameters ? item.model : undefined,
+      quality: item.share_prompt_parameters ? item.quality : undefined,
+      requestedSize: item.share_prompt_parameters ? item.requested_size : undefined,
+      resolutionPreset: item.share_prompt_parameters ? item.resolution_preset : undefined,
+      outputFormat: item.share_prompt_parameters ? item.output_format : undefined,
+      outputCompression: item.share_prompt_parameters ? item.output_compression : undefined,
+    });
+    navigate("/image");
+    toast.success(sourceImageUrls[0] === item.url ? "已使用公开图准备同款生成" : "已带入公开的原始参考图和生成参数");
+  };
+
   const openDeleteConfirm = (targetItems: ManagedImage[]) => {
     if (!canDeleteImages) {
       return;
@@ -801,7 +864,20 @@ function ImageManagerContent({
     }
   };
 
-  const handleVisibilityChange = async (item: ManagedImage, visibility: ImageVisibility) => {
+  const openPublishConfirm = (targetItems: ManagedImage[]) => {
+    const pendingItems = targetItems.filter((item) => item.visibility !== "public");
+    if (pendingItems.length === 0) {
+      return;
+    }
+    setPublishRecipeOptions({ sharePromptParameters: false, shareReferenceImages: false });
+    setPublishTarget({ items: pendingItems });
+  };
+
+  const handleVisibilityChange = async (
+    item: ManagedImage,
+    visibility: ImageVisibility,
+    options: PublishRecipeOptions = { sharePromptParameters: false, shareReferenceImages: false },
+  ) => {
     if (galleryView !== "mine" || visibilityMutatingPath) {
       return;
     }
@@ -809,9 +885,13 @@ function ImageManagerContent({
     if (previousVisibility === visibility) {
       return;
     }
+    if (visibility === "public" && !publishTarget) {
+      openPublishConfirm([item]);
+      return;
+    }
     setVisibilityMutatingPath(item.path);
     try {
-      const data = await updateManagedImageVisibility(item.path, visibility);
+      const data = await updateManagedImageVisibility(item.path, visibility, options);
       const updated = {
         ...data.item,
         path: item.path,
@@ -838,7 +918,11 @@ function ImageManagerContent({
     }
   };
 
-  const handleBulkVisibilityChange = async (targetItems: ManagedImage[], visibility: ImageVisibility) => {
+  const handleBulkVisibilityChange = async (
+    targetItems: ManagedImage[],
+    visibility: ImageVisibility,
+    options: PublishRecipeOptions = { sharePromptParameters: false, shareReferenceImages: false },
+  ) => {
     if (galleryView !== "mine" || visibilityMutatingPath) {
       return;
     }
@@ -846,12 +930,16 @@ function ImageManagerContent({
     if (pendingItems.length === 0) {
       return;
     }
+    if (visibility === "public" && !publishTarget) {
+      openPublishConfirm(pendingItems);
+      return;
+    }
 
     setVisibilityMutatingPath(`bulk:${visibility}`);
     try {
       const results = await Promise.allSettled(
         pendingItems.map(async (item) => {
-          const data = await updateManagedImageVisibility(item.path, visibility);
+          const data = await updateManagedImageVisibility(item.path, visibility, options);
           return {
             ...data.item,
             path: item.path,
@@ -884,6 +972,26 @@ function ImageManagerContent({
       toast.error(error instanceof Error ? error.message : "批量更新公开状态失败");
     } finally {
       setVisibilityMutatingPath(null);
+    }
+  };
+
+  const handleConfirmPublish = async () => {
+    if (!publishTarget || visibilityMutatingPath) {
+      return;
+    }
+    const targetItems = publishTarget.items;
+    const options = {
+      sharePromptParameters: publishRecipeOptions.sharePromptParameters,
+      shareReferenceImages: publishRecipeOptions.sharePromptParameters && publishRecipeOptions.shareReferenceImages,
+    };
+    try {
+      if (targetItems.length === 1) {
+        await handleVisibilityChange(targetItems[0], "public", options);
+        return;
+      }
+      await handleBulkVisibilityChange(targetItems, "public", options);
+    } finally {
+      setPublishTarget(null);
     }
   };
 
@@ -1529,6 +1637,20 @@ function ImageManagerContent({
                         <Eye className="size-3" />
                         View Original
                       </button>
+                      {galleryView === "public" && canGenerateSimilar ? (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.currentTarget.blur();
+                            handleGenerateSimilar(item);
+                          }}
+                          className="inline-flex size-7 items-center justify-center rounded-full bg-white/95 text-[#1456f0] shadow-sm transition hover:bg-[#e8f2ff]"
+                          aria-label="同款生成"
+                          title="同款生成：优先使用公开的原始提示词、参考图和生成参数；没有公开原始参考图时使用当前公开图"
+                        >
+                          <Sparkles className="size-3.5" />
+                        </button>
+                      ) : null}
                       {galleryView !== "mine" ? (
                         <button
                           type="button"
@@ -1662,6 +1784,73 @@ function ImageManagerContent({
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
+      {publishTarget ? (
+        <Dialog open onOpenChange={(open) => (!open && !visibilityMutatingPath ? setPublishTarget(null) : null)}>
+          <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+            <DialogHeader className="gap-2">
+              <DialogTitle>公开图片</DialogTitle>
+              <DialogDescription className="text-sm leading-6">
+                将 {publishTarget.items.length} 张图片加入公开图库。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3 py-1">
+              <label className="flex items-start gap-3 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={publishRecipeOptions.sharePromptParameters}
+                  onCheckedChange={(checked) =>
+                    setPublishRecipeOptions({
+                      sharePromptParameters: checked === true,
+                      shareReferenceImages: checked === true ? publishRecipeOptions.shareReferenceImages : false,
+                    })
+                  }
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium text-stone-900">公开原始提示词和生成参数</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-stone-500">公开图库会展示可复用的 prompt、模型、尺寸和输出设置。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={publishRecipeOptions.shareReferenceImages}
+                  disabled={!publishRecipeOptions.sharePromptParameters}
+                  onCheckedChange={(checked) =>
+                    setPublishRecipeOptions((current) => ({
+                      ...current,
+                      shareReferenceImages: checked === true,
+                    }))
+                  }
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium text-stone-900">公开原始参考图用于同款生成</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-stone-500">其他用户复用时可以读取这些参考图；不勾选时会改用公开成品图。</span>
+                </span>
+              </label>
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 rounded-xl border-stone-200 bg-white px-5 text-stone-700 hover:bg-stone-50"
+                onClick={() => setPublishTarget(null)}
+                disabled={visibilityMutatingPath !== null}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                className="h-10 rounded-xl px-5"
+                onClick={() => void handleConfirmPublish()}
+                disabled={visibilityMutatingPath !== null}
+              >
+                {visibilityMutatingPath ? <LoaderCircle className="size-4 animate-spin" /> : <Globe2 className="size-4" />}
+                公开
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
       {canDeleteImages && deleteTarget ? (
         <Dialog open onOpenChange={(open) => (!open && !isDeleting ? setDeleteTarget(null) : null)}>
           <DialogContent showCloseButton={false} className="rounded-2xl p-6">
@@ -1704,5 +1893,13 @@ export default function ImageManagerPage() {
     return <div className="flex min-h-[40vh] items-center justify-center"><LoaderCircle className="size-5 animate-spin text-stone-400" /></div>;
   }
   const canDeleteImages = hasAPIPermission(session, "DELETE", "/api/images");
-  return <ImageManagerContent cacheScope={imageManagerCacheScope(session)} canDeleteImages={canDeleteImages} isAdmin={session.role === "admin"} />;
+  const canGenerateSimilar = canAccessPath(session, "/image") && hasAPIPermission(session, "POST", "/api/creation-tasks");
+  return (
+    <ImageManagerContent
+      cacheScope={imageManagerCacheScope(session)}
+      canDeleteImages={canDeleteImages}
+      canGenerateSimilar={canGenerateSimilar}
+      isAdmin={session.role === "admin"}
+    />
+  );
 }

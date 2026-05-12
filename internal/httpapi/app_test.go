@@ -525,6 +525,83 @@ func TestRunLoggedImageTaskLogsTextOutputAsFailure(t *testing.T) {
 	}
 }
 
+func TestRecordGeneratedImagesForPayloadStoresReusableRequestMetadata(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	rel := "2026/05/12/reusable.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("writeHTTPTestPNG() error = %v", err)
+	}
+
+	app.recordGeneratedImagesForPayload(
+		service.Identity{ID: "admin", Role: service.AuthRoleAdmin, Name: "Admin"},
+		[]string{rel},
+		service.ImageVisibilityPublic,
+		map[string]any{
+			"prompt":             "复用这个提示词",
+			"model":              "gpt-image-2",
+			"quality":            "high",
+			"image_resolution":   "2k",
+			"size":               "2048x2048",
+			"output_format":      "jpeg",
+			"output_compression": 42,
+			"background":         "transparent",
+			"moderation":         "low",
+			"style":              "vivid",
+			"partial_images":     2,
+			"input_image_mask":   "mask-id",
+			"images": []protocol.UploadedImage{
+				{Filename: "source.png", ContentType: "image/png", Data: []byte("reference-bytes")},
+			},
+			"share_prompt_parameters": true,
+			"share_reference_images":  true,
+		},
+	)
+
+	list := app.images.ListImages("http://127.0.0.1:8000", "", "", service.ImageAccessScope{Public: true})
+	items := list["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("ListImages() = %#v", list)
+	}
+	item := items[0]
+	if item["prompt"] != "复用这个提示词" ||
+		item["model"] != "gpt-image-2" ||
+		item["quality"] != "high" ||
+		item["resolution_preset"] != "2k" ||
+		item["requested_size"] != "2048x2048" ||
+		item["output_format"] != "jpeg" ||
+		item["output_compression"] != 42 ||
+		item["background"] != "transparent" ||
+		item["moderation"] != "low" ||
+		item["style"] != "vivid" ||
+		item["partial_images"] != 2 ||
+		item["input_image_mask"] != "mask-id" {
+		t.Fatalf("reusable metadata = %#v", item)
+	}
+	referenceURLs, ok := item["reference_image_urls"].([]string)
+	if !ok || len(referenceURLs) != 1 || !strings.Contains(referenceURLs[0], "/image-references/") {
+		t.Fatalf("reference_image_urls = %#v", item["reference_image_urls"])
+	}
+	parsedReferenceURL, err := url.Parse(referenceURLs[0])
+	if err != nil {
+		t.Fatalf("parse reference url: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, parsedReferenceURL.RequestURI(), nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "reference-bytes" {
+		t.Fatalf("public reference status/body = %d %q", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("reference Content-Type = %q, want image/png", got)
+	}
+}
+
 func TestDirectImageGenerationUsesCreationLimiter(t *testing.T) {
 	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
 	app := newTestApp(t)
@@ -1653,16 +1730,8 @@ func TestImageManagementIsScopedByOwner(t *testing.T) {
 		t.Fatalf("admin public gallery json: %v", err)
 	}
 	items = logItems(list)
-	if len(items) != 3 {
-		t.Fatalf("admin public gallery should see all images, got %#v", list)
-	}
-	seenPaths := make(map[string]bool, len(items))
-	for _, item := range items {
-		path, _ := item["path"].(string)
-		seenPaths[path] = true
-	}
-	if !seenPaths[aliceRel] || !seenPaths[bobRel] || !seenPaths[legacyRel] {
-		t.Fatalf("admin public gallery paths = %#v", items)
+	if len(items) != 0 {
+		t.Fatalf("admin public gallery should only show public images, got %#v", list)
 	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/images", strings.NewReader(`{"paths":["`+bobRel+`","`+aliceRel+`"]}`))
@@ -1746,7 +1815,25 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	if err := writeHTTPTestPNG(imagePath); err != nil {
 		t.Fatalf("write image: %v", err)
 	}
-	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate)
+	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate, service.GeneratedImageMetadata{
+		ReferenceImages: []service.GeneratedImageReference{
+			{Filename: "private-source.png", ContentType: "image/png", Data: []byte("private-reference")},
+		},
+	})
+	privateList := app.images.ListImages("http://127.0.0.1:8000", "", "", service.ImageAccessScope{All: true})
+	privateItems := privateList["items"].([]map[string]any)
+	if len(privateItems) != 1 {
+		t.Fatalf("private image list = %#v", privateList)
+	}
+	privateReferenceURLs, ok := privateItems[0]["reference_image_urls"].([]string)
+	if !ok || len(privateReferenceURLs) != 1 {
+		t.Fatalf("private reference urls = %#v", privateItems[0])
+	}
+	parsedPrivateReferenceURL, err := url.Parse(privateReferenceURLs[0])
+	if err != nil {
+		t.Fatalf("parse private reference url: %v", err)
+	}
+	privateReferencePath := parsedPrivateReferenceURL.RequestURI()
 
 	req := httptest.NewRequest(http.MethodGet, "/images/2026/05/01", nil)
 	res := httptest.NewRecorder()
@@ -1760,6 +1847,29 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous private image status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private reference status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	req.Header.Set("Authorization", "Bearer "+bobKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("other user private reference status = %d body = %q, want 404", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "private-reference" {
+		t.Fatalf("owner private reference status/body = %d %q", res.Code, res.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
@@ -1808,6 +1918,23 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("anonymous public image status = %d body = %q", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous unshared public reference status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	if _, err := app.images.UpdateImageVisibility(rel, service.ImageVisibilityPublic, service.ImageAccessScope{OwnerID: owner.ID}, service.ImageVisibilityUpdateOptions{SharePromptParams: true, ShareReferences: true}); err != nil {
+		t.Fatalf("publish reference metadata: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "private-reference" {
+		t.Fatalf("anonymous shared public reference status/body = %d %q", res.Code, res.Body.String())
 	}
 }
 

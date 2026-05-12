@@ -1103,6 +1103,12 @@ func mergeImageTaskMetadata(payload map[string]any, metadata map[string]any) {
 	if requestedSize := strings.TrimSpace(util.Clean(metadata["requested_size"])); requestedSize != "" {
 		payload["requested_size"] = requestedSize
 	}
+	if util.ToBool(metadata["share_prompt_parameters"]) {
+		payload["share_prompt_parameters"] = true
+		if util.ToBool(metadata["share_reference_images"]) {
+			payload["share_reference_images"] = true
+		}
+	}
 }
 
 func mergeImageOutputOptions(payload map[string]any, options ImageOutputOptions) {

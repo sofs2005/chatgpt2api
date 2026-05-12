@@ -1243,6 +1243,12 @@ func imageTaskRequestMetadata(body map[string]any) map[string]any {
 	if size != "" {
 		metadata["requested_size"] = size
 	}
+	if util.ToBool(body["share_prompt_parameters"]) {
+		metadata["share_prompt_parameters"] = true
+		if util.ToBool(body["share_reference_images"]) {
+			metadata["share_reference_images"] = true
+		}
+	}
 	return metadata
 }
 

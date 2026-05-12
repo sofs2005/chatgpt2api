@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { History, ImagePlus, LoaderCircle, Plus, Trash2, X } from "lucide-react";
+import { Globe2, History, ImagePlus, LoaderCircle, Plus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { ImageComposer } from "@/app/image/components/image-composer";
@@ -31,9 +31,11 @@ import {
   type ImageSizeSelection,
 } from "@/app/image/image-options";
 import { IMAGE_PROMPT_PRESETS, type ImagePromptPreset } from "@/app/image/image-presets";
+import { consumeSimilarImageIntent } from "@/app/image/similar-image-intent";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -153,6 +155,17 @@ type EditingTurnDraft = {
   referenceImages: StoredReferenceImage[];
 };
 
+type PublishImageTarget = {
+  conversationId: string;
+  turnId: string;
+  imageIndex: number;
+};
+
+type PublishRecipeOptions = {
+  sharePromptParameters: boolean;
+  shareReferenceImages: boolean;
+};
+
 type CreationTaskDataItem = NonNullable<CreationTask["data"]>[number];
 
 function buildConversationTitle(prompt: string) {
@@ -261,6 +274,17 @@ async function buildReferenceImageFromUrl(
 function getPromptReferenceImageUrls(prompt: BananaPrompt) {
   const urls = prompt.referenceImageUrls.length > 0 ? prompt.referenceImageUrls : [prompt.preview];
   return Array.from(new Set(urls.map((url) => url.trim()).filter(Boolean)));
+}
+
+function reusableOutputCompressionValue(value: unknown, outputFormat: ImageOutputFormat) {
+  if (!supportsImageOutputCompression(outputFormat)) {
+    return "";
+  }
+  const compression = Number(value);
+  if (!Number.isFinite(compression)) {
+    return "";
+  }
+  return String(Math.min(100, Math.max(0, Math.round(compression))));
 }
 
 async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: string) {
@@ -1024,6 +1048,7 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
   const promptApplyRequestIdRef = useRef(0);
+  const similarIntentAppliedRef = useRef(false);
 
   const [imagePrompt, setImagePrompt] = useState("");
   const [composerMode, setComposerMode] = useState<ComposerMode>(getStoredComposerMode);
@@ -1055,6 +1080,11 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
   const [progressNow, setProgressNow] = useState(Date.now());
   const [composerDockHeight, setComposerDockHeight] = useState(0);
   const [visibilityMutatingImageKey, setVisibilityMutatingImageKey] = useState("");
+  const [publishImageTarget, setPublishImageTarget] = useState<PublishImageTarget | null>(null);
+  const [publishRecipeOptions, setPublishRecipeOptions] = useState<PublishRecipeOptions>({
+    sharePromptParameters: false,
+    shareReferenceImages: false,
+  });
   const canInspectAccounts = session.role === "admin" || session.apiPermissions.includes("get/api/accounts");
 
   const parsedCount = useMemo(() => normalizeRequestedImageCount(imageCount), [imageCount]);
@@ -1288,6 +1318,85 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (isLoadingHistory || similarIntentAppliedRef.current) {
+      return;
+    }
+    similarIntentAppliedRef.current = true;
+
+    const intent = consumeSimilarImageIntent();
+    if (!intent) {
+      return;
+    }
+
+    const requestId = promptApplyRequestIdRef.current + 1;
+    promptApplyRequestIdRef.current = requestId;
+    const prompt = intent.prompt.trim() || "参考这张图，生成一张风格、主体和构图相近的新图片。";
+    const sizeSelection = getImageSizeSelectionFromSize(intent.requestedSize || intent.resolutionPreset || "");
+    const outputFormat = isImageOutputFormat(intent.outputFormat) ? intent.outputFormat : DEFAULT_IMAGE_OUTPUT_FORMAT;
+
+    setSelectedConversationId(null);
+    setComposerMode("image");
+    setImagePrompt(prompt);
+    setImageCount("1");
+    setImageModel(isImageCreationModel(intent.model) ? intent.model : DEFAULT_IMAGE_MODEL);
+    setImageSizeMode(sizeSelection.mode);
+    setImageAspectRatio(sizeSelection.aspectRatio);
+    setImageResolution(isImageResolution(intent.resolutionPreset) ? intent.resolutionPreset : sizeSelection.resolution);
+    setImageCustomRatio(sizeSelection.customRatio);
+    setImageCustomWidth(sizeSelection.customWidth);
+    setImageCustomHeight(sizeSelection.customHeight);
+    setImageOutputFormat(outputFormat);
+    setImageOutputCompression(reusableOutputCompressionValue(intent.outputCompression, outputFormat));
+    setDefaultImageVisibility("private");
+    setReferenceImages([]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    textareaRef.current?.focus();
+
+    const sourceImageUrls = intent.sourceImageUrls.length > 0 ? intent.sourceImageUrls : [intent.sourceImageUrl];
+    const usesPublicImageFallback = intent.sourceKind !== "original_references";
+    const toastId = toast.loading(
+      usesPublicImageFallback
+        ? "正在读取公开图作为参考图"
+        : sourceImageUrls.length > 1
+          ? "正在读取公开的原始参考图"
+          : "正在读取公开的原始参考图",
+    );
+    void Promise.allSettled(
+      sourceImageUrls.map((url, index) => buildReferenceImageFromUrl(url, index, "public-gallery-reference")),
+    )
+      .then((results) => {
+        if (promptApplyRequestIdRef.current !== requestId) {
+          return;
+        }
+        const loadedReferences = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        if (loadedReferences.length === 0) {
+          toast.error("已带入原始提示词和参数，但参考图读取失败");
+          return;
+        }
+        setReferenceImages(loadedReferences);
+        const failedCount = results.length - loadedReferences.length;
+        toast.success(
+          failedCount > 0
+            ? `已带入原始提示词、${loadedReferences.length} 张参考图和生成参数，${failedCount} 张读取失败`
+            : usesPublicImageFallback
+              ? "未公开原始参考图，已使用公开图和可用参数"
+              : `已带入原始提示词、${loadedReferences.length} 张原始参考图和生成参数`,
+        );
+      })
+      .catch(() => {
+        if (promptApplyRequestIdRef.current !== requestId) {
+          return;
+        }
+        toast.error("已带入原始提示词和参数，但参考图读取失败");
+      })
+      .finally(() => {
+        toast.dismiss(toastId);
+      });
+  }, [isLoadingHistory]);
 
   useEffect(() => {
     if (!selectedConversationId) {
@@ -1716,7 +1825,13 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
   }, []);
 
   const handleImageVisibilityChange = useCallback(
-    async (conversationId: string, turnId: string, imageIndex: number, visibility: ImageVisibility) => {
+    async (
+      conversationId: string,
+      turnId: string,
+      imageIndex: number,
+      visibility: ImageVisibility,
+      options: PublishRecipeOptions = { sharePromptParameters: false, shareReferenceImages: false },
+    ) => {
       const targetConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
       const targetTurn = targetConversation?.turns.find((turn) => turn.id === turnId);
       const targetImage = targetTurn?.images[imageIndex];
@@ -1733,6 +1848,12 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
         toast.error("未找到可同步到图库的图片路径");
         return;
       }
+      const currentVisibility = targetImage.visibility || targetTurn.visibility || "private";
+      if (visibility === "public" && currentVisibility !== "public" && !publishImageTarget) {
+        setPublishRecipeOptions({ sharePromptParameters: false, shareReferenceImages: false });
+        setPublishImageTarget({ conversationId, turnId, imageIndex });
+        return;
+      }
 
       const mutatingKey = `${conversationId}:${turnId}:${targetImage.id}`;
       if (visibilityMutatingImageKey === mutatingKey) {
@@ -1743,7 +1864,7 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
       }
       setVisibilityMutatingImageKey(mutatingKey);
       try {
-        const data = await updateManagedImageVisibility(path, visibility);
+        const data = await updateManagedImageVisibility(path, visibility, options);
         const updatedVisibility = data.item.visibility || visibility;
         const updatedPath = data.item.path || path;
         await updateConversation(conversationId, (current) => {
@@ -1777,8 +1898,24 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
         setVisibilityMutatingImageKey("");
       }
     },
-    [updateConversation, visibilityMutatingImageKey],
+    [publishImageTarget, updateConversation, visibilityMutatingImageKey],
   );
+
+  const handleConfirmPublishImage = useCallback(async () => {
+    if (!publishImageTarget || visibilityMutatingImageKey) {
+      return;
+    }
+    const target = publishImageTarget;
+    const options = {
+      sharePromptParameters: publishRecipeOptions.sharePromptParameters,
+      shareReferenceImages: publishRecipeOptions.sharePromptParameters && publishRecipeOptions.shareReferenceImages,
+    };
+    try {
+      await handleImageVisibilityChange(target.conversationId, target.turnId, target.imageIndex, "public", options);
+    } finally {
+      setPublishImageTarget(null);
+    }
+  }, [handleImageVisibilityChange, publishImageTarget, publishRecipeOptions, visibilityMutatingImageKey]);
 
   const openEditTurnDialog = useCallback((conversationId: string, turnId: string) => {
     const targetConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
@@ -3266,6 +3403,63 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
+
+      {publishImageTarget ? (
+        <Dialog open onOpenChange={(open) => (!open && !visibilityMutatingImageKey ? setPublishImageTarget(null) : null)}>
+          <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+            <DialogHeader className="gap-2">
+              <DialogTitle>公开图片</DialogTitle>
+              <DialogDescription className="text-sm leading-6">
+                将这张图片加入公开图库。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3 py-1">
+              <label className="flex items-start gap-3 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={publishRecipeOptions.sharePromptParameters}
+                  onCheckedChange={(checked) =>
+                    setPublishRecipeOptions({
+                      sharePromptParameters: checked === true,
+                      shareReferenceImages: checked === true ? publishRecipeOptions.shareReferenceImages : false,
+                    })
+                  }
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium text-stone-900">公开原始提示词和生成参数</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-stone-500">公开图库会展示可复用的 prompt、模型、尺寸和输出设置。</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={publishRecipeOptions.shareReferenceImages}
+                  disabled={!publishRecipeOptions.sharePromptParameters}
+                  onCheckedChange={(checked) =>
+                    setPublishRecipeOptions((current) => ({
+                      ...current,
+                      shareReferenceImages: checked === true,
+                    }))
+                  }
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium text-stone-900">公开原始参考图用于同款生成</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-stone-500">其他用户复用时可以读取这些参考图；不勾选时会改用公开成品图。</span>
+                </span>
+              </label>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setPublishImageTarget(null)} disabled={visibilityMutatingImageKey !== ""}>
+                取消
+              </Button>
+              <Button onClick={() => void handleConfirmPublishImage()} disabled={visibilityMutatingImageKey !== ""}>
+                {visibilityMutatingImageKey ? <LoaderCircle className="size-4 animate-spin" /> : <Globe2 className="size-4" />}
+                公开
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       {deleteConfirm ? (
         <Dialog open onOpenChange={(open) => (!open ? setDeleteConfirm(null) : null)}>

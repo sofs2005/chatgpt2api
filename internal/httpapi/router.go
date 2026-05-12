@@ -82,6 +82,7 @@ func (a *App) routes() []appRoute {
 		exact(http.MethodGet, "/api/storage/info", a.handleStorageInfo),
 
 		prefix("/images/", a.handleImageFile),
+		prefix("/image-references/", a.handleImageReferenceFile),
 		prefix("/image-thumbnails/", a.handleImageThumbnail),
 		prefix("/login-page-images/", http.StripPrefix("/login-page-images/", http.FileServer(http.Dir(a.config.LoginPageImagesDir()))).ServeHTTP),
 	}

@@ -1730,8 +1730,16 @@ func TestImageManagementIsScopedByOwner(t *testing.T) {
 		t.Fatalf("admin public gallery json: %v", err)
 	}
 	items = logItems(list)
-	if len(items) != 0 {
-		t.Fatalf("admin public gallery should only show public images, got %#v", list)
+	if len(items) != 3 {
+		t.Fatalf("admin public gallery should see all images, got %#v", list)
+	}
+	seenPaths := make(map[string]bool, len(items))
+	for _, item := range items {
+		path, _ := item["path"].(string)
+		seenPaths[path] = true
+	}
+	if !seenPaths[aliceRel] || !seenPaths[bobRel] || !seenPaths[legacyRel] {
+		t.Fatalf("admin public gallery paths = %#v", items)
 	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/images", strings.NewReader(`{"paths":["`+bobRel+`","`+aliceRel+`"]}`))

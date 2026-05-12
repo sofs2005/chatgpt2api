@@ -1506,6 +1506,9 @@ func imageListAccessScope(identity service.Identity, value string) (service.Imag
 	case "mine":
 		return service.ImageAccessScope{OwnerID: identityScope(identity)}, 0, ""
 	case "public":
+		if identity.Role == service.AuthRoleAdmin {
+			return service.ImageAccessScope{All: true}, 0, ""
+		}
 		return service.ImageAccessScope{Public: true}, 0, ""
 	case "all":
 		if identity.Role != service.AuthRoleAdmin {

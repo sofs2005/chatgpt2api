@@ -851,18 +851,18 @@ func resetSubscriptionPeriod(subscription map[string]any, now time.Time) {
 }
 
 func billingPeriodBounds(period string, now time.Time) (time.Time, time.Time) {
-	local := now.Local()
+	loc := now.Location()
 	switch normalizeBillingPeriod(period) {
 	case BillingPeriodDaily:
-		start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location())
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 		return start, start.AddDate(0, 0, 1)
 	case BillingPeriodWeekly:
-		weekdayOffset := (int(local.Weekday()) + 6) % 7
-		day := local.AddDate(0, 0, -weekdayOffset)
-		start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, local.Location())
+		weekdayOffset := (int(now.Weekday()) + 6) % 7
+		day := now.AddDate(0, 0, -weekdayOffset)
+		start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
 		return start, start.AddDate(0, 0, 7)
 	default:
-		start := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, local.Location())
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
 		return start, start.AddDate(0, 1, 0)
 	}
 }

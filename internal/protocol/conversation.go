@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -53,6 +54,12 @@ type Engine struct {
 
 type ImageOutputSlotAcquirer func(context.Context, int) (func(), error)
 
+// ImageOutputCharger atomically reserves/deducts billing for a single image
+// output before it is persisted. It returns a non-nil error to deny saving
+// this image. Denials backed by service.BillingLimitError are surfaced to the
+// caller as the request-level error.
+type ImageOutputCharger func(index int) error
+
 type ConversationRequest struct {
 	Model                  string
 	Prompt                 string
@@ -74,6 +81,7 @@ type ConversationRequest struct {
 	OwnerName              string
 	MessageAsError         bool
 	AcquireImageOutputSlot ImageOutputSlotAcquirer
+	ChargeImageOutput      ImageOutputCharger
 }
 
 func (r ConversationRequest) Normalized() ConversationRequest {
@@ -192,6 +200,7 @@ type ImageOutput struct {
 	Text              string
 	UpstreamEventType string
 	Data              []map[string]any
+	ChargeHandled     bool
 }
 
 type ImageOutputProgressCallback func([]map[string]any)
@@ -590,6 +599,19 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 				result.lastError = result.err.Error()
 				return result
 			}
+			if output.Kind == "result" && request.ChargeImageOutput != nil && !output.ChargeHandled {
+				if err := request.ChargeImageOutput(index); err != nil {
+					var billingErr service.BillingLimitError
+					if errors.As(err, &billingErr) {
+						result.err = billingErr
+						result.lastError = billingErr.Error()
+					} else {
+						result.err = NewImageGenerationError(err.Error())
+						result.lastError = err.Error()
+					}
+					return result
+				}
+			}
 			result.emitted = true
 			emittedForToken = true
 			returnedMessage = output.Kind == "message"
@@ -615,6 +637,12 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 			if e.Accounts != nil {
 				e.Accounts.MarkImageResult(token, true)
 			}
+			return result
+		}
+		var billingErr service.BillingLimitError
+		if errors.As(err, &billingErr) {
+			result.err = billingErr
+			result.lastError = billingErr.Error()
 			return result
 		}
 		if e.Accounts != nil {
@@ -715,11 +743,25 @@ func (e *Engine) StreamResponsesImageOutputs(ctx context.Context, client *backen
 				item["background"] = event.Background
 			}
 			created := firstNonZeroInt64(event.Created, time.Now().Unix())
-			result := e.FormatImageResultWithOptions([]map[string]any{item}, prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, request.OwnerName, created, "", imageResultOutputOptions(request, event))
+			chargeHandled := false
+			result, err := e.FormatImageResultWithCharge([]map[string]any{item}, prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, request.OwnerName, created, "", imageResultOutputOptions(request, event), func() error {
+				if request.ChargeImageOutput == nil {
+					return nil
+				}
+				if err := request.ChargeImageOutput(index); err != nil {
+					return err
+				}
+				chargeHandled = true
+				return nil
+			})
+			if err != nil {
+				errCh <- err
+				return
+			}
 			data := util.AsMapSlice(result["data"])
 			if len(data) > 0 {
 				emitted = true
-				out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: created, Data: data}
+				out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: created, Data: data, ChargeHandled: chargeHandled}
 			}
 		}
 		if err := <-upstreamErr; err != nil {
@@ -956,6 +998,15 @@ func (e *Engine) FormatImageResult(items []map[string]any, prompt, responseForma
 }
 
 func (e *Engine) FormatImageResultWithOptions(items []map[string]any, prompt, responseFormat, baseURL, ownerID, ownerName string, created int64, message string, options ImageOutputOptions) map[string]any {
+	result, _ := e.formatImageResultWithOptions(items, prompt, responseFormat, baseURL, ownerID, ownerName, created, message, options, nil)
+	return result
+}
+
+func (e *Engine) FormatImageResultWithCharge(items []map[string]any, prompt, responseFormat, baseURL, ownerID, ownerName string, created int64, message string, options ImageOutputOptions, charge func() error) (map[string]any, error) {
+	return e.formatImageResultWithOptions(items, prompt, responseFormat, baseURL, ownerID, ownerName, created, message, options, charge)
+}
+
+func (e *Engine) formatImageResultWithOptions(items []map[string]any, prompt, responseFormat, baseURL, ownerID, ownerName string, created int64, message string, options ImageOutputOptions, charge func() error) (map[string]any, error) {
 	defaultFormat := NormalizeImageOutputFormat(options.Format)
 	hasRequestedFormat := strings.TrimSpace(options.Format) != ""
 	var data []map[string]any
@@ -994,6 +1045,18 @@ func (e *Engine) FormatImageResultWithOptions(items []map[string]any, prompt, re
 				continue
 			}
 		}
+		if charge != nil {
+			if err := charge(); err != nil {
+				if created == 0 {
+					created = time.Now().Unix()
+				}
+				result := map[string]any{"created": created, "data": data}
+				if message != "" && len(data) == 0 {
+					result["message"] = message
+				}
+				return result, err
+			}
+		}
 		outputFormat := NormalizeImageOutputFormat(itemOptions.Format)
 		urlValue := e.SaveImageBytesForOwnerWithFormat(imageBytes, baseURL, ownerID, ownerName, outputFormat)
 		responseItem := map[string]any{"url": urlValue, "revised_prompt": revised, "output_format": outputFormat}
@@ -1009,7 +1072,7 @@ func (e *Engine) FormatImageResultWithOptions(items []map[string]any, prompt, re
 	if message != "" && len(data) == 0 {
 		result["message"] = message
 	}
-	return result
+	return result, nil
 }
 
 func (e *Engine) SaveImageBytes(imageData []byte, baseURL string) string {

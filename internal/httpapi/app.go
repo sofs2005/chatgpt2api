@@ -18,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"chatgpt2api/internal/config"
@@ -153,7 +154,7 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.engine.ListModels(r.Context())
-	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate, nil)
+	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate, service.BillingReference{})
 }
 
 func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -176,13 +177,14 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
-	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/images/generations", body), "/v1/images/generations", model)
-	if err != nil {
-		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, nil)
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/images/generations", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, service.BillingReference{})
 		return
 	}
+	billingRef := a.protocolBillingReference(identity, "/v1/images/generations", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, reservation)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, billingRef)
 }
 
 func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
@@ -213,13 +215,14 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
-	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/images/edits", body), "/v1/images/edits", model)
-	if err != nil {
-		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, nil)
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/images/edits", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, service.BillingReference{})
 		return
 	}
+	billingRef := a.protocolBillingReference(identity, "/v1/images/edits", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, reservation)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, billingRef)
 }
 
 func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -236,13 +239,14 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
-	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/chat/completions", body), "/v1/chat/completions", model)
-	if err != nil {
-		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, nil)
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/chat/completions", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, service.BillingReference{})
 		return
 	}
+	billingRef := a.protocolBillingReference(identity, "/v1/chat/completions", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, reservation)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, billingRef)
 }
 
 func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
@@ -259,13 +263,14 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
-	reservation, err := a.reserveProtocolBilling(identity, protocolBillableUnits("/v1/responses", body), "/v1/responses", model)
-	if err != nil {
-		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, nil)
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/responses", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, service.BillingReference{})
 		return
 	}
+	billingRef := a.protocolBillingReference(identity, "/v1/responses", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleResponsesScoped(r.Context(), body, identityScope(identity))
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, reservation)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, billingRef)
 }
 
 func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -284,22 +289,19 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleMessages(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate, nil)
+	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})
 }
 
-func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, reservation *service.BillingReservation) {
+func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, billingRef service.BillingReference) {
 	start := time.Now()
 	requestCapture := requestAuditCapture(r.Context())
 	if err != nil {
-		a.settleProtocolBilling(reservation, 0)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture)
 		markRequestBusinessLogged(r)
 		a.writeProtocolError(w, err)
 		return
 	}
 	if stream == nil {
-		consumed := billableProtocolOutputCount(endpoint, result)
-		a.settleProtocolBilling(reservation, consumed)
 		urls := collectURLs(result)
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
@@ -312,10 +314,8 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 	flusher, _ := w.(http.Flusher)
 	if stream.Kind == "anthropic" || sseKind == "anthropic" {
 		var urls []string
-		streamConsumed := 0
 		for item := range stream.Items {
 			urls = append(urls, collectURLs(item)...)
-			streamConsumed += billableProtocolStreamItemCount(endpoint, item)
 			event := firstNonEmpty(util.Clean(item["type"]), "message_delta")
 			fmt.Fprintf(w, "event: %s\n", event)
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(item))
@@ -324,7 +324,6 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			}
 		}
 		if err := <-stream.Err; err != nil {
-			a.settleProtocolBilling(reservation, max(billableURLCount(urls), streamConsumed))
 			a.recordGeneratedImages(identity, urls, visibility)
 			a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 			markRequestBusinessLogged(r)
@@ -332,7 +331,6 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
 			return
 		}
-		a.settleProtocolBilling(reservation, max(billableURLCount(urls), streamConsumed))
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
@@ -343,24 +341,19 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		flusher.Flush()
 	}
 	var urls []string
-	streamConsumed := 0
 	for item := range stream.Items {
 		urls = append(urls, collectURLs(item)...)
-		streamConsumed += billableProtocolStreamItemCount(endpoint, item)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(item))
 		if flusher != nil {
 			flusher.Flush()
 		}
 	}
-	consumed := max(billableURLCount(urls), streamConsumed)
 	if err := <-stream.Err; err != nil {
-		a.settleProtocolBilling(reservation, consumed)
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 		markRequestBusinessLogged(r)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
-		a.settleProtocolBilling(reservation, consumed)
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
@@ -1431,23 +1424,60 @@ func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []
 	})
 }
 
-func (a *App) reserveProtocolBilling(identity service.Identity, amount int, endpoint, model string) (*service.BillingReservation, error) {
+func (a *App) checkProtocolBilling(identity service.Identity, amount int) error {
 	if amount <= 0 || a == nil || a.billing == nil {
-		return nil, nil
+		return nil
 	}
-	return a.billing.Reserve(identity, amount, service.BillingReference{
-		Endpoint:       endpoint,
-		Model:          model,
-		CredentialID:   identity.CredentialID,
-		CredentialName: identity.CredentialName,
-	})
+	return a.billing.CheckAvailable(identity, amount)
 }
 
-func (a *App) settleProtocolBilling(reservation *service.BillingReservation, consumed int) {
-	if a == nil || a.billing == nil || reservation == nil {
+func (a *App) protocolBillingReference(identity service.Identity, endpoint, model string) service.BillingReference {
+	return service.BillingReference{
+		Endpoint:       endpoint,
+		Model:          model,
+		RequestID:      "req_" + util.NewHex(18),
+		CredentialID:   identity.CredentialID,
+		CredentialName: identity.CredentialName,
+	}
+}
+
+func (a *App) chargeProtocolBilling(identity service.Identity, consumed int, ref service.BillingReference) error {
+	if a == nil || a.billing == nil || consumed <= 0 {
+		return nil
+	}
+	return a.billing.Charge(identity, consumed, ref)
+}
+
+// attachProtocolBillingCharger sets the per-image-output inline charge hook on
+// the request body. The hook atomically deducts 1 billing unit before each
+// image is persisted to disk, preventing gallery writes when balance/quota is
+// insufficient. The chargeIndex counter ensures unique charge keys per output.
+func (a *App) attachProtocolBillingCharger(body map[string]any, identity service.Identity, billingRef service.BillingReference) {
+	if a == nil || a.billing == nil || body == nil {
 		return
 	}
-	a.billing.Settle(reservation, consumed)
+	if identity.Role != service.AuthRoleUser {
+		return
+	}
+	var mu sync.Mutex
+	chargeIndex := 0
+	body[protocol.ImageOutputChargePayloadKey] = func(index int) error {
+		mu.Lock()
+		idx := chargeIndex
+		chargeIndex++
+		mu.Unlock()
+		ref := protocolChargeReference(billingRef, "inline", idx)
+		return a.billing.Charge(identity, 1, ref)
+	}
+}
+
+func protocolChargeReference(ref service.BillingReference, scope string, index int) service.BillingReference {
+	if strings.TrimSpace(ref.ChargeKey) == "" && ref.Endpoint != "" {
+		keyID := firstNonEmpty(ref.RequestID, ref.TaskID, util.NewHex(12))
+		ref.ChargeKey = strings.Join([]string{"protocol", ref.Endpoint, keyID, scope, fmt.Sprint(index)}, ":")
+	}
+	ref.OutputIndex = index
+	return ref
 }
 
 func (a *App) decorateImageList(payload map[string]any) {
@@ -1680,8 +1710,6 @@ func billableProtocolStreamItemCount(endpoint string, item map[string]any) int {
 			if count := countResponseOutputItemImages(util.StringMap(item["item"])); count > 0 {
 				return count
 			}
-		case "response.completed":
-			return countResponseOutputImages(util.StringMap(item["response"]))
 		}
 	}
 	return 0

@@ -873,7 +873,7 @@ func TestProtocolImageBillingStandardBalanceBoundary(t *testing.T) {
 	}
 	state := profileBillingState(t, app, rawKey)
 	standard := util.StringMap(state["standard"])
-	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 4 || util.ToInt(state["available"], -1) != 0 {
+	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 4 || util.ToInt(state["available"], -1) != 0 {
 		t.Fatalf("billing after exact-balance image generation = %#v", state)
 	}
 
@@ -911,13 +911,83 @@ func TestProtocolImageBillingRejectsBeforeUpstream(t *testing.T) {
 	}
 	state := profileBillingState(t, app, rawKey)
 	standard := util.StringMap(state["standard"])
-	if util.ToInt(standard["balance"], -1) != 3 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 3 {
+	if util.ToInt(standard["balance"], -1) != 3 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 3 {
 		t.Fatalf("billing after rejected image generation = %#v", state)
 	}
 }
 
+func TestProtocolImageBillingChargesBeforeDelivery(t *testing.T) {
+	t.Run("non-stream does not return generated image when delivery charge fails", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "1", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		userID := util.Clean(user["id"])
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if _, err := app.billing.ChargeUserID(userID, 1, service.BillingReference{ChargeKey: "external:protocol:non-stream-drain"}); err != nil {
+				t.Errorf("external ChargeUserID() error = %v", err)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("image generation delivery charge status = %d body = %s", res.Code, res.Body.String())
+		}
+		if strings.Contains(res.Body.String(), "https://example.test/1.png") || strings.Contains(res.Body.String(), "image-1") {
+			t.Fatalf("unpaid generated image leaked in response body: %s", res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing after failed delivery charge = %#v", state)
+		}
+	})
+
+	t.Run("stream stops before unpaid image event", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "1", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		userID := util.Clean(user["id"])
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if _, err := app.billing.ChargeUserID(userID, 1, service.BillingReference{ChargeKey: "external:protocol:stream-drain"}); err != nil {
+				t.Errorf("external ChargeUserID() error = %v", err)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url","stream":true}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		body := res.Body.String()
+		if res.Code != http.StatusOK {
+			t.Fatalf("stream image generation status = %d body = %s", res.Code, body)
+		}
+		if strings.Contains(body, "image.generation.result") || strings.Contains(body, "https://example.test/1.png") || strings.Contains(body, "image-1") {
+			t.Fatalf("unpaid generated image leaked in stream body: %s", body)
+		}
+		if !strings.Contains(body, `"code":"user_balance_insufficient"`) || !strings.Contains(body, "data: [DONE]") {
+			t.Fatalf("stream body missing billing error or done marker: %s", body)
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing after failed stream delivery charge = %#v", state)
+		}
+	})
+}
+
 func TestProtocolBillingChatAndResponsesEquivalenceClasses(t *testing.T) {
-	t.Run("text chat does not reserve billing", func(t *testing.T) {
+	t.Run("text chat does not require billing", func(t *testing.T) {
 		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
 		defer app.Close()
 		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
@@ -934,12 +1004,12 @@ func TestProtocolBillingChatAndResponsesEquivalenceClasses(t *testing.T) {
 		}
 		state := profileBillingState(t, app, rawKey)
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
 			t.Fatalf("billing changed after text chat = %#v", state)
 		}
 	})
 
-	t.Run("image chat reserves and consumes actual outputs", func(t *testing.T) {
+	t.Run("image chat consumes actual outputs", func(t *testing.T) {
 		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "2", "0", service.BillingPeriodMonthly)
 		defer app.Close()
 		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
@@ -962,7 +1032,7 @@ func TestProtocolBillingChatAndResponsesEquivalenceClasses(t *testing.T) {
 		}
 		state := profileBillingState(t, app, rawKey)
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 1 {
+		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 1 {
 			t.Fatalf("billing after partial image chat = %#v", state)
 		}
 	})
@@ -992,7 +1062,7 @@ func TestProtocolBillingChatAndResponsesEquivalenceClasses(t *testing.T) {
 		}
 	})
 
-	t.Run("text responses do not reserve billing", func(t *testing.T) {
+	t.Run("text responses do not require billing", func(t *testing.T) {
 		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
 		defer app.Close()
 		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
@@ -1009,7 +1079,7 @@ func TestProtocolBillingChatAndResponsesEquivalenceClasses(t *testing.T) {
 		}
 		state := profileBillingState(t, app, rawKey)
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
 			t.Fatalf("billing changed after text responses = %#v", state)
 		}
 	})

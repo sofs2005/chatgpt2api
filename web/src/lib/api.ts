@@ -376,7 +376,7 @@ export type CreationTask = {
   created_at: string;
   updated_at: string;
   data?: CreationTaskData[];
-  output_statuses?: ("queued" | "running" | "success")[];
+  output_statuses?: ("queued" | "running" | "success" | "error" | "cancelled")[];
   error?: string;
   output_type?: "text";
   visibility?: ImageVisibility;
@@ -462,7 +462,6 @@ export type BillingPeriod = "daily" | "weekly" | "monthly";
 
 export type BillingStandardState = {
   balance: number;
-  balance_reserved: number;
   lifetime_consumed: number;
   available_balance?: number;
 };
@@ -470,7 +469,6 @@ export type BillingStandardState = {
 export type BillingSubscriptionState = {
   quota_limit: number;
   quota_used: number;
-  quota_reserved: number;
   manual_delta: number;
   quota_period: BillingPeriod;
   quota_period_started_at?: string;
@@ -497,7 +495,7 @@ export type BillingAdjustment = {
   billing_type: BillingType;
   type: string;
   amount?: number;
-  reason: string;
+  reason?: string;
   before?: BillingState | Record<string, unknown>;
   after?: BillingState | Record<string, unknown>;
   created_at: string;
@@ -505,7 +503,7 @@ export type BillingAdjustment = {
 
 export type BillingAdjustmentPayload = {
   type: string;
-  reason: string;
+  reason?: string;
   amount?: number;
   balance?: number;
   quota_limit?: number;

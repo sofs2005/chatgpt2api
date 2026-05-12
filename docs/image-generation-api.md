@@ -328,6 +328,8 @@ curl http://localhost:3000/api/creation-tasks/img-task-20260511-001/cancel \
 | `queued` | 单张输出等待开始。 |
 | `running` | 单张输出正在生成。 |
 | `success` | 单张输出已产出图片或文本结果。 |
+| `error` | 单张输出失败，或生成成功但本地余额/配额扣减失败因此未交付。 |
+| `cancelled` | 单张输出随任务终止。 |
 
 `output_statuses` 的长度通常与 `n` 一致，适合 Web 端逐张展示占位和进度。
 

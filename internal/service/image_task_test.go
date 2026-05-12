@@ -645,12 +645,12 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 		}
 		state := billing.Get("alice")
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 2 || util.ToInt(state["available"], -1) != 2 {
+		if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["lifetime_consumed"], -1) != 2 || util.ToInt(state["available"], -1) != 2 {
 			t.Fatalf("billing state after partial success = %#v", state)
 		}
 	})
 
-	t.Run("handler failure releases reservation", func(t *testing.T) {
+	t.Run("handler failure consumes zero", func(t *testing.T) {
 		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
 				return map[string]any{"data": []map[string]any{{"url": "https://example.test/first.png"}}}, errors.New("upstream failed")
@@ -667,12 +667,12 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 		waitForTaskStatus(t, svc, user, "failed", TaskStatusError)
 		state := billing.Get("alice")
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 {
+		if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["lifetime_consumed"], -1) != 0 {
 			t.Fatalf("billing state after failure = %#v", state)
 		}
 	})
 
-	t.Run("cancel releases reservation", func(t *testing.T) {
+	t.Run("cancel consumes zero", func(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
 		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
@@ -714,7 +714,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 		}
 		state := billing.Get("alice")
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 {
+		if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["lifetime_consumed"], -1) != 0 {
 			t.Fatalf("billing state after cancel = %#v", state)
 		}
 	})
@@ -736,7 +736,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 		waitForTaskStatus(t, svc, user, "text", TaskStatusSuccess)
 		state := billing.Get("alice")
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 {
+		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["lifetime_consumed"], -1) != 0 {
 			t.Fatalf("billing state after text output = %#v", state)
 		}
 	})
@@ -761,8 +761,95 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 		waitForTaskStatus(t, svc, user, "subscription", TaskStatusSuccess)
 		state := billing.Get("alice")
 		sub := util.StringMap(state["subscription"])
-		if util.ToInt(sub["quota_used"], -1) != 1 || util.ToInt(sub["quota_reserved"], -1) != 0 || util.ToInt(state["available"], -1) != 1 {
+		if util.ToInt(sub["quota_used"], -1) != 1 || util.ToInt(state["available"], -1) != 1 {
 			t.Fatalf("billing state after subscription task = %#v", state)
+		}
+	})
+
+	t.Run("precharge protects running task from delivery-time drain", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+			func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+				close(started)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return map[string]any{"data": []map[string]any{
+					{"url": "https://example.test/first.png"},
+					{"url": "https://example.test/second.png"},
+				}}, nil
+			},
+			failingImageTaskHandler,
+			failingImageTaskHandler,
+			func() int { return 30 },
+		)
+		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 3})
+		svc.SetBillingService(billing)
+		if _, err := svc.SubmitGeneration(context.Background(), user, "delivery-drain-protected", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
+			t.Fatalf("SubmitGeneration() error = %v", err)
+		}
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for task start")
+		}
+		if err := billing.Charge(user, 1, BillingReference{ChargeKey: "external:drain:partial"}); err != nil {
+			t.Fatalf("external Charge() error = %v", err)
+		}
+		close(release)
+		waitForTaskStatus(t, svc, user, "delivery-drain-protected", TaskStatusSuccess)
+		got := svc.ListTasks(user, []string{"delivery-drain-protected"})
+		item := got["items"].([]map[string]any)[0]
+		data := item["data"].([]map[string]any)
+		if len(data) != 2 || data[0]["url"] != "https://example.test/first.png" || data[1]["url"] != "https://example.test/second.png" {
+			t.Fatalf("task lost prepaid outputs = %#v", item)
+		}
+		if util.ToInt(item["billing_consumed_amount"], -1) != 2 {
+			t.Fatalf("task billing = %#v", item)
+		}
+		statuses := util.AsStringSlice(item["output_statuses"])
+		if len(statuses) != 2 || statuses[0] != TaskStatusSuccess || statuses[1] != TaskStatusSuccess {
+			t.Fatalf("output_statuses = %#v, want both prepaid outputs successful", statuses)
+		}
+		state := billing.Get("alice")
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 3 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing state after delivery-time drain = %#v", state)
+		}
+	})
+
+	t.Run("insufficient balance rejects before queueing", func(t *testing.T) {
+		handlerCalled := false
+		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+			func(context.Context, Identity, map[string]any) (map[string]any, error) {
+				handlerCalled = true
+				return map[string]any{"data": []map[string]any{{"url": "https://example.test/unpaid.png"}}}, nil
+			},
+			failingImageTaskHandler,
+			failingImageTaskHandler,
+			func() int { return 30 },
+		)
+		billing := newTestBillingService(t, testBillingDefaults{standardBalance: 0})
+		svc.SetBillingService(billing)
+		_, err := svc.SubmitGeneration(context.Background(), user, "delivery-drain-empty", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil)
+		var limitErr BillingLimitError
+		if !errors.As(err, &limitErr) || limitErr.Code != "user_balance_insufficient" {
+			t.Fatalf("SubmitGeneration() error = %#v", err)
+		}
+		if handlerCalled {
+			t.Fatal("handler was called for rejected image task")
+		}
+		got := svc.ListTasks(user, []string{"delivery-drain-empty"})
+		if len(got["items"].([]map[string]any)) != 0 || len(got["missing_ids"].([]string)) != 1 {
+			t.Fatalf("rejected image task should not be queued: %#v", got)
+		}
+		state := billing.Get("alice")
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 {
+			t.Fatalf("billing state after rejected task = %#v", state)
 		}
 	})
 }
@@ -771,7 +858,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 	user := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
 	messages := []map[string]any{{"role": "user", "content": "hello"}}
 
-	t.Run("pure text chat does not reserve billing", func(t *testing.T) {
+	t.Run("pure text chat does not require billing", func(t *testing.T) {
 		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
 			failingImageTaskHandler,
 			failingImageTaskHandler,
@@ -792,7 +879,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 		}
 	})
 
-	t.Run("billable chat reserves and consumes actual image outputs", func(t *testing.T) {
+	t.Run("billable chat consumes actual image outputs", func(t *testing.T) {
 		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
 			failingImageTaskHandler,
 			failingImageTaskHandler,
@@ -809,7 +896,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 		waitForTaskStatus(t, svc, user, "image-chat", TaskStatusSuccess)
 		state := billing.Get("alice")
 		standard := util.StringMap(state["standard"])
-		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 {
+		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["lifetime_consumed"], -1) != 1 {
 			t.Fatalf("image chat billing = %#v", state)
 		}
 	})

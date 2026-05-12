@@ -418,7 +418,6 @@ function ProfileContent({ session }: { session: StoredAuthSession }) {
               {currentSession.billing?.type === "standard" && !currentSession.billing.unlimited ? (
                 <>
                   <InfoRow label="当前余额" value={String(currentSession.billing.standard?.balance ?? 0)} />
-                  <InfoRow label="预留余额" value={String(currentSession.billing.standard?.balance_reserved ?? 0)} />
                 </>
               ) : null}
             </CardContent>

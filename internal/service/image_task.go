@@ -27,6 +27,8 @@ const (
 	imageOutputCallbackPayloadKey      = "image_output_callback"
 	imageOutputSlotAcquirerPayloadKey  = "image_output_slot_acquirer"
 	imageTaskBillingBillablePayloadKey = "billing_billable"
+	imageTaskBillingChargedAmountKey   = "billing_charged_amount"
+	imageTaskBillingChargeKey          = "billing_charge_key"
 )
 
 type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
@@ -112,25 +114,32 @@ func (s *ImageTaskService) SetBillingService(billing *BillingService) {
 	if billing == nil {
 		return
 	}
+	var settleKeys []string
 	s.mu.Lock()
 	changed := false
 	for key, task := range s.tasks {
-		if util.Clean(task["billing_reservation_id"]) == "" || isActiveTaskStatus(util.Clean(task["status"])) {
+		taskChanged := false
+		if _, ok := task["billing_consumed_amount"]; !ok && !isActiveTaskStatus(util.Clean(task["status"])) && isBillableImageTaskMode(util.Clean(task["mode"]), task) && util.ToInt(task[imageTaskBillingChargedAmountKey], 0) > 0 {
+			settleKeys = append(settleKeys, key)
 			continue
 		}
-		delete(task, "billing_reservation_id")
-		delete(task, "billing_reserved_amount")
-		if _, ok := task["billing_consumed_amount"]; !ok {
+		if _, ok := task["billing_consumed_amount"]; !ok && !isActiveTaskStatus(util.Clean(task["status"])) && isBillableImageTaskMode(util.Clean(task["mode"]), task) {
 			task["billing_consumed_amount"] = billableTaskOutputCount(task)
+			taskChanged = true
 		}
-		task["updated_at"] = util.NowLocal()
-		s.tasks[key] = task
-		changed = true
+		if taskChanged {
+			task["updated_at"] = util.NowLocal()
+			s.tasks[key] = task
+			changed = true
+		}
 	}
 	if changed {
 		_ = s.saveLocked()
 	}
 	s.mu.Unlock()
+	for _, key := range settleKeys {
+		s.settleTaskBilling(key)
+	}
 }
 
 func (s *ImageTaskService) SubmitGeneration(ctx context.Context, identity Identity, clientTaskID, prompt, model, size, quality, baseURL string, n int, messages any, visibilityValues ...string) (map[string]any, error) {
@@ -318,17 +327,10 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 		return result, nil
 	}
 	count := taskCount(mode, payload)
-	var reservation *BillingReservation
-	if s.billing != nil && isBillableImageTaskMode(mode, payload) {
-		var err error
-		reservation, err = s.billing.Reserve(identity, count, BillingReference{
-			Endpoint:       creationTaskBillingEndpoint(mode),
-			Model:          firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto),
-			TaskID:         taskID,
-			CredentialID:   identity.CredentialID,
-			CredentialName: identity.CredentialName,
-		})
-		if err != nil {
+	billingUser := billingUserID(identity)
+	shouldPrechargeBilling := s.billing != nil && identity.Role == AuthRoleUser && billingUser != "" && isBillableImageTaskMode(mode, payload)
+	if shouldPrechargeBilling {
+		if err := s.billing.CheckAvailable(identity, count); err != nil {
 			if cleaned {
 				_ = s.saveLocked()
 			}
@@ -337,21 +339,35 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 		}
 	}
 	if err := s.checkUserTaskLimitsLocked(identity, owner, count, time.Now()); err != nil {
-		if reservation != nil {
-			s.billing.Release(reservation)
-		}
 		if cleaned {
 			_ = s.saveLocked()
 		}
 		s.mu.Unlock()
 		return nil, err
 	}
+	billingChargedAmount := 0
+	billingChargeKey := ""
+	if shouldPrechargeBilling {
+		billingChargeKey = imageTaskBillingChargeKeyFor(owner, taskID, "precharge")
+		model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
+		if _, err := s.billing.ChargeUserID(billingUser, count, imageTaskBillingReference(mode, taskID, model, billingChargeKey)); err != nil {
+			if cleaned {
+				_ = s.saveLocked()
+			}
+			s.mu.Unlock()
+			return nil, err
+		}
+		billingChargedAmount = count
+	}
 	taskCtx, cancel := context.WithCancel(context.Background())
 	outputFormat := NormalizeImageOutputFormat(util.Clean(payload["output_format"]))
 	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": outputFormat, "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
-	if reservation != nil {
-		task["billing_reservation_id"] = reservation.ID
-		task["billing_reserved_amount"] = reservation.Amount
+	if billingChargedAmount > 0 {
+		task[imageTaskBillingChargedAmountKey] = billingChargedAmount
+		task[imageTaskBillingChargeKey] = billingChargeKey
+	}
+	if util.ToBool(payload[imageTaskBillingBillablePayloadKey]) {
+		task[imageTaskBillingBillablePayloadKey] = true
 	}
 	if mode == "generate" || mode == "edit" {
 		task["output_statuses"] = initialImageOutputStatuses(count)
@@ -473,16 +489,7 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 	}
 	updates := map[string]any{"status": TaskStatusSuccess, "data": data, "error": ""}
 	if mode == "generate" || mode == "edit" {
-		statuses := initialImageOutputStatuses(taskCount(mode, payload))
-		for index, item := range data {
-			if index >= len(statuses) {
-				break
-			}
-			if hasImageTaskOutputData(item) {
-				statuses[index] = "success"
-			}
-		}
-		updates["output_statuses"] = statuses
+		updates["output_statuses"] = finalImageOutputStatuses(taskCount(mode, payload), data, TaskStatusError)
 	}
 	if outputType != "" {
 		updates["output_type"] = outputType
@@ -704,31 +711,87 @@ func (s *ImageTaskService) updateImageTaskPartialData(key string, data []map[str
 	return true
 }
 
+type imageTaskBillingSettlement struct {
+	owner        string
+	taskID       string
+	mode         string
+	model        string
+	chargeKey    string
+	refundKey    string
+	charged      int
+	consumed     int
+	refundAmount int
+}
+
 func (s *ImageTaskService) settleTaskBilling(key string) {
-	if s.billing == nil {
+	settlement, ok := s.pendingTaskBillingSettlement(key)
+	if !ok {
 		return
 	}
-	reservationID := ""
-	consumed := 0
-	s.mu.Lock()
-	task := s.tasks[key]
-	if task != nil {
-		reservationID = util.Clean(task["billing_reservation_id"])
-		if reservationID != "" {
-			if task["status"] == TaskStatusSuccess {
-				consumed = billableTaskOutputCount(task)
-			}
-			delete(task, "billing_reservation_id")
-			delete(task, "billing_reserved_amount")
-			task["billing_consumed_amount"] = consumed
-			task["updated_at"] = util.NowLocal()
-			_ = s.saveLocked()
+	if settlement.refundAmount > 0 {
+		if s.billing == nil {
+			return
+		}
+		if _, err := s.billing.RefundUserID(settlement.owner, settlement.refundAmount, BillingReference{
+			Endpoint:     creationTaskBillingEndpoint(settlement.mode),
+			Model:        settlement.model,
+			TaskID:       settlement.taskID,
+			ChargeKey:    settlement.refundKey,
+			RefundForKey: settlement.chargeKey,
+		}); err != nil {
+			return
 		}
 	}
-	s.mu.Unlock()
-	if reservationID != "" {
-		s.billing.SettleReservationID(reservationID, consumed)
+	s.finishTaskBillingSettlement(key, settlement.consumed)
+}
+
+func (s *ImageTaskService) pendingTaskBillingSettlement(key string) (imageTaskBillingSettlement, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task := s.tasks[key]
+	if task == nil || !isBillableImageTaskMode(util.Clean(task["mode"]), task) || util.ToInt(task["billing_consumed_amount"], -1) >= 0 {
+		return imageTaskBillingSettlement{}, false
 	}
+	mode := util.Clean(task["mode"])
+	charged := util.ToInt(task[imageTaskBillingChargedAmountKey], 0)
+	consumed := 0
+	if task["status"] == TaskStatusSuccess {
+		consumed = billableTaskOutputCount(task)
+	}
+	if charged > 0 && consumed > charged {
+		consumed = charged
+	}
+	owner := util.Clean(task["owner_id"])
+	taskID := util.Clean(task["id"])
+	chargeKey := util.Clean(task[imageTaskBillingChargeKey])
+	if chargeKey == "" && charged > 0 {
+		chargeKey = imageTaskBillingChargeKeyFor(owner, taskID, "precharge")
+	}
+	return imageTaskBillingSettlement{
+		owner:        owner,
+		taskID:       taskID,
+		mode:         mode,
+		model:        firstNonEmpty(util.Clean(task["model"]), util.ImageModelAuto),
+		chargeKey:    chargeKey,
+		refundKey:    imageTaskBillingChargeKeyFor(owner, taskID, "refund"),
+		charged:      charged,
+		consumed:     consumed,
+		refundAmount: max(0, charged-consumed),
+	}, true
+}
+
+func (s *ImageTaskService) finishTaskBillingSettlement(key string, consumed int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task := s.tasks[key]
+	if task == nil || util.ToInt(task["billing_consumed_amount"], -1) >= 0 {
+		return
+	}
+	delete(task, imageTaskBillingChargedAmountKey)
+	delete(task, imageTaskBillingChargeKey)
+	task["billing_consumed_amount"] = max(0, consumed)
+	task["updated_at"] = util.NowLocal()
+	_ = s.saveLocked()
 }
 
 func (s *ImageTaskService) removeTaskCancel(key string) {
@@ -784,9 +847,14 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 		if outputType := util.Clean(task["output_type"]); outputType != "" {
 			normalized["output_type"] = outputType
 		}
-		if reservationID := util.Clean(task["billing_reservation_id"]); reservationID != "" {
-			normalized["billing_reservation_id"] = reservationID
-			normalized["billing_reserved_amount"] = util.ToInt(task["billing_reserved_amount"], 0)
+		if util.ToBool(task[imageTaskBillingBillablePayloadKey]) {
+			normalized[imageTaskBillingBillablePayloadKey] = true
+		}
+		if charged := util.ToInt(task[imageTaskBillingChargedAmountKey], 0); charged > 0 {
+			normalized[imageTaskBillingChargedAmountKey] = charged
+		}
+		if chargeKey := util.Clean(task[imageTaskBillingChargeKey]); chargeKey != "" {
+			normalized[imageTaskBillingChargeKey] = chargeKey
 		}
 		if consumed := util.ToInt(task["billing_consumed_amount"], -1); consumed >= 0 {
 			normalized["billing_consumed_amount"] = consumed
@@ -821,14 +889,6 @@ func (s *ImageTaskService) recoverUnfinishedLocked() bool {
 	changed := false
 	for _, task := range s.tasks {
 		if task["status"] == TaskStatusQueued || task["status"] == TaskStatusRunning {
-			if reservationID := util.Clean(task["billing_reservation_id"]); reservationID != "" {
-				if s.billing != nil {
-					s.billing.ReleaseReservationID(reservationID)
-				}
-				delete(task, "billing_reservation_id")
-				delete(task, "billing_reserved_amount")
-				task["billing_consumed_amount"] = 0
-			}
 			task["status"] = TaskStatusError
 			task["error"] = "服务已重启，未完成的任务已中断"
 			task["updated_at"] = util.NowLocal()
@@ -889,9 +949,6 @@ func publicTask(task map[string]any) map[string]any {
 	}
 	if consumed := util.ToInt(task["billing_consumed_amount"], -1); consumed >= 0 {
 		item["billing_consumed_amount"] = consumed
-	}
-	if reserved := util.ToInt(task["billing_reserved_amount"], 0); reserved > 0 {
-		item["billing_reserved_amount"] = reserved
 	}
 	if visibility := util.Clean(task["visibility"]); visibility != "" {
 		item["visibility"] = visibility
@@ -969,7 +1026,7 @@ func normalizedImageOutputStatuses(mode string, count int, value any) []string {
 		status := "queued"
 		if index < len(source) {
 			switch source[index] {
-			case "queued", "running", "success":
+			case TaskStatusQueued, TaskStatusRunning, TaskStatusSuccess, TaskStatusError, TaskStatusCancelled:
 				status = source[index]
 			}
 		}
@@ -1020,6 +1077,19 @@ func creationTaskBillingEndpoint(mode string) string {
 		return "/api/creation-tasks/chat-completions"
 	default:
 		return "/api/creation-tasks/image-generations"
+	}
+}
+
+func imageTaskBillingChargeKeyFor(owner, taskID, scope string) string {
+	return strings.Join([]string{"task", strings.TrimSpace(owner), strings.TrimSpace(taskID), strings.TrimSpace(scope)}, ":")
+}
+
+func imageTaskBillingReference(mode, taskID, model, chargeKey string) BillingReference {
+	return BillingReference{
+		Endpoint:  creationTaskBillingEndpoint(mode),
+		Model:     model,
+		TaskID:    taskID,
+		ChargeKey: chargeKey,
 	}
 }
 

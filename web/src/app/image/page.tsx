@@ -449,12 +449,12 @@ function updateStoredImage(image: StoredImage, updates: Partial<StoredImage>): S
   return STORED_IMAGE_FIELDS.every((field) => image[field] === next[field]) ? image : next;
 }
 
-function creationTaskImageStatus(task: CreationTask, dataIndex = 0): "queued" | "running" | "success" | undefined {
+function creationTaskImageStatus(task: CreationTask, dataIndex = 0): "queued" | "running" | "success" | "error" | "cancelled" | undefined {
   const outputStatus = task.output_statuses?.[dataIndex];
-  if (outputStatus === "queued" || outputStatus === "running" || outputStatus === "success") {
+  if (outputStatus === "queued" || outputStatus === "running" || outputStatus === "success" || outputStatus === "error" || outputStatus === "cancelled") {
     return outputStatus;
   }
-  if (task.status === "queued" || task.status === "running" || task.status === "success") {
+  if (task.status === "queued" || task.status === "running" || task.status === "success" || task.status === "error" || task.status === "cancelled") {
     return task.status;
   }
   return undefined;
@@ -500,6 +500,15 @@ function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex
     const item = task.data?.[dataIndex];
     if (!item?.b64_json && !item?.url) {
       if (dataIndex > 0 && image.taskId !== image.id) {
+        const slotStatus = creationTaskImageStatus(task, dataIndex);
+        if (slotStatus === "error" || slotStatus === "cancelled") {
+          return updateStoredImage(image, {
+            taskId: task.id,
+            taskStatus: slotStatus,
+            status: slotStatus === "cancelled" ? "cancelled" : "error",
+            error: slotStatus === "cancelled" ? task.error || "任务已终止" : formatCreationTaskErrorMessage(task.error || "生成失败"),
+          });
+        }
         return updateStoredImage(image, {
           taskId: image.id,
           taskStatus: "queued",

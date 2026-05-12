@@ -41,12 +41,21 @@ type BillingReference struct {
 	RequestID      string
 	CredentialID   string
 	CredentialName string
+	ChargeKey      string
+	RefundForKey   string
+	OutputIndex    int
 }
 
-type BillingReservation struct {
-	ID     string
-	UserID string
-	Amount int
+type BillingChargeResult struct {
+	Charged        bool
+	AlreadyCharged bool
+	Billing        map[string]any
+}
+
+type BillingRefundResult struct {
+	Refunded        bool
+	AlreadyRefunded bool
+	Billing         map[string]any
 }
 
 type BillingLimitError struct {
@@ -92,7 +101,6 @@ type BillingService struct {
 	defaults BillingDefaults
 
 	states       map[string]map[string]any
-	reservations map[string]map[string]any
 	adjustments  []map[string]any
 	transactions []map[string]any
 }
@@ -101,17 +109,13 @@ func NewBillingService(dataDir string, backend storage.Backend, defaults Billing
 	path := filepath.Join(dataDir, billingDocumentName)
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 	s := &BillingService{
-		path:         path,
-		store:        jsonDocumentStoreFromBackend(backend),
-		defaults:     defaults,
-		states:       map[string]map[string]any{},
-		reservations: map[string]map[string]any{},
+		path:     path,
+		store:    jsonDocumentStoreFromBackend(backend),
+		defaults: defaults,
+		states:   map[string]map[string]any{},
 	}
 	s.mu.Lock()
 	s.loadLocked()
-	if s.releaseRecoveredReservationsLocked() {
-		_ = s.saveLocked()
-	}
 	s.mu.Unlock()
 	return s
 }
@@ -162,13 +166,69 @@ func (s *BillingService) GetMany(userIDs []string) map[string]map[string]any {
 	return out
 }
 
-func (s *BillingService) Reserve(identity Identity, amount int, ref BillingReference) (*BillingReservation, error) {
+func (s *BillingService) CheckAvailable(identity Identity, amount int) error {
 	if s == nil || identity.Role != AuthRoleUser || amount <= 0 {
-		return nil, nil
+		return nil
 	}
 	userID := billingUserID(identity)
 	if userID == "" {
-		return nil, nil
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, changed := s.ensureStateLocked(userID)
+	if s.resetSubscriptionIfDueLocked(state, time.Now()) {
+		changed = true
+	}
+	if util.ToBool(state["unlimited"]) {
+		if changed {
+			_ = s.saveLocked()
+		}
+		return nil
+	}
+	billingType := normalizeBillingType(util.Clean(state["billing_type"]))
+	switch billingType {
+	case BillingTypeStandard:
+		standard := billingStandardState(state)
+		if availableStandardBalance(standard) < amount {
+			if changed {
+				_ = s.saveLocked()
+			}
+			return NewBillingLimitError(BillingTypeStandard)
+		}
+	case BillingTypeSubscription:
+		subscription := billingSubscriptionState(state)
+		if availableSubscriptionQuota(subscription) < amount {
+			if changed {
+				_ = s.saveLocked()
+			}
+			return NewBillingLimitError(BillingTypeSubscription)
+		}
+	default:
+		return fmt.Errorf("unsupported billing type: %s", billingType)
+	}
+	if changed {
+		_ = s.saveLocked()
+	}
+	return nil
+}
+
+func (s *BillingService) Charge(identity Identity, amount int, ref BillingReference) error {
+	if identity.Role != AuthRoleUser {
+		return nil
+	}
+	_, err := s.ChargeUserID(billingUserID(identity), amount, ref)
+	return err
+}
+
+func (s *BillingService) ChargeUserID(userID string, amount int, ref BillingReference) (BillingChargeResult, error) {
+	return s.chargeUserID(strings.TrimSpace(userID), amount, ref)
+}
+
+func (s *BillingService) chargeUserID(userID string, amount int, ref BillingReference) (BillingChargeResult, error) {
+	result := BillingChargeResult{}
+	if s == nil || userID == "" || amount <= 0 {
+		return result, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -176,88 +236,114 @@ func (s *BillingService) Reserve(identity Identity, amount int, ref BillingRefer
 	s.resetSubscriptionIfDueLocked(state, time.Now())
 	if util.ToBool(state["unlimited"]) {
 		_ = s.saveLocked()
-		return nil, nil
+		result.Billing = publicBillingState(state)
+		return result, nil
+	}
+	chargeKey := strings.TrimSpace(ref.ChargeKey)
+	if chargeKey != "" && s.hasChargeKeyLocked(userID, chargeKey) {
+		result.AlreadyCharged = true
+		result.Billing = publicBillingState(state)
+		return result, nil
 	}
 	billingType := normalizeBillingType(util.Clean(state["billing_type"]))
 	switch billingType {
 	case BillingTypeStandard:
 		standard := billingStandardState(state)
 		if availableStandardBalance(standard) < amount {
-			_ = s.saveLocked()
-			return nil, NewBillingLimitError(BillingTypeStandard)
+			return result, NewBillingLimitError(BillingTypeStandard)
 		}
-		standard["balance_reserved"] = intField(standard, "balance_reserved") + amount
+		standard["balance"] = intField(standard, "balance") - amount
+		standard["lifetime_consumed"] = intField(standard, "lifetime_consumed") + amount
 	case BillingTypeSubscription:
 		subscription := billingSubscriptionState(state)
 		if availableSubscriptionQuota(subscription) < amount {
-			_ = s.saveLocked()
-			return nil, NewBillingLimitError(BillingTypeSubscription)
+			return result, NewBillingLimitError(BillingTypeSubscription)
 		}
-		subscription["quota_reserved"] = intField(subscription, "quota_reserved") + amount
+		subscription["quota_used"] = intField(subscription, "quota_used") + amount
 	default:
-		return nil, fmt.Errorf("unsupported billing type: %s", billingType)
+		return result, fmt.Errorf("unsupported billing type: %s", billingType)
 	}
-	now := util.NowISO()
-	state["updated_at"] = now
-	id := "billing_res_" + util.NewHex(18)
-	reservation := map[string]any{
-		"id":              id,
-		"user_id":         userID,
-		"billing_type":    billingType,
-		"unit":            BillingUnitImage,
-		"amount":          amount,
-		"endpoint":        strings.TrimSpace(ref.Endpoint),
-		"model":           strings.TrimSpace(ref.Model),
-		"task_id":         strings.TrimSpace(ref.TaskID),
-		"request_id":      strings.TrimSpace(ref.RequestID),
-		"credential_id":   strings.TrimSpace(ref.CredentialID),
-		"credential_name": strings.TrimSpace(ref.CredentialName),
-		"created_at":      now,
-	}
-	s.reservations[id] = reservation
+	state["updated_at"] = util.NowISO()
 	s.addTransactionLocked(map[string]any{
 		"user_id":         userID,
 		"billing_type":    billingType,
 		"unit":            BillingUnitImage,
-		"action":          "reserve",
-		"reserved_amount": amount,
+		"action":          "charge",
+		"consumed_amount": amount,
+		"charge_key":      chargeKey,
 		"endpoint":        ref.Endpoint,
 		"model":           ref.Model,
 		"task_id":         ref.TaskID,
 		"request_id":      ref.RequestID,
+		"output_index":    ref.OutputIndex,
 	})
+	result.Charged = true
+	result.Billing = publicBillingState(state)
 	if err := s.saveLocked(); err != nil {
-		return nil, err
+		return result, err
 	}
-	return &BillingReservation{ID: id, UserID: userID, Amount: amount}, nil
+	return result, nil
 }
 
-func (s *BillingService) Settle(reservation *BillingReservation, consumed int) {
-	if s == nil || reservation == nil || strings.TrimSpace(reservation.ID) == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.settleLocked(reservation.ID, consumed)
-	_ = s.saveLocked()
-}
-
-func (s *BillingService) Release(reservation *BillingReservation) {
-	s.Settle(reservation, 0)
-}
-
-func (s *BillingService) SettleReservationID(reservationID string, consumed int) {
-	if s == nil || strings.TrimSpace(reservationID) == "" {
-		return
+func (s *BillingService) RefundUserID(userID string, amount int, ref BillingReference) (BillingRefundResult, error) {
+	result := BillingRefundResult{}
+	userID = strings.TrimSpace(userID)
+	if s == nil || userID == "" || amount <= 0 {
+		return result, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.settleLocked(reservationID, consumed)
-	_ = s.saveLocked()
-}
-
-func (s *BillingService) ReleaseReservationID(reservationID string) {
-	s.SettleReservationID(reservationID, 0)
+	state, _ := s.ensureStateLocked(userID)
+	s.resetSubscriptionIfDueLocked(state, time.Now())
+	if util.ToBool(state["unlimited"]) {
+		result.Billing = publicBillingState(state)
+		return result, nil
+	}
+	refundKey := strings.TrimSpace(ref.ChargeKey)
+	if refundKey != "" && s.hasRefundKeyLocked(userID, refundKey) {
+		result.AlreadyRefunded = true
+		result.Billing = publicBillingState(state)
+		return result, nil
+	}
+	refundForKey := strings.TrimSpace(ref.RefundForKey)
+	amount = s.refundableAmountLocked(userID, amount, refundForKey)
+	if amount <= 0 {
+		result.Billing = publicBillingState(state)
+		return result, nil
+	}
+	billingType := normalizeBillingType(util.Clean(state["billing_type"]))
+	switch billingType {
+	case BillingTypeStandard:
+		standard := billingStandardState(state)
+		standard["balance"] = intField(standard, "balance") + amount
+		standard["lifetime_consumed"] = max(0, intField(standard, "lifetime_consumed")-amount)
+	case BillingTypeSubscription:
+		subscription := billingSubscriptionState(state)
+		subscription["quota_used"] = max(0, intField(subscription, "quota_used")-amount)
+	default:
+		return result, fmt.Errorf("unsupported billing type: %s", billingType)
+	}
+	state["updated_at"] = util.NowISO()
+	s.addTransactionLocked(map[string]any{
+		"user_id":               userID,
+		"billing_type":          billingType,
+		"unit":                  BillingUnitImage,
+		"action":                "refund",
+		"refunded_amount":       amount,
+		"charge_key":            refundKey,
+		"refund_for_charge_key": refundForKey,
+		"endpoint":              ref.Endpoint,
+		"model":                 ref.Model,
+		"task_id":               ref.TaskID,
+		"request_id":            ref.RequestID,
+		"output_index":          ref.OutputIndex,
+	})
+	result.Refunded = true
+	result.Billing = publicBillingState(state)
+	if err := s.saveLocked(); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (s *BillingService) ApplyAdjustment(userID string, operator Identity, body map[string]any) (map[string]any, error) {
@@ -270,9 +356,6 @@ func (s *BillingService) ApplyAdjustment(userID string, operator Identity, body 
 		return nil, errors.New("adjustment type is required")
 	}
 	reason := strings.TrimSpace(util.Clean(body["reason"]))
-	if reason == "" {
-		return nil, errors.New("adjustment reason is required")
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -285,9 +368,6 @@ func (s *BillingService) ApplyAdjustment(userID string, operator Identity, body 
 	case "set_unlimited":
 		state["unlimited"] = util.ToBool(body["unlimited"])
 	case "switch_to_standard":
-		if err := ensureNoBillingReservations(state); err != nil {
-			return nil, err
-		}
 		state["billing_type"] = BillingTypeStandard
 		if _, ok := body["balance"]; ok {
 			if err := setStandardBalance(state, util.ToInt(body["balance"], 0)); err != nil {
@@ -299,9 +379,6 @@ func (s *BillingService) ApplyAdjustment(userID string, operator Identity, body 
 			}
 		}
 	case "switch_to_subscription":
-		if err := ensureNoBillingReservations(state); err != nil {
-			return nil, err
-		}
 		rawQuotaLimit, ok := body["quota_limit"]
 		if !ok {
 			return nil, errors.New("quota limit is required")
@@ -334,17 +411,10 @@ func (s *BillingService) ApplyAdjustment(userID string, operator Identity, body 
 			return nil, errors.New("amount must be greater than 0")
 		}
 		standard := billingStandardState(state)
-		if intField(standard, "balance")-amount-intField(standard, "balance_reserved") < 0 {
-			return nil, errors.New("balance cannot be lower than reserved balance")
+		if intField(standard, "balance")-amount < 0 {
+			return nil, errors.New("balance cannot be negative")
 		}
 		standard["balance"] = intField(standard, "balance") - amount
-	case "release_balance_reserved":
-		standard := billingStandardState(state)
-		release := amount
-		if release <= 0 || release > intField(standard, "balance_reserved") {
-			release = intField(standard, "balance_reserved")
-		}
-		standard["balance_reserved"] = intField(standard, "balance_reserved") - release
 	case "set_quota_limit":
 		limit := firstIntValue(body, "quota_limit", "amount")
 		if limit < 0 {
@@ -378,13 +448,6 @@ func (s *BillingService) ApplyAdjustment(userID string, operator Identity, body 
 			return nil, errors.New("quota decrease cannot exceed remaining quota")
 		}
 		subscription["manual_delta"] = intField(subscription, "manual_delta") - amount
-	case "release_quota_reserved":
-		subscription := billingSubscriptionState(state)
-		release := amount
-		if release <= 0 || release > intField(subscription, "quota_reserved") {
-			release = intField(subscription, "quota_reserved")
-		}
-		subscription["quota_reserved"] = intField(subscription, "quota_reserved") - release
 	default:
 		return nil, fmt.Errorf("unsupported billing adjustment type: %s", adjustmentType)
 	}
@@ -443,51 +506,6 @@ func (s *BillingService) ListAdjustments(userID string, limit int) []map[string]
 	return out
 }
 
-func (s *BillingService) settleLocked(reservationID string, consumed int) {
-	reservation := s.reservations[reservationID]
-	if reservation == nil {
-		return
-	}
-	userID := util.Clean(reservation["user_id"])
-	state, _ := s.ensureStateLocked(userID)
-	s.resetSubscriptionIfDueLocked(state, time.Now())
-	amount := intField(reservation, "amount")
-	if consumed < 0 {
-		consumed = 0
-	}
-	if consumed > amount {
-		consumed = amount
-	}
-	billingType := normalizeBillingType(util.Clean(reservation["billing_type"]))
-	switch billingType {
-	case BillingTypeStandard:
-		standard := billingStandardState(state)
-		standard["balance_reserved"] = max(0, intField(standard, "balance_reserved")-amount)
-		standard["balance"] = max(0, intField(standard, "balance")-consumed)
-		standard["lifetime_consumed"] = intField(standard, "lifetime_consumed") + consumed
-	case BillingTypeSubscription:
-		subscription := billingSubscriptionState(state)
-		subscription["quota_reserved"] = max(0, intField(subscription, "quota_reserved")-amount)
-		subscription["quota_used"] = intField(subscription, "quota_used") + consumed
-	}
-	state["updated_at"] = util.NowISO()
-	delete(s.reservations, reservationID)
-	s.addTransactionLocked(map[string]any{
-		"user_id":         userID,
-		"billing_type":    billingType,
-		"unit":            BillingUnitImage,
-		"action":          "settle",
-		"reservation_id":  reservationID,
-		"reserved_amount": amount,
-		"consumed_amount": consumed,
-		"released_amount": amount - consumed,
-		"endpoint":        reservation["endpoint"],
-		"model":           reservation["model"],
-		"task_id":         reservation["task_id"],
-		"request_id":      reservation["request_id"],
-	})
-}
-
 func (s *BillingService) ensureStateLocked(userID string) (map[string]any, bool) {
 	if s.states == nil {
 		s.states = map[string]map[string]any{}
@@ -534,13 +552,6 @@ func (s *BillingService) loadLocked() {
 			}
 		}
 	}
-	s.reservations = map[string]map[string]any{}
-	for _, item := range util.AsMapSlice(doc["reservations"]) {
-		id := util.Clean(item["id"])
-		if id != "" {
-			s.reservations[id] = item
-		}
-	}
 	s.adjustments = util.AsMapSlice(doc["adjustments"])
 	s.transactions = util.AsMapSlice(doc["transactions"])
 	if s.adjustments == nil {
@@ -561,56 +572,13 @@ func (s *BillingService) saveLocked() error {
 	for _, key := range keys {
 		states[key] = s.states[key]
 	}
-	reservations := make([]map[string]any, 0, len(s.reservations))
-	for _, reservation := range s.reservations {
-		reservations = append(reservations, reservation)
-	}
-	sort.SliceStable(reservations, func(i, j int) bool {
-		return util.Clean(reservations[i]["created_at"]) < util.Clean(reservations[j]["created_at"])
-	})
 	doc := map[string]any{
 		"states":       states,
-		"reservations": reservations,
 		"adjustments":  s.adjustments,
 		"transactions": s.transactions,
 		"updated_at":   util.NowISO(),
 	}
 	return saveStoredJSON(s.store, billingDocumentName, s.path, doc)
-}
-
-func (s *BillingService) releaseRecoveredReservationsLocked() bool {
-	if len(s.reservations) == 0 {
-		return false
-	}
-	for id, reservation := range s.reservations {
-		userID := util.Clean(reservation["user_id"])
-		state, _ := s.ensureStateLocked(userID)
-		amount := intField(reservation, "amount")
-		switch normalizeBillingType(util.Clean(reservation["billing_type"])) {
-		case BillingTypeStandard:
-			standard := billingStandardState(state)
-			standard["balance_reserved"] = max(0, intField(standard, "balance_reserved")-amount)
-		case BillingTypeSubscription:
-			subscription := billingSubscriptionState(state)
-			subscription["quota_reserved"] = max(0, intField(subscription, "quota_reserved")-amount)
-		}
-		state["updated_at"] = util.NowISO()
-		s.addTransactionLocked(map[string]any{
-			"user_id":         userID,
-			"billing_type":    reservation["billing_type"],
-			"unit":            BillingUnitImage,
-			"action":          "release_recovered_reservation",
-			"reservation_id":  id,
-			"reserved_amount": amount,
-			"released_amount": amount,
-			"endpoint":        reservation["endpoint"],
-			"model":           reservation["model"],
-			"task_id":         reservation["task_id"],
-			"request_id":      reservation["request_id"],
-		})
-	}
-	s.reservations = map[string]map[string]any{}
-	return true
 }
 
 func (s *BillingService) addTransactionLocked(item map[string]any) {
@@ -630,6 +598,60 @@ func (s *BillingService) addTransactionLocked(item map[string]any) {
 	}
 }
 
+func (s *BillingService) hasChargeKeyLocked(userID, chargeKey string) bool {
+	userID = strings.TrimSpace(userID)
+	chargeKey = strings.TrimSpace(chargeKey)
+	if userID == "" || chargeKey == "" {
+		return false
+	}
+	for i := len(s.transactions) - 1; i >= 0; i-- {
+		if util.Clean(s.transactions[i]["user_id"]) == userID && util.Clean(s.transactions[i]["charge_key"]) == chargeKey {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *BillingService) hasRefundKeyLocked(userID, refundKey string) bool {
+	userID = strings.TrimSpace(userID)
+	refundKey = strings.TrimSpace(refundKey)
+	if userID == "" || refundKey == "" {
+		return false
+	}
+	for i := len(s.transactions) - 1; i >= 0; i-- {
+		if util.Clean(s.transactions[i]["user_id"]) == userID && util.Clean(s.transactions[i]["charge_key"]) == refundKey && util.Clean(s.transactions[i]["action"]) == "refund" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *BillingService) refundableAmountLocked(userID string, amount int, chargeKey string) int {
+	amount = max(0, amount)
+	chargeKey = strings.TrimSpace(chargeKey)
+	if amount <= 0 || chargeKey == "" {
+		return amount
+	}
+	charged := 0
+	refunded := 0
+	for _, txn := range s.transactions {
+		if util.Clean(txn["user_id"]) != userID {
+			continue
+		}
+		switch util.Clean(txn["action"]) {
+		case "charge":
+			if util.Clean(txn["charge_key"]) == chargeKey {
+				charged += util.ToInt(txn["consumed_amount"], 0)
+			}
+		case "refund":
+			if util.Clean(txn["refund_for_charge_key"]) == chargeKey {
+				refunded += util.ToInt(txn["refunded_amount"], 0)
+			}
+		}
+	}
+	return min(amount, max(0, charged-refunded))
+}
+
 func defaultBillingState(userID string, defaults BillingDefaults) map[string]any {
 	now := time.Now()
 	period := defaultBillingPeriod(defaults)
@@ -641,13 +663,11 @@ func defaultBillingState(userID string, defaults BillingDefaults) map[string]any
 		"unlimited":    false,
 		"standard": map[string]any{
 			"balance":           max(0, defaultStandardBalance(defaults)),
-			"balance_reserved":  0,
 			"lifetime_consumed": 0,
 		},
 		"subscription": map[string]any{
 			"quota_limit":             max(0, defaultSubscriptionQuota(defaults)),
 			"quota_used":              0,
-			"quota_reserved":          0,
 			"manual_delta":            0,
 			"quota_period":            period,
 			"quota_period_started_at": started.Format(time.RFC3339),
@@ -682,18 +702,21 @@ func normalizeBillingState(state map[string]any, userID string, defaults Billing
 	if _, ok := state["standard"].(map[string]any); !ok {
 		state["standard"] = map[string]any{
 			"balance":           max(0, defaultStandardBalance(defaults)),
-			"balance_reserved":  0,
 			"lifetime_consumed": 0,
 		}
 		changed = true
 	}
 	standard := billingStandardState(state)
-	for key := range map[string]struct{}{"balance": {}, "balance_reserved": {}, "lifetime_consumed": {}} {
+	for key := range map[string]struct{}{"balance": {}, "lifetime_consumed": {}} {
 		value := max(0, intField(standard, key))
 		if standard[key] != value {
 			standard[key] = value
 			changed = true
 		}
+	}
+	if _, ok := standard["balance_reserved"]; ok {
+		delete(standard, "balance_reserved")
+		changed = true
 	}
 	if _, ok := state["subscription"].(map[string]any); !ok {
 		period := defaultBillingPeriod(defaults)
@@ -701,7 +724,6 @@ func normalizeBillingState(state map[string]any, userID string, defaults Billing
 		state["subscription"] = map[string]any{
 			"quota_limit":             max(0, defaultSubscriptionQuota(defaults)),
 			"quota_used":              0,
-			"quota_reserved":          0,
 			"manual_delta":            0,
 			"quota_period":            period,
 			"quota_period_started_at": started.Format(time.RFC3339),
@@ -710,12 +732,20 @@ func normalizeBillingState(state map[string]any, userID string, defaults Billing
 		changed = true
 	}
 	subscription := billingSubscriptionState(state)
-	for key := range map[string]struct{}{"quota_limit": {}, "quota_used": {}, "quota_reserved": {}} {
+	for key := range map[string]struct{}{"quota_limit": {}, "quota_used": {}} {
 		value := max(0, intField(subscription, key))
 		if subscription[key] != value {
 			subscription[key] = value
 			changed = true
 		}
+	}
+	if manualDelta := intField(subscription, "manual_delta"); subscription["manual_delta"] != manualDelta {
+		subscription["manual_delta"] = manualDelta
+		changed = true
+	}
+	if _, ok := subscription["quota_reserved"]; ok {
+		delete(subscription, "quota_reserved")
+		changed = true
 	}
 	period := normalizeBillingPeriod(util.Clean(subscription["quota_period"]))
 	if period == "" {
@@ -791,11 +821,11 @@ func billingSubscriptionState(state map[string]any) map[string]any {
 }
 
 func availableStandardBalance(standard map[string]any) int {
-	return max(0, intField(standard, "balance")-intField(standard, "balance_reserved"))
+	return max(0, intField(standard, "balance"))
 }
 
 func availableSubscriptionQuota(subscription map[string]any) int {
-	return max(0, intField(subscription, "quota_limit")+intField(subscription, "manual_delta")-intField(subscription, "quota_used")-intField(subscription, "quota_reserved"))
+	return max(0, intField(subscription, "quota_limit")+intField(subscription, "manual_delta")-intField(subscription, "quota_used"))
 }
 
 func setStandardBalance(state map[string]any, balance int) error {
@@ -803,17 +833,7 @@ func setStandardBalance(state map[string]any, balance int) error {
 		return errors.New("balance cannot be negative")
 	}
 	standard := billingStandardState(state)
-	if balance-intField(standard, "balance_reserved") < 0 {
-		return errors.New("balance cannot be lower than reserved balance")
-	}
 	standard["balance"] = balance
-	return nil
-}
-
-func ensureNoBillingReservations(state map[string]any) error {
-	if intField(billingStandardState(state), "balance_reserved") > 0 || intField(billingSubscriptionState(state), "quota_reserved") > 0 {
-		return errors.New("billing type cannot be changed while reservations exist")
-	}
 	return nil
 }
 
@@ -824,7 +844,6 @@ func resetSubscriptionPeriod(subscription map[string]any, now time.Time) {
 	}
 	started, ends := billingPeriodBounds(period, now)
 	subscription["quota_used"] = 0
-	subscription["quota_reserved"] = 0
 	subscription["manual_delta"] = 0
 	subscription["quota_period"] = period
 	subscription["quota_period_started_at"] = started.Format(time.RFC3339)

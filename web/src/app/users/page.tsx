@@ -94,13 +94,48 @@ type BillingEditForm = {
   standardBalance: string;
   subscriptionQuotaLimit: string;
   subscriptionPeriod: BillingPeriod;
-  adjustmentType: string;
+  adjustmentType: BillingAdjustmentType;
   adjustmentAmount: string;
   reason: string;
 };
 
+type BillingAdjustmentType =
+  | "increase_balance"
+  | "decrease_balance"
+  | "increase_quota"
+  | "decrease_quota"
+  | "reset_quota"
+  | "clear_quota_used";
+
+const standardBillingAdjustmentOptions: Array<{ value: BillingAdjustmentType; label: string }> = [
+  { value: "increase_balance", label: "增加余额" },
+  { value: "decrease_balance", label: "扣减余额" },
+];
+
+const subscriptionBillingAdjustmentOptions: Array<{ value: BillingAdjustmentType; label: string }> = [
+  { value: "increase_quota", label: "增加当期配额" },
+  { value: "decrease_quota", label: "扣减当期配额" },
+  { value: "reset_quota", label: "重置当前周期" },
+  { value: "clear_quota_used", label: "清零已用配额" },
+];
+
+function billingAdjustmentOptions(type: BillingType) {
+  return type === "subscription" ? subscriptionBillingAdjustmentOptions : standardBillingAdjustmentOptions;
+}
+
+function defaultBillingAdjustmentType(type: BillingType): BillingAdjustmentType {
+  return billingAdjustmentOptions(type)[0].value;
+}
+
+function normalizeBillingAdjustmentType(type: BillingType, value: string): BillingAdjustmentType {
+  const options = billingAdjustmentOptions(type);
+  const matched = options.find((item) => item.value === value);
+  return matched?.value || options[0].value;
+}
+
 const accountUsernamePattern = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
 const userPageSizeOptions = ["10", "20", "50", "100"];
+const billingAdjustmentHistoryLimit = 8;
 
 function createEmptyUserForm(roleId = ""): CreateUserForm {
   return {
@@ -348,19 +383,20 @@ function billingSummary(user: ManagedUser) {
   const standard = billing.standard;
   return {
     title: String(standard?.available_balance ?? billing.available),
-    detail: `余额 ${standard?.balance ?? 0} · 预留 ${standard?.balance_reserved ?? 0}`,
+    detail: `余额 ${standard?.balance ?? 0}`,
   };
 }
 
 function billingFormFromUser(user: ManagedUser): BillingEditForm {
   const billing = user.billing;
+  const billingType = billing?.type || "standard";
   return {
-    billingType: billing?.type || "standard",
+    billingType,
     unlimited: Boolean(billing?.unlimited),
     standardBalance: String(billing?.standard?.balance ?? 0),
     subscriptionQuotaLimit: String(billing?.subscription?.quota_limit ?? 0),
     subscriptionPeriod: billing?.subscription?.quota_period || "monthly",
-    adjustmentType: "increase_balance",
+    adjustmentType: defaultBillingAdjustmentType(billingType),
     adjustmentAmount: "",
     reason: "",
   };
@@ -537,8 +573,8 @@ function UsersContent() {
     setBillingAdjustments([]);
     setIsLoadingBilling(true);
     try {
-      const data = await fetchBillingAdjustments(user.id, 10);
-      setBillingAdjustments(Array.isArray(data.items) ? data.items : []);
+      const data = await fetchBillingAdjustments(user.id, billingAdjustmentHistoryLimit);
+      setBillingAdjustments(Array.isArray(data.items) ? data.items.slice(0, billingAdjustmentHistoryLimit) : []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载计费记录失败");
     } finally {
@@ -547,7 +583,21 @@ function UsersContent() {
   };
 
   const updateBillingForm = <Key extends keyof BillingEditForm>(key: Key, value: BillingEditForm[Key]) => {
-    setBillingForm((current) => (current ? { ...current, [key]: value } : current));
+    setBillingForm((current) => {
+      if (!current) {
+        return current;
+      }
+      if (key === "billingType") {
+        const billingType = value as BillingType;
+        return {
+          ...current,
+          billingType,
+          adjustmentType: normalizeBillingAdjustmentType(billingType, current.adjustmentType),
+          adjustmentAmount: "",
+        };
+      }
+      return { ...current, [key]: value };
+    });
   };
 
   const handleBillingAdjustment = async (payload: BillingAdjustmentPayload, successMessage: string) => {
@@ -561,17 +611,17 @@ function UsersContent() {
       const current = billingUser;
       const [detail, refreshed] = await Promise.all([
         fetchManagedUser(current.id),
-        fetchBillingAdjustments(current.id, 10),
+        fetchBillingAdjustments(current.id, billingAdjustmentHistoryLimit),
         loadUsers({ includeRoles: false }),
       ]);
-      setBillingAdjustments(Array.isArray(refreshed.items) ? refreshed.items : []);
+      setBillingAdjustments(Array.isArray(refreshed.items) ? refreshed.items.slice(0, billingAdjustmentHistoryLimit) : []);
       const nextUser = detail.item || current;
       setBillingUser(nextUser);
       setBillingForm((form) => form ? {
         ...billingFormFromUser(nextUser),
         reason: "",
         adjustmentAmount: "",
-        adjustmentType: form.adjustmentType,
+        adjustmentType: normalizeBillingAdjustmentType(nextUser.billing?.type || "standard", form.adjustmentType),
       } : form);
       toast.success(successMessage);
     } catch (error) {
@@ -587,10 +637,6 @@ function UsersContent() {
       return;
     }
     const reason = billingForm.reason.trim();
-    if (!reason) {
-      toast.error("请填写调整原因");
-      return;
-    }
     if (billingForm.unlimited !== Boolean(billingUser.billing?.unlimited)) {
       await handleBillingAdjustment({ type: "set_unlimited", unlimited: billingForm.unlimited, reason }, "无限额度状态已保存");
       return;
@@ -615,19 +661,21 @@ function UsersContent() {
   };
 
   const handleApplyBillingOperation = async () => {
-    if (!billingForm) {
+    if (!billingUser || !billingForm) {
       return;
     }
     const reason = billingForm.reason.trim();
-    if (!reason) {
-      toast.error("请填写调整原因");
+    const configuredBillingType = billingUser.billing?.type || billingForm.billingType;
+    if (billingForm.billingType !== configuredBillingType) {
+      toast.error("请先保存计费配置");
       return;
     }
+    const adjustmentType = normalizeBillingAdjustmentType(configuredBillingType, billingForm.adjustmentType);
     const payload: BillingAdjustmentPayload = {
-      type: billingForm.adjustmentType,
+      type: adjustmentType,
       reason,
     };
-    if (!["reset_quota", "clear_quota_used", "release_balance_reserved", "release_quota_reserved"].includes(billingForm.adjustmentType)) {
+    if (!["reset_quota", "clear_quota_used"].includes(adjustmentType)) {
       payload.amount = Math.max(0, Number(billingForm.adjustmentAmount) || 0);
     }
     await handleBillingAdjustment(payload, "计费调整已执行");
@@ -1156,6 +1204,14 @@ function UsersContent() {
           </DialogHeader>
           {billingForm ? (
             <div className="grid gap-5">
+              {(() => {
+                const persistedBillingType = billingUser?.billing?.type || billingForm.billingType;
+                const adjustmentOptions = billingAdjustmentOptions(billingForm.billingType);
+                const adjustmentType = normalizeBillingAdjustmentType(billingForm.billingType, billingForm.adjustmentType);
+                const needsAmount = !["reset_quota", "clear_quota_used"].includes(adjustmentType);
+                const hasUnsavedBillingType = billingForm.billingType !== persistedBillingType;
+                return (
+                  <>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-stone-700 dark:text-foreground">计费类型</label>
@@ -1226,7 +1282,7 @@ function UsersContent() {
                   <Input
                     value={billingForm.reason}
                     onChange={(event) => updateBillingForm("reason", event.target.value)}
-                    placeholder="必填"
+                    placeholder="可选"
                     className="h-11 rounded-xl"
                   />
                 </div>
@@ -1240,35 +1296,35 @@ function UsersContent() {
               </div>
 
               <div className="rounded-2xl border border-border p-4">
-                <div className="mb-3 text-sm font-semibold text-foreground">手动调整</div>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-foreground">手动调整</div>
+                  {hasUnsavedBillingType ? <div className="text-xs text-amber-700">请先保存计费配置</div> : null}
+                </div>
                 <div className="grid gap-3 sm:grid-cols-[1fr_140px]">
-                  <Select value={billingForm.adjustmentType} onValueChange={(value) => updateBillingForm("adjustmentType", value)}>
+                  <Select value={adjustmentType} onValueChange={(value) => updateBillingForm("adjustmentType", value as BillingAdjustmentType)}>
                     <SelectTrigger className="h-11 rounded-xl">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="increase_balance">增加余额</SelectItem>
-                      <SelectItem value="decrease_balance">扣减余额</SelectItem>
-                      <SelectItem value="release_balance_reserved">释放预留余额</SelectItem>
-                      <SelectItem value="increase_quota">增加当期配额</SelectItem>
-                      <SelectItem value="decrease_quota">扣减当期配额</SelectItem>
-                      <SelectItem value="reset_quota">重置当前周期</SelectItem>
-                      <SelectItem value="clear_quota_used">清零已用配额</SelectItem>
-                      <SelectItem value="release_quota_reserved">释放预留配额</SelectItem>
+                      {adjustmentOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
-                  <Input
-                    type="number"
-                    min="0"
-                    inputMode="numeric"
-                    value={billingForm.adjustmentAmount}
-                    onChange={(event) => updateBillingForm("adjustmentAmount", event.target.value)}
-                    placeholder="数量"
-                    className="h-11 rounded-xl"
-                  />
+                  {needsAmount ? (
+                    <Input
+                      type="number"
+                      min="0"
+                      inputMode="numeric"
+                      value={billingForm.adjustmentAmount}
+                      onChange={(event) => updateBillingForm("adjustmentAmount", event.target.value)}
+                      placeholder={billingForm.billingType === "subscription" ? "配额" : "余额"}
+                      className="h-11 rounded-xl"
+                    />
+                  ) : null}
                 </div>
                 <div className="mt-3 flex justify-end">
-                  <Button type="button" variant="outline" className="h-10 rounded-xl px-5" onClick={() => void handleApplyBillingOperation()} disabled={isSavingBilling}>
+                  <Button type="button" variant="outline" className="h-10 rounded-xl px-5" onClick={() => void handleApplyBillingOperation()} disabled={isSavingBilling || hasUnsavedBillingType}>
                     执行调整
                   </Button>
                 </div>
@@ -1279,7 +1335,7 @@ function UsersContent() {
                   <div className="text-sm font-semibold text-foreground">最近调整记录</div>
                   {isLoadingBilling ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" /> : null}
                 </div>
-                <div className="space-y-2">
+                <div className="max-h-56 space-y-2 overflow-y-auto overscroll-contain pr-1 [scrollbar-color:rgba(142,142,147,.45)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#8e8e93]/45 [&::-webkit-scrollbar-track]:bg-transparent">
                   {billingAdjustments.length === 0 ? (
                     <div className="rounded-xl bg-muted/40 px-3 py-4 text-center text-sm text-muted-foreground">暂无调整记录</div>
                   ) : billingAdjustments.map((item) => (
@@ -1289,13 +1345,17 @@ function UsersContent() {
                         <span className="text-xs text-muted-foreground">{formatDateTime(item.created_at)}</span>
                       </div>
                       <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                        {item.operator_name || item.operator_id || "管理员"} · {item.reason}
+                        {item.operator_name || item.operator_id || "管理员"}
+                        {item.reason ? ` · ${item.reason}` : ""}
                         {typeof item.amount === "number" ? ` · ${item.amount}` : ""}
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
+                  </>
+                );
+              })()}
             </div>
           ) : null}
           <DialogFooter>

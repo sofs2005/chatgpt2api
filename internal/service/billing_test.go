@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -96,108 +97,179 @@ func TestBillingServiceDefaultBoundaryNormalization(t *testing.T) {
 	}
 }
 
-func TestBillingServiceReserveSettleAndReleaseStandard(t *testing.T) {
+func TestBillingServiceCheckAndChargeStandard(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 4})
 	user := billingTestUser("alice")
 
-	res, err := svc.Reserve(user, 3, BillingReference{Endpoint: "/v1/images/generations", Model: "gpt-image-2"})
-	if err != nil {
-		t.Fatalf("Reserve() error = %v", err)
+	if err := svc.CheckAvailable(user, 3); err != nil {
+		t.Fatalf("CheckAvailable() error = %v", err)
 	}
 	got := svc.Get("alice")
 	standard := util.StringMap(got["standard"])
-	if util.ToInt(standard["balance_reserved"], 0) != 3 || util.ToInt(got["available"], 0) != 1 {
-		t.Fatalf("after reserve = %#v", got)
+	if util.ToInt(standard["balance"], 0) != 4 || util.ToInt(got["available"], 0) != 4 {
+		t.Fatalf("after check = %#v", got)
 	}
 
-	svc.Settle(res, 2)
+	if err := svc.Charge(user, 2, BillingReference{Endpoint: "/v1/images/generations", Model: "gpt-image-2"}); err != nil {
+		t.Fatalf("Charge() error = %v", err)
+	}
 	got = svc.Get("alice")
 	standard = util.StringMap(got["standard"])
-	if util.ToInt(standard["balance"], 0) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], 0) != 2 {
-		t.Fatalf("after settle = %#v", got)
+	if util.ToInt(standard["balance"], 0) != 2 || util.ToInt(standard["lifetime_consumed"], 0) != 2 || util.ToInt(got["available"], 0) != 2 {
+		t.Fatalf("after charge = %#v", got)
 	}
 
-	res, err = svc.Reserve(user, 2, BillingReference{})
-	if err != nil {
-		t.Fatalf("Reserve(second) error = %v", err)
+	if err := svc.Charge(user, 0, BillingReference{}); err != nil {
+		t.Fatalf("Charge(0) error = %v", err)
 	}
-	svc.Release(res)
 	got = svc.Get("alice")
 	standard = util.StringMap(got["standard"])
-	if util.ToInt(standard["balance"], 0) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(got["available"], 0) != 2 {
-		t.Fatalf("after release = %#v", got)
+	if util.ToInt(standard["balance"], 0) != 2 || util.ToInt(got["available"], 0) != 2 {
+		t.Fatalf("after zero charge = %#v", got)
 	}
 }
 
-func TestBillingServiceReserveBoundaryClasses(t *testing.T) {
+func TestBillingServiceCheckAvailableBoundaryClasses(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		reserve   int
+		amount    int
 		wantErr   bool
-		wantHeld  int
 		wantAvail int
 	}{
-		{name: "zero is no-op", reserve: 0, wantAvail: 2},
-		{name: "negative is no-op", reserve: -1, wantAvail: 2},
-		{name: "below available", reserve: 1, wantHeld: 1, wantAvail: 1},
-		{name: "exactly available", reserve: 2, wantHeld: 2, wantAvail: 0},
-		{name: "one above available", reserve: 3, wantErr: true, wantAvail: 2},
+		{name: "zero is no-op", amount: 0, wantAvail: 2},
+		{name: "negative is no-op", amount: -1, wantAvail: 2},
+		{name: "below available", amount: 1, wantAvail: 2},
+		{name: "exactly available", amount: 2, wantAvail: 2},
+		{name: "one above available", amount: 3, wantErr: true, wantAvail: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := newTestBillingService(t, testBillingDefaults{standardBalance: 2})
-			res, err := svc.Reserve(billingTestUser("alice"), tc.reserve, BillingReference{})
+			err := svc.CheckAvailable(billingTestUser("alice"), tc.amount)
 			if tc.wantErr {
 				var limitErr BillingLimitError
 				if !errors.As(err, &limitErr) || limitErr.Code != "user_balance_insufficient" {
-					t.Fatalf("Reserve(%d) error = %#v", tc.reserve, err)
+					t.Fatalf("CheckAvailable(%d) error = %#v", tc.amount, err)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("Reserve(%d) error = %v", tc.reserve, err)
-			}
-			if tc.reserve <= 0 {
-				if res != nil {
-					t.Fatalf("Reserve(%d) reservation = %#v, want nil", tc.reserve, res)
-				}
-			} else if res == nil || res.Amount != tc.reserve {
-				t.Fatalf("Reserve(%d) reservation = %#v", tc.reserve, res)
+				t.Fatalf("CheckAvailable(%d) error = %v", tc.amount, err)
 			}
 			got := svc.Get("alice")
-			standard := util.StringMap(got["standard"])
-			if util.ToInt(standard["balance_reserved"], -1) != tc.wantHeld || util.ToInt(got["available"], -1) != tc.wantAvail {
-				t.Fatalf("after Reserve(%d) = %#v", tc.reserve, got)
+			if util.ToInt(got["available"], -1) != tc.wantAvail {
+				t.Fatalf("after CheckAvailable(%d) = %#v", tc.amount, got)
 			}
 		})
 	}
 }
 
-func TestBillingServiceSettleClampsConsumedToReservation(t *testing.T) {
+func TestBillingServiceChargeAllowsPartialActualConsumption(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 5})
-	res, err := svc.Reserve(billingTestUser("alice"), 2, BillingReference{})
-	if err != nil {
-		t.Fatalf("Reserve() error = %v", err)
+	if err := svc.CheckAvailable(billingTestUser("alice"), 2); err != nil {
+		t.Fatalf("CheckAvailable() error = %v", err)
 	}
-	svc.Settle(res, 5)
+	if err := svc.Charge(billingTestUser("alice"), 1, BillingReference{}); err != nil {
+		t.Fatalf("Charge() error = %v", err)
+	}
 	got := svc.Get("alice")
 	standard := util.StringMap(got["standard"])
-	if util.ToInt(standard["balance"], -1) != 3 || util.ToInt(standard["lifetime_consumed"], -1) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 {
-		t.Fatalf("over-consume settle = %#v", got)
+	if util.ToInt(standard["balance"], -1) != 4 || util.ToInt(standard["lifetime_consumed"], -1) != 1 {
+		t.Fatalf("partial charge = %#v", got)
 	}
 
-	res, err = svc.Reserve(billingTestUser("alice"), 2, BillingReference{})
-	if err != nil {
-		t.Fatalf("Reserve(second) error = %v", err)
+	if err := svc.Charge(billingTestUser("alice"), -5, BillingReference{}); err != nil {
+		t.Fatalf("Charge(negative) error = %v", err)
 	}
-	svc.Settle(res, -5)
 	got = svc.Get("alice")
 	standard = util.StringMap(got["standard"])
-	if util.ToInt(standard["balance"], -1) != 3 || util.ToInt(standard["lifetime_consumed"], -1) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 {
-		t.Fatalf("negative-consume settle = %#v", got)
+	if util.ToInt(standard["balance"], -1) != 4 || util.ToInt(standard["lifetime_consumed"], -1) != 1 {
+		t.Fatalf("negative charge = %#v", got)
 	}
 }
 
-func TestBillingServiceReserveSettleAndReleaseSubscription(t *testing.T) {
+func TestBillingServiceChargeIsAtomicAndIdempotent(t *testing.T) {
+	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 1})
+	user := billingTestUser("alice")
+
+	result, err := svc.ChargeUserID("alice", 1, BillingReference{ChargeKey: "task:alice:one:0"})
+	if err != nil || !result.Charged || result.AlreadyCharged {
+		t.Fatalf("first Charge() error = %v", err)
+	}
+	result, err = svc.ChargeUserID("alice", 1, BillingReference{ChargeKey: "task:alice:one:0"})
+	if err != nil || !result.AlreadyCharged {
+		t.Fatalf("duplicate Charge() error = %v", err)
+	}
+	got := svc.Get("alice")
+	standard := util.StringMap(got["standard"])
+	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 {
+		t.Fatalf("duplicate charge state = %#v", got)
+	}
+
+	var limitErr BillingLimitError
+	if err := svc.Charge(user, 1, BillingReference{ChargeKey: "task:alice:one:1"}); !errors.As(err, &limitErr) || limitErr.Code != "user_balance_insufficient" {
+		t.Fatalf("insufficient Charge() error = %#v", err)
+	}
+	got = svc.Get("alice")
+	standard = util.StringMap(got["standard"])
+	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 {
+		t.Fatalf("insufficient charge changed state = %#v", got)
+	}
+
+	bob := billingTestUser("bob")
+	if err := svc.Charge(bob, 1, BillingReference{ChargeKey: "task:alice:one:0"}); err != nil {
+		t.Fatalf("same charge key for different user Charge() error = %v", err)
+	}
+	got = svc.Get("bob")
+	standard = util.StringMap(got["standard"])
+	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 {
+		t.Fatalf("same charge key for different user state = %#v", got)
+	}
+}
+
+func TestBillingServiceRefundsUnusedPrecharge(t *testing.T) {
+	t.Run("standard", func(t *testing.T) {
+		svc := newTestBillingService(t, testBillingDefaults{standardBalance: 4})
+		user := billingTestUser("alice")
+		chargeKey := "task:alice:image:precharge"
+		if err := svc.Charge(user, 4, BillingReference{ChargeKey: chargeKey}); err != nil {
+			t.Fatalf("Charge() error = %v", err)
+		}
+		if _, err := svc.RefundUserID("alice", 2, BillingReference{ChargeKey: "task:alice:image:refund", RefundForKey: chargeKey}); err != nil {
+			t.Fatalf("RefundUserID() error = %v", err)
+		}
+		if _, err := svc.RefundUserID("alice", 2, BillingReference{ChargeKey: "task:alice:image:refund", RefundForKey: chargeKey}); err != nil {
+			t.Fatalf("duplicate RefundUserID() error = %v", err)
+		}
+		got := svc.Get("alice")
+		standard := util.StringMap(got["standard"])
+		if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["lifetime_consumed"], -1) != 2 || util.ToInt(got["available"], -1) != 2 {
+			t.Fatalf("after standard refund = %#v", got)
+		}
+	})
+
+	t.Run("subscription", func(t *testing.T) {
+		svc := newTestBillingService(t, testBillingDefaults{
+			billingType:        BillingTypeSubscription,
+			subscriptionQuota:  4,
+			subscriptionPeriod: BillingPeriodMonthly,
+		})
+		user := billingTestUser("alice")
+		chargeKey := "task:alice:image:precharge"
+		if err := svc.Charge(user, 4, BillingReference{ChargeKey: chargeKey}); err != nil {
+			t.Fatalf("Charge() error = %v", err)
+		}
+		if _, err := svc.RefundUserID("alice", 3, BillingReference{ChargeKey: "task:alice:image:refund", RefundForKey: chargeKey}); err != nil {
+			t.Fatalf("RefundUserID() error = %v", err)
+		}
+		got := svc.Get("alice")
+		sub := util.StringMap(got["subscription"])
+		if util.ToInt(sub["quota_used"], -1) != 1 || util.ToInt(got["available"], -1) != 3 {
+			t.Fatalf("after subscription refund = %#v", got)
+		}
+	})
+}
+
+func TestBillingServiceCheckAndChargeSubscription(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{
 		billingType:        BillingTypeSubscription,
 		subscriptionQuota:  4,
@@ -205,32 +277,31 @@ func TestBillingServiceReserveSettleAndReleaseSubscription(t *testing.T) {
 	})
 	user := billingTestUser("alice")
 
-	res, err := svc.Reserve(user, 3, BillingReference{Endpoint: "/v1/images/generations"})
-	if err != nil {
-		t.Fatalf("Reserve() error = %v", err)
+	if err := svc.CheckAvailable(user, 3); err != nil {
+		t.Fatalf("CheckAvailable() error = %v", err)
 	}
 	got := svc.Get("alice")
 	sub := util.StringMap(got["subscription"])
-	if util.ToInt(sub["quota_reserved"], 0) != 3 || util.ToInt(got["available"], 0) != 1 {
-		t.Fatalf("after reserve = %#v", got)
+	if util.ToInt(sub["quota_used"], 0) != 0 || util.ToInt(got["available"], 0) != 4 {
+		t.Fatalf("after check = %#v", got)
 	}
 
-	svc.Settle(res, 2)
+	if err := svc.Charge(user, 2, BillingReference{Endpoint: "/v1/images/generations"}); err != nil {
+		t.Fatalf("Charge() error = %v", err)
+	}
 	got = svc.Get("alice")
 	sub = util.StringMap(got["subscription"])
-	if util.ToInt(sub["quota_used"], 0) != 2 || util.ToInt(sub["quota_reserved"], -1) != 0 || util.ToInt(got["available"], 0) != 2 {
-		t.Fatalf("after settle = %#v", got)
+	if util.ToInt(sub["quota_used"], 0) != 2 || util.ToInt(got["available"], 0) != 2 {
+		t.Fatalf("after charge = %#v", got)
 	}
 
-	res, err = svc.Reserve(user, 2, BillingReference{})
-	if err != nil {
-		t.Fatalf("Reserve(second) error = %v", err)
+	if err := svc.Charge(user, 0, BillingReference{}); err != nil {
+		t.Fatalf("Charge(0) error = %v", err)
 	}
-	svc.Release(res)
 	got = svc.Get("alice")
 	sub = util.StringMap(got["subscription"])
-	if util.ToInt(sub["quota_used"], 0) != 2 || util.ToInt(sub["quota_reserved"], -1) != 0 || util.ToInt(got["available"], 0) != 2 {
-		t.Fatalf("after release = %#v", got)
+	if util.ToInt(sub["quota_used"], 0) != 2 || util.ToInt(got["available"], 0) != 2 {
+		t.Fatalf("after zero charge = %#v", got)
 	}
 }
 
@@ -263,7 +334,7 @@ func TestBillingServiceSubscriptionManualDeltaBoundaries(t *testing.T) {
 
 func TestBillingServiceInsufficientErrors(t *testing.T) {
 	standard := newTestBillingService(t, testBillingDefaults{standardBalance: 1})
-	_, err := standard.Reserve(billingTestUser("alice"), 2, BillingReference{})
+	err := standard.CheckAvailable(billingTestUser("alice"), 2)
 	var limitErr BillingLimitError
 	if !errors.As(err, &limitErr) || limitErr.Code != "user_balance_insufficient" || limitErr.Message != "user balance insufficient" {
 		t.Fatalf("standard insufficient error = %#v", err)
@@ -274,7 +345,7 @@ func TestBillingServiceInsufficientErrors(t *testing.T) {
 		subscriptionQuota:  1,
 		subscriptionPeriod: BillingPeriodDaily,
 	})
-	_, err = subscription.Reserve(billingTestUser("bob"), 2, BillingReference{})
+	err = subscription.CheckAvailable(billingTestUser("bob"), 2)
 	if !errors.As(err, &limitErr) || limitErr.Code != "user_quota_exceeded" || limitErr.Message != "user quota exceeded" {
 		t.Fatalf("subscription insufficient error = %#v", err)
 	}
@@ -284,7 +355,6 @@ func TestBillingServiceAdjustmentValidationBoundaries(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 3})
 	operator := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
 	for _, body := range []map[string]any{
-		{"type": "increase_balance", "amount": 1},
 		{"reason": "missing type"},
 		{"type": "increase_balance", "amount": 0, "reason": "zero"},
 		{"type": "decrease_balance", "amount": 4, "reason": "negative balance"},
@@ -297,52 +367,29 @@ func TestBillingServiceAdjustmentValidationBoundaries(t *testing.T) {
 			t.Fatalf("ApplyAdjustment(%#v) error = nil", body)
 		}
 	}
-}
-
-func TestBillingServiceAdjustmentsRespectReservedAmounts(t *testing.T) {
-	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 3})
-	user := billingTestUser("alice")
-	operator := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
-	res, err := svc.Reserve(user, 2, BillingReference{})
+	result, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "increase_balance", "amount": 1})
 	if err != nil {
-		t.Fatalf("Reserve() error = %v", err)
+		t.Fatalf("ApplyAdjustment() without reason error = %v", err)
 	}
-	if _, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "switch_to_subscription", "quota_limit": 3, "quota_period": BillingPeriodMonthly, "reason": "reserved"}); err == nil {
-		t.Fatal("switch_to_subscription with reserved balance error = nil")
+	adjustment := util.StringMap(result["adjustment"])
+	if util.Clean(adjustment["reason"]) != "" {
+		t.Fatalf("adjustment reason = %#v, want empty", adjustment["reason"])
 	}
-	if _, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "set_balance", "balance": 1, "reason": "below reserved"}); err == nil {
-		t.Fatal("set_balance below reserved error = nil")
-	}
-	if _, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "decrease_balance", "amount": 2, "reason": "below reserved"}); err == nil {
-		t.Fatal("decrease_balance below reserved error = nil")
-	}
-	svc.Release(res)
-	if _, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "switch_to_subscription", "quota_limit": 3, "quota_period": BillingPeriodMonthly, "reason": "released"}); err != nil {
-		t.Fatalf("switch_to_subscription after release error = %v", err)
-	}
-	res, err = svc.Reserve(user, 2, BillingReference{})
-	if err != nil {
-		t.Fatalf("Reserve(subscription) error = %v", err)
-	}
-	if _, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "switch_to_standard", "balance": 3, "reason": "reserved quota"}); err == nil {
-		t.Fatal("switch_to_standard with reserved quota error = nil")
-	}
-	svc.Release(res)
 }
 
 func TestBillingServiceAdminAndUnlimitedBypass(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{})
 	admin := Identity{ID: "admin", Role: AuthRoleAdmin}
-	if res, err := svc.Reserve(admin, 99, BillingReference{}); err != nil || res != nil {
-		t.Fatalf("admin reserve = %#v, %v", res, err)
+	if err := svc.CheckAvailable(admin, 99); err != nil {
+		t.Fatalf("admin check = %v", err)
 	}
 
 	operator := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
 	if _, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "set_unlimited", "unlimited": true, "reason": "test"}); err != nil {
 		t.Fatalf("set_unlimited error = %v", err)
 	}
-	if res, err := svc.Reserve(billingTestUser("alice"), 99, BillingReference{}); err != nil || res != nil {
-		t.Fatalf("unlimited reserve = %#v, %v", res, err)
+	if err := svc.CheckAvailable(billingTestUser("alice"), 99); err != nil {
+		t.Fatalf("unlimited check = %v", err)
 	}
 }
 
@@ -350,14 +397,15 @@ func TestBillingServiceOwnerIDScopesBillingState(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 2})
 	oldKey := Identity{ID: "key-old", OwnerID: "linuxdo:123", Name: "Alice", Role: AuthRoleUser}
 	newKey := Identity{ID: "key-new", OwnerID: "linuxdo:123", Name: "Alice", Role: AuthRoleUser}
-	res, err := svc.Reserve(oldKey, 2, BillingReference{})
-	if err != nil {
-		t.Fatalf("Reserve(old key) error = %v", err)
+	if err := svc.CheckAvailable(oldKey, 2); err != nil {
+		t.Fatalf("CheckAvailable(old key) error = %v", err)
 	}
-	if _, err := svc.Reserve(newKey, 1, BillingReference{}); err == nil {
-		t.Fatal("Reserve(new key same owner) error = nil, want shared owner balance exhausted")
+	if err := svc.Charge(oldKey, 1, BillingReference{}); err != nil {
+		t.Fatalf("Charge(old key) error = %v", err)
 	}
-	svc.Settle(res, 1)
+	if err := svc.CheckAvailable(newKey, 2); err == nil {
+		t.Fatal("CheckAvailable(new key same owner) error = nil, want shared owner balance checked")
+	}
 	got := svc.Get("linuxdo:123")
 	standard := util.StringMap(got["standard"])
 	if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(got["available"], -1) != 1 {
@@ -374,11 +422,12 @@ func TestBillingServiceSubscriptionResetAndAdjustments(t *testing.T) {
 	if _, err := svc.ApplyAdjustment("alice", operator, map[string]any{"type": "increase_quota", "amount": 3, "reason": "bonus"}); err != nil {
 		t.Fatalf("increase_quota error = %v", err)
 	}
-	res, err := svc.Reserve(billingTestUser("alice"), 4, BillingReference{})
-	if err != nil {
-		t.Fatalf("Reserve() error = %v", err)
+	if err := svc.CheckAvailable(billingTestUser("alice"), 4); err != nil {
+		t.Fatalf("CheckAvailable() error = %v", err)
 	}
-	svc.Settle(res, 4)
+	if err := svc.Charge(billingTestUser("alice"), 4, BillingReference{}); err != nil {
+		t.Fatalf("Charge() error = %v", err)
+	}
 	got := svc.Get("alice")
 	sub := util.StringMap(got["subscription"])
 	if util.ToInt(sub["quota_used"], 0) != 4 || util.ToInt(sub["manual_delta"], 0) != 3 {
@@ -394,7 +443,7 @@ func TestBillingServiceSubscriptionResetAndAdjustments(t *testing.T) {
 
 	got = svc.Get("alice")
 	sub = util.StringMap(got["subscription"])
-	if util.ToInt(sub["quota_used"], -1) != 0 || util.ToInt(sub["quota_reserved"], -1) != 0 || util.ToInt(sub["manual_delta"], -1) != 0 || util.ToInt(sub["quota_limit"], 0) != 10 {
+	if util.ToInt(sub["quota_used"], -1) != 0 || util.ToInt(sub["manual_delta"], -1) != 0 || util.ToInt(sub["quota_limit"], 0) != 10 {
 		t.Fatalf("after reset = %#v", got)
 	}
 	if len(svc.ListAdjustments("alice", 10)) < 2 {
@@ -436,28 +485,6 @@ func TestBillingServiceSubscriptionPeriodBounds(t *testing.T) {
 	}
 }
 
-func TestBillingServiceReleasesRecoveredReservationsOnStartup(t *testing.T) {
-	dir := t.TempDir()
-	svc := newTestBillingServiceAt(t, dir, testBillingDefaults{standardBalance: 2})
-	res, err := svc.Reserve(billingTestUser("alice"), 2, BillingReference{TaskID: "task-1"})
-	if err != nil {
-		t.Fatalf("Reserve() error = %v", err)
-	}
-	got := svc.Get("alice")
-	if util.ToInt(got["available"], -1) != 0 {
-		t.Fatalf("before restart = %#v", got)
-	}
-	restarted := newTestBillingServiceAt(t, dir, testBillingDefaults{standardBalance: 2})
-	got = restarted.Get("alice")
-	standard := util.StringMap(got["standard"])
-	if util.ToInt(standard["balance"], -1) != 2 || util.ToInt(standard["balance_reserved"], -1) != 0 || util.ToInt(got["available"], -1) != 2 {
-		t.Fatalf("after restart = %#v", got)
-	}
-	if res == nil || res.ID == "" {
-		t.Fatalf("reservation was not created")
-	}
-}
-
 func TestBillingServicePersistsCurrentMapShapeOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, billingDocumentName)
@@ -482,34 +509,32 @@ func TestBillingServicePersistsCurrentMapShapeOnly(t *testing.T) {
 	}
 }
 
-func TestBillingServiceConcurrentReserveDoesNotOversell(t *testing.T) {
+func TestBillingServiceConcurrentChargeDoesNotOversell(t *testing.T) {
 	svc := newTestBillingService(t, testBillingDefaults{standardBalance: 5})
 	user := billingTestUser("alice")
 	var wg sync.WaitGroup
-	successes := make(chan *BillingReservation, 10)
+	successes := make(chan struct{}, 10)
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func() {
+		go func(index int) {
 			defer wg.Done()
-			res, err := svc.Reserve(user, 1, BillingReference{})
-			if err == nil && res != nil {
-				successes <- res
+			if err := svc.Charge(user, 1, BillingReference{ChargeKey: fmt.Sprintf("task:alice:concurrent:%d", index)}); err == nil {
+				successes <- struct{}{}
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
 	close(successes)
 	count := 0
-	for res := range successes {
+	for range successes {
 		count++
-		svc.Settle(res, 1)
 	}
 	if count != 5 {
-		t.Fatalf("successful reservations = %d, want 5", count)
+		t.Fatalf("successful charges = %d, want 5", count)
 	}
 	got := svc.Get("alice")
 	standard := util.StringMap(got["standard"])
-	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(got["available"], -1) != 0 {
-		t.Fatalf("after concurrent settle = %#v", got)
+	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 5 || util.ToInt(got["available"], -1) != 0 {
+		t.Fatalf("after concurrent charge = %#v", got)
 	}
 }

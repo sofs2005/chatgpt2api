@@ -5,6 +5,7 @@
 
 FROM debian:bookworm-slim
 
+ARG TARGETPLATFORM
 WORKDIR /app
 ENV PORT=80
 ENV CHATGPT2API_DEPLOYMENT=docker
@@ -16,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-COPY chatgpt2api /app/chatgpt2api
+COPY $TARGETPLATFORM/chatgpt2api /app/chatgpt2api
 
 RUN mkdir -p /app/data && chmod +x /app/chatgpt2api
 

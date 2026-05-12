@@ -37,9 +37,9 @@ func (c testImageConfig) ImageMetadataDir() string {
 	return path
 }
 
-func (c testImageConfig) CleanupOldImages() int {
-	return 0
-}
+func (c testImageConfig) ImageRetentionDays() int { return 30 }
+
+func (c testImageConfig) ImageStorageLimitBytes() int64 { return 0 }
 
 var allImages = ImageAccessScope{All: true}
 
@@ -610,6 +610,150 @@ func TestImageServicePublicListHidesUnsharedGenerationMetadata(t *testing.T) {
 	ownerItems := ownerList["items"].([]map[string]any)
 	if len(ownerItems) != 1 || ownerItems[0]["prompt"] != "private recipe" || ownerItems[0]["reference_image_urls"] == nil {
 		t.Fatalf("owner item did not include private metadata = %#v", ownerList)
+	}
+}
+
+func TestImageServiceCleanupStorageClearsThumbnailCacheOnly(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	rel := "2026/04/29/sample.png"
+	imagePath := filepath.Join(config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeTestPNG(imagePath); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(config)
+	service.RecordGeneratedImages([]string{rel}, "linuxdo:123", "alice", ImageVisibilityPrivate)
+	service.EnsureThumbnails([]string{rel})
+	thumbPath := filepath.Join(config.ImageThumbnailsDir(), filepath.FromSlash(rel)+thumbnailExtension)
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("thumbnail was not created: %v", err)
+	}
+
+	result, err := service.CleanupStorage(ImageStorageCleanupOptions{ClearThumbnails: true})
+	if err != nil {
+		t.Fatalf("CleanupStorage(thumbnails) error = %v", err)
+	}
+	if result.DeletedThumbnails != 1 || result.DeletedImages != 0 {
+		t.Fatalf("CleanupStorage(thumbnails) = %#v", result)
+	}
+	if _, err := os.Stat(imagePath); err != nil {
+		t.Fatalf("image should remain after thumbnail cleanup: %v", err)
+	}
+	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
+		t.Fatalf("thumbnail still exists, stat error = %v", err)
+	}
+	list := service.ListImages("http://127.0.0.1:8000", "", "", ImageAccessScope{OwnerID: "linuxdo:123"})
+	if items := list["items"].([]map[string]any); len(items) != 1 || items[0]["path"] != rel {
+		t.Fatalf("image missing after thumbnail cleanup: %#v", list)
+	}
+}
+
+func TestImageServiceCleanupStorageRetentionRemovesImageGroup(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	rel := "2026/04/29/old.png"
+	imagePath := filepath.Join(config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeTestPNG(imagePath); err != nil {
+		t.Fatalf("writeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(config)
+	service.RecordGeneratedImages([]string{rel}, "linuxdo:123", "alice", ImageVisibilityPrivate, GeneratedImageMetadata{
+		ReferenceImages: []GeneratedImageReference{{Filename: "ref.png", ContentType: "image/png", Data: []byte("reference-bytes")}},
+	})
+	service.EnsureThumbnails([]string{rel})
+	thumbPath := filepath.Join(config.ImageThumbnailsDir(), filepath.FromSlash(rel)+thumbnailExtension)
+	metaPath := filepath.Join(config.ImageMetadataDir(), filepath.FromSlash(rel)+".json")
+	refDir := filepath.Join(config.ImageMetadataDir(), "references", filepath.FromSlash(rel+".refs"))
+	old := time.Now().Add(-72 * time.Hour)
+	for _, path := range []string{imagePath, thumbPath, thumbPath + ".json", metaPath} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("Chtimes(%s) error = %v", path, err)
+		}
+	}
+
+	result, err := service.CleanupStorage(ImageStorageCleanupOptions{RetentionDays: 1})
+	if err != nil {
+		t.Fatalf("CleanupStorage(retention) error = %v", err)
+	}
+	if result.DeletedImages != 1 || result.DeletedThumbnails != 1 || result.DeletedReferenceFiles != 1 {
+		t.Fatalf("CleanupStorage(retention) = %#v", result)
+	}
+	for _, path := range []string{imagePath, thumbPath, thumbPath + ".json", metaPath, refDir} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists or stat failed unexpectedly: %v", path, err)
+		}
+	}
+}
+
+func TestImageServiceCleanupStorageLimitPreservesPublicByDefault(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	publicRel := "2026/04/29/public.png"
+	privateRel := "2026/04/29/private.png"
+	for _, rel := range []string{publicRel, privateRel} {
+		path := filepath.Join(config.ImagesDir(), filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+		if err := writeLargeTestPNG(path); err != nil {
+			t.Fatalf("writeLargeTestPNG(%s) error = %v", rel, err)
+		}
+	}
+
+	service := NewImageService(config)
+	service.RecordGeneratedImages([]string{publicRel}, "linuxdo:123", "alice", ImageVisibilityPublic)
+	service.RecordGeneratedImages([]string{privateRel}, "linuxdo:123", "alice", ImageVisibilityPrivate)
+	summary := service.StorageGovernance()
+	if summary.ImagesCount != 2 || summary.PublicImagesCount != 1 || summary.PrivateImagesCount != 1 {
+		t.Fatalf("StorageGovernance() = %#v", summary)
+	}
+
+	result, err := service.CleanupStorage(ImageStorageCleanupOptions{MaxBytes: summary.TotalBytes - 1})
+	if err != nil {
+		t.Fatalf("CleanupStorage(quota) error = %v", err)
+	}
+	if result.DeletedImages != 1 {
+		t.Fatalf("CleanupStorage(quota) = %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(config.ImagesDir(), filepath.FromSlash(privateRel))); !os.IsNotExist(err) {
+		t.Fatalf("private image should be deleted, stat error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(config.ImagesDir(), filepath.FromSlash(publicRel))); err != nil {
+		t.Fatalf("public image should remain, stat error = %v", err)
+	}
+}
+
+func TestImageServiceCleanupStorageLimitCanIncludePublic(t *testing.T) {
+	root := t.TempDir()
+	config := testImageConfig{root: root}
+	publicRel := "2026/04/29/public.png"
+	path := filepath.Join(config.ImagesDir(), filepath.FromSlash(publicRel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeLargeTestPNG(path); err != nil {
+		t.Fatalf("writeLargeTestPNG() error = %v", err)
+	}
+
+	service := NewImageService(config)
+	service.RecordGeneratedImages([]string{publicRel}, "linuxdo:123", "alice", ImageVisibilityPublic)
+	result, err := service.CleanupStorage(ImageStorageCleanupOptions{MaxBytes: 1, IncludePublic: true})
+	if err != nil {
+		t.Fatalf("CleanupStorage(include public) error = %v", err)
+	}
+	if result.DeletedImages != 1 {
+		t.Fatalf("CleanupStorage(include public) = %#v", result)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("public image should be deleted when include_public=true, stat error = %v", err)
 	}
 }
 

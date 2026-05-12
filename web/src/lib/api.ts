@@ -228,6 +228,7 @@ export type SettingsConfig = {
   default_subscription_quota?: number | string;
   default_subscription_period?: BillingPeriod;
   image_retention_days?: number | string;
+  image_storage_limit_mb?: number | string;
   log_retention_days?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
@@ -333,6 +334,39 @@ export type LogCleanupResult = {
   cutoff_date: string;
   deleted: number;
   remaining: number;
+};
+
+export type ImageStorageGovernanceSummary = {
+  total_bytes: number;
+  images_bytes: number;
+  thumbnails_bytes: number;
+  metadata_bytes: number;
+  reference_bytes: number;
+  images_count: number;
+  public_images_count: number;
+  private_images_count: number;
+  thumbnail_files: number;
+  metadata_files: number;
+  reference_files: number;
+  limit_bytes: number;
+  over_limit_bytes: number;
+  oldest_image_at?: string;
+  latest_image_at?: string;
+};
+
+export type ImageStorageCleanupResult = {
+  retention_days?: number;
+  max_bytes?: number;
+  include_public?: boolean;
+  deleted_images: number;
+  deleted_thumbnails: number;
+  deleted_metadata_files: number;
+  deleted_reference_files: number;
+  deleted_bytes: number;
+  remaining_bytes: number;
+  over_limit_bytes: number;
+  preserved_public_images?: number;
+  action?: string;
 };
 
 export type ReleaseAsset = {
@@ -1097,6 +1131,26 @@ export async function cleanupLogs(retentionDays: number) {
     method: "POST",
     body: { retention_days: retentionDays },
   });
+}
+
+export async function fetchImageStorageGovernance() {
+  return httpRequest<{ governance: ImageStorageGovernanceSummary }>("/api/images/storage-governance");
+}
+
+export async function cleanupImageStorage(body: {
+  action: "retention" | "quota" | "thumbnails" | "all";
+  retention_days?: number;
+  max_mb?: number;
+  include_public?: boolean;
+  clear_thumbnails?: boolean;
+}) {
+  return httpRequest<{ cleanup: ImageStorageCleanupResult; governance: ImageStorageGovernanceSummary }>(
+    "/api/images/storage-governance",
+    {
+      method: "POST",
+      body,
+    },
+  );
 }
 
 export async function checkSystemUpdates(force = false) {

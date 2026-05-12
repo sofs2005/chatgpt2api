@@ -33,7 +33,6 @@ type ImageConfig interface {
 	ImagesDir() string
 	ImageMetadataDir() string
 	BaseURL() string
-	CleanupOldImages() int
 }
 
 type Engine struct {
@@ -1085,7 +1084,6 @@ func (e *Engine) SaveImageBytesForOwner(imageData []byte, baseURL, ownerID, owne
 
 func (e *Engine) SaveImageBytesForOwnerWithFormat(imageData []byte, baseURL, ownerID, ownerName, outputFormat string) string {
 	outputFormat = NormalizeImageOutputFormat(outputFormat)
-	e.Config.CleanupOldImages()
 	sum := md5.Sum(imageData)
 	filename := fmt.Sprintf("%d_%s.%s", time.Now().Unix(), hex.EncodeToString(sum[:]), imageFileExtension(outputFormat))
 	relativeDir := filepath.Join(time.Now().Format("2006"), time.Now().Format("01"), time.Now().Format("02"))

@@ -4,12 +4,14 @@ import { create } from "zustand";
 import { toast } from "sonner";
 
 import {
+  cleanupImageStorage,
   cleanupLogs,
   createCPAPool,
   deleteCPAPool,
   fetchCPAPoolFiles,
   fetchCPAPools,
   fetchLogGovernance,
+  fetchImageStorageGovernance,
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
   fetchSettingsConfig,
@@ -24,6 +26,8 @@ import {
   type BillingType,
   type CPAPool,
   type CPARemoteFile,
+  type ImageStorageCleanupResult,
+  type ImageStorageGovernanceSummary,
   type LogCleanupResult,
   type LogGovernanceSummary,
   type LoginPageImageSettings,
@@ -70,6 +74,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
     default_subscription_period: normalizeDefaultSubscriptionPeriod(config.default_subscription_period),
     image_retention_days: Number(config.image_retention_days || 30),
+    image_storage_limit_mb: Math.max(0, Number(config.image_storage_limit_mb) || 0),
     log_retention_days: Number(config.log_retention_days || 7),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
@@ -120,6 +125,10 @@ type SettingsStore = {
   lastLogCleanup: LogCleanupResult | null;
   isLoadingLogGovernance: boolean;
   isCleaningLogs: boolean;
+  imageStorageGovernance: ImageStorageGovernanceSummary | null;
+  lastImageStorageCleanup: ImageStorageCleanupResult | null;
+  isLoadingImageStorageGovernance: boolean;
+  isCleaningImageStorage: boolean;
 
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
@@ -159,6 +168,7 @@ type SettingsStore = {
   setDefaultSubscriptionQuota: (value: string) => void;
   setDefaultSubscriptionPeriod: (value: BillingPeriod) => void;
   setImageRetentionDays: (value: string) => void;
+  setImageStorageLimitMb: (value: string) => void;
   setLogRetentionDays: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
@@ -180,6 +190,10 @@ type SettingsStore = {
   saveLoginPageImage: (options: { file?: File | null; action: "keep" | "replace" | "remove" }) => Promise<boolean>;
   loadLogGovernance: (silent?: boolean) => Promise<void>;
   cleanupLogsByRetention: () => Promise<void>;
+  loadImageStorageGovernance: (silent?: boolean) => Promise<void>;
+  cleanupImageStorageByRetention: () => Promise<void>;
+  cleanupImageStorageByQuota: (includePublic?: boolean) => Promise<void>;
+  cleanupImageThumbnails: () => Promise<void>;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -227,6 +241,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   lastLogCleanup: null,
   isLoadingLogGovernance: true,
   isCleaningLogs: false,
+  imageStorageGovernance: null,
+  lastImageStorageCleanup: null,
+  isLoadingImageStorageGovernance: true,
+  isCleaningImageStorage: false,
 
   registerConfig: null,
   isLoadingRegister: true,
@@ -255,7 +273,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   isStartingImport: false,
 
   initialize: async () => {
-    await Promise.allSettled([get().loadConfig(), get().loadPools(), get().loadLogGovernance()]);
+    await Promise.allSettled([get().loadConfig(), get().loadPools(), get().loadLogGovernance(), get().loadImageStorageGovernance()]);
   },
 
   loadConfig: async () => {
@@ -293,6 +311,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
         default_subscription_period: normalizeDefaultSubscriptionPeriod(config.default_subscription_period),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
+        image_storage_limit_mb: Math.max(0, Number(config.image_storage_limit_mb) || 0),
         log_retention_days: Math.min(3650, Math.max(1, Number(config.log_retention_days) || 7)),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
@@ -344,6 +363,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageRetentionDays: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_retention_days: value } } : {});
+  },
+
+  setImageStorageLimitMb: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_storage_limit_mb: value } } : {});
   },
 
   setLogRetentionDays: (value) => {
@@ -560,6 +583,67 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       toast.error(error instanceof Error ? error.message : "清理日志失败");
     } finally {
       set({ isCleaningLogs: false });
+    }
+  },
+
+  loadImageStorageGovernance: async (silent = false) => {
+    if (!silent) set({ isLoadingImageStorageGovernance: true });
+    try {
+      const data = await fetchImageStorageGovernance();
+      set({ imageStorageGovernance: data.governance });
+    } catch (error) {
+      if (!silent) toast.error(error instanceof Error ? error.message : "加载图片存储数据失败");
+    } finally {
+      if (!silent) set({ isLoadingImageStorageGovernance: false });
+    }
+  },
+
+  cleanupImageStorageByRetention: async () => {
+    const { config } = get();
+    if (!config) return;
+    const retentionDays = Math.max(1, Number(config.image_retention_days) || 30);
+    set({ isCleaningImageStorage: true });
+    try {
+      const data = await cleanupImageStorage({ action: "retention", retention_days: retentionDays });
+      set({ lastImageStorageCleanup: data.cleanup, imageStorageGovernance: data.governance });
+      toast.success(`已清理 ${data.cleanup.deleted_images} 张过期图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理图片失败");
+    } finally {
+      set({ isCleaningImageStorage: false });
+    }
+  },
+
+  cleanupImageStorageByQuota: async (includePublic = false) => {
+    const { config } = get();
+    if (!config) return;
+    const maxMb = Math.max(0, Number(config.image_storage_limit_mb) || 0);
+    if (maxMb <= 0) {
+      toast.error("请先设置图片容量上限");
+      return;
+    }
+    set({ isCleaningImageStorage: true });
+    try {
+      const data = await cleanupImageStorage({ action: "quota", max_mb: maxMb, include_public: includePublic });
+      set({ lastImageStorageCleanup: data.cleanup, imageStorageGovernance: data.governance });
+      toast.success(`已按容量清理 ${data.cleanup.deleted_images} 张图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "按容量清理图片失败");
+    } finally {
+      set({ isCleaningImageStorage: false });
+    }
+  },
+
+  cleanupImageThumbnails: async () => {
+    set({ isCleaningImageStorage: true });
+    try {
+      const data = await cleanupImageStorage({ action: "thumbnails" });
+      set({ lastImageStorageCleanup: data.cleanup, imageStorageGovernance: data.governance });
+      toast.success(`已清理 ${data.cleanup.deleted_thumbnails} 个缩略图缓存`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理缩略图失败");
+    } finally {
+      set({ isCleaningImageStorage: false });
     }
   },
 

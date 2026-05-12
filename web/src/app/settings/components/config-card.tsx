@@ -175,6 +175,9 @@ export function ConfigCard() {
   const setImageRetentionDays = useSettingsStore(
     (state) => state.setImageRetentionDays,
   );
+  const setImageStorageLimitMb = useSettingsStore(
+    (state) => state.setImageStorageLimitMb,
+  );
   const setAutoRemoveInvalidAccounts = useSettingsStore(
     (state) => state.setAutoRemoveInvalidAccounts,
   );
@@ -290,6 +293,19 @@ export function ConfigCard() {
                 onChange={setImageRetentionDays}
                 placeholder="30"
                 unit="天"
+              />
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-storage-limit-mb">
+                图片容量上限
+              </ConfigFieldLabel>
+              <NumberInputWithUnit
+                id="settings-image-storage-limit-mb"
+                min={0}
+                value={config?.image_storage_limit_mb ?? ""}
+                onChange={setImageStorageLimitMb}
+                placeholder="0"
+                unit="MB"
               />
             </Field>
             <Field className={configFieldClassName}>

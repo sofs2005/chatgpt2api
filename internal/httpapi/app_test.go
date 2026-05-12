@@ -3257,6 +3257,64 @@ func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
 	}
 }
 
+func TestImageStorageGovernanceEndpointCleansThumbnails(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	rel := "2026/04/29/sample.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("mkdir image dir: %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	app.images.RecordGeneratedImages([]string{rel}, "admin", "Admin", service.ImageVisibilityPrivate)
+	app.images.EnsureThumbnails([]string{rel})
+	thumbPath := filepath.Join(app.config.ImageThumbnailsDir(), filepath.FromSlash(rel)+".jpg")
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("thumbnail was not created: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/images/storage-governance", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("storage governance status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("storage governance json: %v", err)
+	}
+	governance, _ := payload["governance"].(map[string]any)
+	if governance["images_count"] != float64(1) || governance["thumbnail_files"] != float64(1) {
+		t.Fatalf("storage governance = %#v", governance)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/images/storage-governance", strings.NewReader(`{"action":"thumbnails"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("thumbnail cleanup status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("thumbnail cleanup json: %v", err)
+	}
+	cleanup, _ := payload["cleanup"].(map[string]any)
+	if cleanup["deleted_thumbnails"] != float64(1) || cleanup["deleted_images"] != float64(0) {
+		t.Fatalf("thumbnail cleanup = %#v", cleanup)
+	}
+	if _, err := os.Stat(imagePath); err != nil {
+		t.Fatalf("image should remain after thumbnail cleanup: %v", err)
+	}
+	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
+		t.Fatalf("thumbnail still exists, stat error = %v", err)
+	}
+}
+
 func logItems(payload map[string]any) []map[string]any {
 	rawItems, _ := payload["items"].([]any)
 	items := make([]map[string]any, 0, len(rawItems))

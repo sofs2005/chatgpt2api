@@ -227,6 +227,7 @@ func isNoisySuccessfulAuditRequest(r *http.Request) bool {
 		switch {
 		case path == "/api/logs",
 			path == "/api/logs/governance",
+			path == "/api/images/storage-governance",
 			path == "/api/creation-tasks",
 			path == "/api/app-meta",
 			path == "/api/admin/permissions",

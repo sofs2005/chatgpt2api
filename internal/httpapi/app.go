@@ -121,7 +121,10 @@ func NewApp() (*App, error) {
 		return time.Duration(app.config.ImageTaskTimeoutSeconds()) * time.Second
 	})
 	accounts.StartLimitedWatcher(ctx, time.Duration(cfg.RefreshAccountIntervalMinute())*time.Minute)
-	cfg.CleanupOldImages()
+	_, _ = app.images.CleanupStorage(service.ImageStorageCleanupOptions{
+		RetentionDays: cfg.ImageRetentionDays(),
+		MaxBytes:      cfg.ImageStorageLimitBytes(),
+	})
 	return app, nil
 }
 
@@ -987,6 +990,62 @@ func (a *App) handleLogGovernance(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleImageStorageGovernance(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireIdentity(w, r, ""); !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		util.WriteJSON(w, http.StatusOK, map[string]any{"governance": a.images.StorageGovernance()})
+	case http.MethodPost:
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		action := strings.TrimSpace(util.Clean(body["action"]))
+		options := service.ImageStorageCleanupOptions{
+			IncludePublic: util.ToBool(body["include_public"]),
+		}
+		switch action {
+		case "retention":
+			options.RetentionDays = util.ToInt(body["retention_days"], a.config.ImageRetentionDays())
+		case "quota":
+			options.MaxBytes = imageCleanupMaxBytes(body["max_bytes"], body["max_mb"], a.config.ImageStorageLimitBytes())
+		case "thumbnails":
+			options.ClearThumbnails = true
+		case "all":
+			options.RetentionDays = util.ToInt(body["retention_days"], a.config.ImageRetentionDays())
+			options.MaxBytes = imageCleanupMaxBytes(body["max_bytes"], body["max_mb"], a.config.ImageStorageLimitBytes())
+			options.ClearThumbnails = util.ToBool(body["clear_thumbnails"])
+		default:
+			util.WriteError(w, http.StatusBadRequest, "action must be retention, quota, thumbnails, or all")
+			return
+		}
+		result, err := a.images.CleanupStorage(options)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		util.WriteJSON(w, http.StatusOK, map[string]any{
+			"cleanup":    result,
+			"governance": a.images.StorageGovernance(),
+		})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func imageCleanupMaxBytes(rawBytes, rawMB any, fallback int64) int64 {
+	if n := int64(util.ToInt(rawBytes, 0)); n > 0 {
+		return n
+	}
+	if mb := util.ToInt(rawMB, 0); mb > 0 {
+		return int64(mb) * 1024 * 1024
+	}
+	return fallback
+}
+
 func (a *App) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireIdentity(w, r, ""); !ok {
 		return
@@ -1464,6 +1523,7 @@ func (a *App) recordGeneratedImages(identity service.Identity, urls []string, vi
 	}
 	ownerID := identityScope(identity)
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility)
+	a.cleanupImageStorage()
 }
 
 func (a *App) recordProtocolGeneratedImages(identity service.Identity, urls []string, visibility string, payloads ...map[string]any) {
@@ -1505,6 +1565,17 @@ func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []
 		ReferenceImages:   imageReferenceMetadataFromPayload(payload),
 		SharePromptParams: sharePromptParams,
 		ShareReferences:   sharePromptParams && util.ToBool(payload["share_reference_images"]),
+	})
+	a.cleanupImageStorage()
+}
+
+func (a *App) cleanupImageStorage() {
+	if a == nil || a.images == nil || a.config == nil {
+		return
+	}
+	_, _ = a.images.CleanupStorage(service.ImageStorageCleanupOptions{
+		RetentionDays: a.config.ImageRetentionDays(),
+		MaxBytes:      a.config.ImageStorageLimitBytes(),
 	})
 }
 

@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,6 +104,25 @@ func TestLogServiceSearchFiltersUnifiedLogs(t *testing.T) {
 	usage := logs.UserUsageStats(1)["alice-key"]
 	if usage == nil || usage["call_count"] != 1 || usage["success_count"] != 1 || usage["quota_used"] != 1 {
 		t.Fatalf("UserUsageStats(new call log shape) = %#v", usage)
+	}
+}
+
+func TestSanitizeLogValueMasksSessionCredentials(t *testing.T) {
+	accessToken := "access-token-secret"
+	sessionToken := "session-token-secret"
+	sanitized := SanitizeLogValue(map[string]any{
+		"session_json": `{"accessToken":"` + accessToken + `","sessionToken":"` + sessionToken + `"}`,
+		"accessToken":  accessToken,
+		"sessionToken": sessionToken,
+	})
+
+	item, ok := sanitized.(map[string]any)
+	if !ok {
+		t.Fatalf("SanitizeLogValue() = %#v", sanitized)
+	}
+	text := item["session_json"].(string) + item["accessToken"].(string) + item["sessionToken"].(string)
+	if strings.Contains(text, accessToken) || strings.Contains(text, sessionToken) {
+		t.Fatalf("sanitized log value leaked credentials: %#v", sanitized)
 	}
 }
 

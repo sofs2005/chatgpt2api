@@ -369,9 +369,21 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		} else if runCtx.Err() == context.DeadlineExceeded {
 			message = "图片生成超时，请稍后重试或降低分辨率"
 		}
-		updates := map[string]any{"status": status, "error": message, "data": taskResultData(result)}
-		if outputType := util.Clean(result["output_type"]); outputType != "" {
+		data := taskResultData(result)
+		outputType := util.Clean(result["output_type"])
+		if outputType == "text" && len(data) == 0 && ctx.Err() == nil && runCtx.Err() != context.DeadlineExceeded {
+			if text := util.Clean(result["message"]); text != "" {
+				data = []map[string]any{{"text_response": text}}
+				status = TaskStatusSuccess
+				message = ""
+			}
+		}
+		updates := map[string]any{"status": status, "error": message, "data": data}
+		if outputType != "" {
 			updates["output_type"] = outputType
+		}
+		if mode == "generate" || mode == "edit" {
+			updates["output_statuses"] = finalImageOutputStatuses(taskCount(mode, payload), data, status)
 		}
 		s.updateActiveTask(key, updates)
 		return
@@ -409,6 +421,29 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		updates["output_type"] = outputType
 	}
 	s.updateActiveTask(key, updates)
+}
+
+func finalImageOutputStatuses(count int, data []map[string]any, status string) []string {
+	statuses := initialImageOutputStatuses(count)
+	if len(statuses) == 0 {
+		return statuses
+	}
+	fallback := status
+	if fallback != TaskStatusCancelled {
+		fallback = TaskStatusError
+	}
+	for index := range statuses {
+		statuses[index] = fallback
+	}
+	for index, item := range data {
+		if index >= len(statuses) {
+			break
+		}
+		if hasImageTaskOutputData(item) {
+			statuses[index] = TaskStatusSuccess
+		}
+	}
+	return statuses
 }
 
 func (s *ImageTaskService) taskTimeout() time.Duration {
@@ -642,13 +677,13 @@ func (s *ImageTaskService) loadLocked() map[string]map[string]any {
 				normalized["output_compression"] = compression
 			}
 		}
-	if data := util.AsMapSlice(task["data"]); data != nil {
-		normalized["data"] = data
-	}
-	if statuses := normalizedImageOutputStatuses(mode, count, task["output_statuses"]); len(statuses) > 0 {
-		normalized["output_statuses"] = statuses
-	}
-	if errText := util.Clean(task["error"]); errText != "" {
+		if data := util.AsMapSlice(task["data"]); data != nil {
+			normalized["data"] = data
+		}
+		if statuses := normalizedImageOutputStatuses(mode, count, task["output_statuses"]); len(statuses) > 0 {
+			normalized["output_statuses"] = statuses
+		}
+		if errText := util.Clean(task["error"]); errText != "" {
 			normalized["error"] = errText
 		}
 		if outputType := util.Clean(task["output_type"]); outputType != "" {
@@ -834,7 +869,7 @@ func hasImageTaskOutputData(item map[string]any) bool {
 	if item == nil {
 		return false
 	}
-	return util.Clean(item["b64_json"]) != "" || util.Clean(item["url"]) != ""
+	return util.Clean(item["b64_json"]) != "" || util.Clean(item["url"]) != "" || util.Clean(item["text_response"]) != ""
 }
 
 func mergeImageTaskMetadata(payload map[string]any, metadata map[string]any) {

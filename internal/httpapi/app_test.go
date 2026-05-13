@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -2404,8 +2405,84 @@ func TestModelsCallLogIncludesUserKeyName(t *testing.T) {
 		detail["status"] != float64(http.StatusOK) ||
 		detail["outcome"] != "success" ||
 		detail["key_name"] != "frontend" ||
+		detail["auth_kind"] != service.AuthKindAPIKey ||
 		detail["key_role"] != "user" {
 		t.Fatalf("models call log did not include user key identity: %#v", detail)
+	}
+	if _, ok := detail["session_name"]; ok {
+		t.Fatalf("api key log should not include session_name: %#v", detail)
+	}
+}
+
+func TestProtocolCallLogCapturesUnknownLengthRequestWithoutDuplicateAudit(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "frontend", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	app.engine.ImageTokenProvider = func(context.Context) (string, error) {
+		return "test-token", nil
+	}
+	app.engine.ImageClientFactory = func(string) *backend.Client {
+		return nil
+	}
+	app.engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		out := make(chan protocol.ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- protocol.ImageOutput{
+			Kind:    "result",
+			Model:   request.Model,
+			Index:   index,
+			Total:   total,
+			Created: 123,
+			Data:    []map[string]any{{"url": "https://example.test/image.png"}},
+		}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	body := `{"prompt":"draw a cat","model":"gpt-image-2","n":1,"response_format":"url"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations?trace=1", io.NopCloser(strings.NewReader(body)))
+	req.ContentLength = -1
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/logs", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("logs status = %d body = %s", res.Code, res.Body.String())
+	}
+	var logs map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("logs json: %v", err)
+	}
+	items := logItems(logs)
+	callLog := findLogByDetails(items, map[string]any{"endpoint": "/v1/images/generations", "outcome": "success"})
+	if callLog == nil {
+		t.Fatalf("expected image call log, got %#v", items)
+	}
+	detail, _ := callLog["detail"].(map[string]any)
+	requestArgs, _ := detail["request_args"].(map[string]any)
+	query, _ := requestArgs["query"].(map[string]any)
+	requestBody, _ := requestArgs["body"].(map[string]any)
+	if query["trace"] != "1" || requestBody["model"] != "gpt-image-2" || requestBody["prompt"] != "draw a cat" {
+		t.Fatalf("request args not captured completely: %#v", requestArgs)
+	}
+	if detail["request_truncated"] != nil {
+		t.Fatalf("small request should not be marked truncated: %#v", detail)
+	}
+	if auditLog := findHTTPAuditLogByPath(items, "/v1/images/generations"); auditLog != nil {
+		t.Fatalf("protocol request should not also create generic audit log: %#v", auditLog)
 	}
 }
 
@@ -2452,8 +2529,65 @@ func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
 	if detail["operation_type"] != "查询" || detail["subject_id"] != testAdminUsername || detail["user_agent"] != "chatgpt2api-test" {
 		t.Fatalf("missing audit identity/request fields = %#v", detail)
 	}
+	if detail["username"] != "管理员" || detail["session_name"] != "登录会话" || detail["auth_kind"] != service.AuthKindSession {
+		t.Fatalf("session audit detail should use username/session fields instead of token name: %#v", detail)
+	}
+	if _, ok := detail["key_name"]; ok {
+		t.Fatalf("session audit detail should not expose 登录会话 as key_name: %#v", detail)
+	}
 	if _, ok := detail["duration_ms"].(float64); !ok {
 		t.Fatalf("duration_ms not numeric in audit detail = %#v", detail)
+	}
+}
+
+func TestCreationTaskSubmitLogsRequestAndPollingAvoidsGenericAuditNoise(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "frontend", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/creation-tasks/image-generations", strings.NewReader(`{"client_task_id":"noise-test","prompt":"test image"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("submit creation task status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/creation-tasks?ids=noise-test", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("poll creation task status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/logs", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("logs status = %d body = %s", res.Code, res.Body.String())
+	}
+	var logs map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("logs json: %v", err)
+	}
+	items := logItems(logs)
+	submitLog := findHTTPAuditLogByPath(items, "/api/creation-tasks/image-generations")
+	if submitLog == nil {
+		t.Fatalf("creation task submit should create a request log, got %#v", items)
+	}
+	detail, _ := submitLog["detail"].(map[string]any)
+	requestArgs, _ := detail["request_args"].(map[string]any)
+	if requestArgs["client_task_id"] != "noise-test" || requestArgs["prompt"] != "test image" {
+		t.Fatalf("creation task submit request args = %#v", requestArgs)
+	}
+	if auditLog := findHTTPAuditLogByPath(items, "/api/creation-tasks"); auditLog != nil {
+		t.Fatalf("creation task polling should not create generic audit log: %#v", auditLog)
 	}
 }
 
@@ -2499,8 +2633,8 @@ func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
 		t.Fatalf("cleanup json: %v", err)
 	}
 	cleanup, _ := payload["cleanup"].(map[string]any)
-	if cleanup["deleted"] != float64(1) || cleanup["remaining"] != float64(2) {
-		t.Fatalf("cleanup result = %#v, want deleted 1 remaining 2", cleanup)
+	if cleanup["deleted"] != float64(1) || cleanup["remaining"] != float64(1) {
+		t.Fatalf("cleanup result = %#v, want deleted 1 remaining 1", cleanup)
 	}
 }
 
@@ -2552,6 +2686,16 @@ func assertCreationConcurrentLimit(t *testing.T, payload map[string]any, want in
 
 func findLogByDetail(items []map[string]any, key, value string) map[string]any {
 	return findLogByDetails(items, map[string]any{key: value})
+}
+
+func findHTTPAuditLogByPath(items []map[string]any, path string) map[string]any {
+	for _, item := range items {
+		detail, _ := item["detail"].(map[string]any)
+		if detail["path"] == path && detail["endpoint"] == nil {
+			return item
+		}
+	}
+	return nil
 }
 
 func findLogByDetails(items []map[string]any, values map[string]any) map[string]any {

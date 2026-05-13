@@ -51,6 +51,8 @@ const detailLabels: Record<string, string> = {
   ended_at: "结束时间",
   username: "操作人",
   key_name: "令牌名称",
+  session_name: "会话名称",
+  auth_kind: "认证方式",
   key_role: "角色",
   key_id: "凭据 ID",
   subject_id: "用户 ID",
@@ -77,6 +79,8 @@ const primaryDetailKeys = [
   "duration_ms",
   "username",
   "key_name",
+  "session_name",
+  "auth_kind",
   "subject_id",
   "key_id",
   "ip_address",
@@ -97,7 +101,7 @@ function detailText(item: SystemLog | null, key: string) {
 }
 
 function actorText(item: SystemLog | null) {
-  return detailText(item, "username") || detailText(item, "key_name") || detailText(item, "subject_id") || detailText(item, "key_id") || "-";
+  return detailText(item, "username") || detailText(item, "key_name") || detailText(item, "subject_id") || detailText(item, "key_id") || detailText(item, "session_name") || "-";
 }
 
 function moduleText(item: SystemLog | null) {
@@ -178,6 +182,10 @@ function formatDetailValue(key: string, value: unknown) {
   if (key === "status" || key === "outcome") {
     if (value === "success") return "成功";
     if (value === "failed") return "失败";
+  }
+  if (key === "auth_kind") {
+    if (value === "session") return "登录会话";
+    if (value === "api_key") return "API 令牌";
   }
   if (typeof value === "boolean") return value ? "是" : "否";
   return String(value);

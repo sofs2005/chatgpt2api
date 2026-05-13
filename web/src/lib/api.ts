@@ -2,7 +2,7 @@ import { httpRequest } from "@/lib/request";
 import type { LoginPageImageMode } from "@/lib/login-page-image-layout";
 
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
-export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
+export type AccountStatus = "正常" | "限流" | "异常" | "禁用" | "刷新中" | "过期待刷新";
 export const IMAGE_MODEL_OPTIONS = [
   { value: "auto", label: "Auto" },
   { value: "gpt-image-2", label: "gpt-image-2" },
@@ -176,6 +176,8 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  session_refreshed?: number;
+  session_failed?: number;
   errors?: Array<{ access_token?: string; account_id?: string; error: string }>;
   results?: AccountRefreshResult[];
   total?: number;
@@ -653,6 +655,13 @@ export async function createAccounts(tokens: string[]) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
     body: { tokens },
+  });
+}
+
+export async function createAccountFromSession(sessionJson: string) {
+  return httpRequest<AccountMutationResponse>("/api/accounts/session", {
+    method: "POST",
+    body: { session_json: sessionJson },
   });
 }
 

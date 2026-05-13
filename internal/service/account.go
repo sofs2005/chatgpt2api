@@ -16,6 +16,20 @@ import (
 	"chatgpt2api/internal/util"
 )
 
+// 账号 map 字段说明（storage 层存储的 account 对象）
+//
+//	access_token        - ChatGPT 访问令牌（JWT），必填，账号唯一标识
+//	session_token       - 会话令牌，用于自动刷新 access_token
+//	type                - 账号类型：Free / Plus / ProLite / Pro / Team
+//	status              - 账号状态：正常 / 异常 / 限流 / 禁用 / 过期待刷新 / 刷新中
+//	quota               - 剩余配额次数（整数）
+//	image_quota_unknown - 图片配额未知标记
+//	email               - 关联邮箱
+//	user_id             - 用户ID
+//	chatgpt_account_id  - ChatGPT 账号ID
+//	limits_progress     - 用量限制进度
+//	default_model_slug  - 默认模型标识
+//	restore_at          - 配额恢复时间
 type AccountConfig interface {
 	AutoRemoveInvalidAccounts() bool
 	AutoRemoveRateLimitedAccounts() bool
@@ -34,6 +48,7 @@ type AccountService struct {
 	browserHTTPClient func(profile string, timeout time.Duration) *http.Client
 	textRequestCount  map[string]int
 	textCooldownUntil time.Time
+	refresher         *SessionRefresher
 }
 
 const (
@@ -59,6 +74,14 @@ func NewAccountService(backend storage.Backend, config AccountConfig, proxy *Pro
 		browserHTTPClient: browserHTTPClient,
 		textRequestCount:  map[string]int{},
 	}
+	// 初始化 SessionRefresher，使用 uTLS 客户端调用 /api/auth/session
+	s.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		client := s.browserHTTPClient(defaultRemoteProfile, refreshTimeout)
+		if client == nil {
+			client = &http.Client{Timeout: refreshTimeout}
+		}
+		return client.Do(req)
+	})
 	s.items = s.loadAccounts()
 	return s
 }
@@ -184,6 +207,116 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 	return map[string]any{"added": added, "skipped": skipped, "items": items}
 }
 
+func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]any, error) {
+	var session struct {
+		AccessToken  string `json:"accessToken"`
+		Expires      any    `json:"expires"`
+		SessionToken string `json:"sessionToken"`
+		User         struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Email string `json:"email"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal([]byte(sessionJSON), &session); err != nil {
+		return nil, fmt.Errorf("invalid session JSON: %w", err)
+	}
+	accessToken := util.Clean(session.AccessToken)
+	if accessToken == "" {
+		return nil, fmt.Errorf("session JSON missing accessToken")
+	}
+	sessionToken := util.Clean(session.SessionToken)
+	if sessionToken == "" {
+		return nil, fmt.Errorf("session JSON missing sessionToken")
+	}
+
+	validated, err := s.refresher.RefreshSession(context.Background(), accessToken, sessionToken)
+	if err != nil {
+		return nil, fmt.Errorf("session token validation failed: %w", err)
+	}
+	accessToken = validated.AccessToken
+	if validated.SessionToken != "" {
+		sessionToken = validated.SessionToken
+	}
+	sessionExpires := any(session.Expires)
+	if validated.Expires != "" {
+		sessionExpires = validated.Expires
+	}
+
+	userID := util.Clean(validated.User.ID)
+	email := util.Clean(validated.User.Email)
+	updates := map[string]any{
+		"session_token":   sessionToken,
+		"session_expires": sessionExpires,
+	}
+	if userID != "" {
+		updates["user_id"] = userID
+	}
+	if email != "" {
+		updates["email"] = email
+	}
+	if name := util.Clean(validated.User.Name); name != "" {
+		updates["name"] = name
+	}
+
+	matchedToken := s.findSessionImportAccountToken(accessToken, userID, email)
+	result := map[string]any{"added": 0, "skipped": 0, "updated": 0, "items": s.ListAccounts()}
+	if matchedToken != "" {
+		if !s.UpdateAccountFromSessionImport(matchedToken, accessToken, updates, true) {
+			return nil, fmt.Errorf("session account update failed")
+		}
+		result["updated"] = 1
+	} else {
+		result = s.AddAccounts([]string{accessToken})
+	}
+	if item := s.UpdateAccount(accessToken, updates); item != nil {
+		publicItems := publicAccounts([]map[string]any{item})
+		if len(publicItems) > 0 {
+			result["item"] = publicItems[0]
+		}
+		result["items"] = s.ListAccounts()
+	}
+	result["tokens"] = []string{accessToken}
+	return result, nil
+}
+
+func isRecoverableSessionImportStatus(status string) bool {
+	switch status {
+	case "异常", "过期待刷新", "刷新中":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *AccountService) findSessionImportAccountToken(accessToken, userID, email string) string {
+	accessToken = util.Clean(accessToken)
+	userID = util.Clean(userID)
+	email = strings.ToLower(util.Clean(email))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if accessToken != "" && s.findIndexLocked(accessToken) >= 0 {
+		return accessToken
+	}
+	if userID != "" {
+		for _, item := range s.items {
+			if util.Clean(item["user_id"]) == userID {
+				return util.Clean(item["access_token"])
+			}
+		}
+	}
+	if email != "" {
+		for _, item := range s.items {
+			if strings.ToLower(util.Clean(item["email"])) == email {
+				return util.Clean(item["access_token"])
+			}
+		}
+	}
+	return ""
+}
+
 func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 	targets := map[string]struct{}{}
 	for _, token := range cleanTokens(tokens) {
@@ -267,6 +400,58 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 	return util.CopyMap(account)
 }
 
+func (s *AccountService) UpdateAccountFromSessionImport(oldAccessToken, newAccessToken string, updates map[string]any, recoverStatus bool) bool {
+	oldAccessToken = util.Clean(oldAccessToken)
+	newAccessToken = util.Clean(newAccessToken)
+	if oldAccessToken == "" || newAccessToken == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.findIndexLocked(oldAccessToken)
+	if idx < 0 {
+		return false
+	}
+	if oldAccessToken != newAccessToken {
+		if duplicateIdx := s.findIndexLocked(newAccessToken); duplicateIdx >= 0 && duplicateIdx != idx {
+			s.items = append(s.items[:duplicateIdx], s.items[duplicateIdx+1:]...)
+			if duplicateIdx < idx {
+				idx--
+			}
+		}
+	}
+
+	accountUpdates := mergeMaps(updates, map[string]any{"access_token": newAccessToken})
+	if recoverStatus && isRecoverableSessionImportStatus(util.Clean(s.items[idx]["status"])) {
+		accountUpdates["status"] = "正常"
+	}
+	account := normalizeAccount(mergeMaps(s.items[idx], accountUpdates))
+	if account == nil {
+		return false
+	}
+	s.items[idx] = account
+	if oldAccessToken != newAccessToken {
+		if count, ok := s.imageReservations[oldAccessToken]; ok {
+			s.imageReservations[newAccessToken] = count
+			delete(s.imageReservations, oldAccessToken)
+		}
+		if count, ok := s.textRequestCount[oldAccessToken]; ok {
+			s.textRequestCount[newAccessToken] = count
+			delete(s.textRequestCount, oldAccessToken)
+		}
+	}
+	_ = s.saveLocked()
+	s.logs.Add("更新Session账号", map[string]any{
+		"module":         "accounts",
+		"operation_type": "更新",
+		"token":          util.AnonymizeToken(newAccessToken),
+		"status":         account["status"],
+	})
+	return true
+}
+
 func (s *AccountService) GetAccount(accessToken string) map[string]any {
 	accessToken = util.Clean(accessToken)
 	if accessToken == "" {
@@ -280,6 +465,8 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 	}
 	return util.CopyMap(s.items[idx])
 }
+
+const MaxTokenSwitchAttempts = 5
 
 func (s *AccountService) GetTextAccessToken() string {
 	s.mu.Lock()
@@ -298,11 +485,81 @@ func (s *AccountService) GetTextAccessToken() string {
 	return ""
 }
 
+func (s *AccountService) GetTextAccessTokenWithRetry(exhaustedTokens map[string]struct{}) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nonFree := s.filterNonFreeLocked()
+	free := s.filterFreeLocked()
+
+	selectFrom := func(pool []map[string]any) string {
+		var bestToken string
+		bestCount := int(^uint(0) >> 1)
+		for _, item := range pool {
+			token := util.Clean(item["access_token"])
+			if _, exhausted := exhaustedTokens[token]; exhausted {
+				continue
+			}
+			count := s.textRequestCount[token]
+			if count < bestCount {
+				bestCount = count
+				bestToken = token
+			}
+		}
+		if bestToken != "" {
+			s.textRequestCount[bestToken] = bestCount + 1
+		}
+		return bestToken
+	}
+
+	if token := selectFrom(nonFree); token != "" {
+		return token, true
+	}
+	if token := selectFrom(free); token != "" {
+		return token, true
+	}
+	return "", false
+}
+
+func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newToken string, shouldRetry bool) {
+	account := s.GetAccount(expiredToken)
+	if account == nil {
+		return "", false
+	}
+
+	sessionToken := util.Clean(account["session_token"])
+	if sessionToken == "" {
+		return "", false
+	}
+	if s.UpdateAccount(expiredToken, map[string]any{"status": "刷新中"}) == nil {
+		return "", false
+	}
+	s.refreshAccountViaSessionAsync(expiredToken, sessionToken)
+	return "", true
+}
+
+func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken string) {
+	if s.refresher.IsRefreshing(accessToken) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+		defer cancel()
+
+		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshToken(ctx, accessToken, sessionToken)
+		if err != nil {
+			s.UpdateAccount(accessToken, map[string]any{"status": "异常"})
+			return
+		}
+		s.RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires)
+	}()
+}
+
 func (s *AccountService) filterNonFreeLocked() []map[string]any {
 	var out []map[string]any
 	for _, item := range s.items {
 		status := util.Clean(item["status"])
-		if status == "禁用" || status == "异常" {
+		if status == "禁用" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
 			continue
 		}
 		if IsPaidImageAccount(item) {
@@ -316,7 +573,7 @@ func (s *AccountService) filterFreeLocked() []map[string]any {
 	var out []map[string]any
 	for _, item := range s.items {
 		status := util.Clean(item["status"])
-		if status == "禁用" || status == "异常" {
+		if status == "禁用" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
 			continue
 		}
 		if !IsPaidImageAccount(item) {
@@ -387,12 +644,34 @@ func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow f
 		account, refreshErr := s.RefreshAccountState(ctx, reservation.token)
 		if refreshErr != nil {
 			lastRefreshErr = refreshErr
+			if cached := s.cachedAccountForTransientRefreshError(reservation.token, refreshErr); cached != nil &&
+				(allow == nil || allow(cached)) &&
+				s.reservedImageSlotAvailable(reservation) {
+				return reservation.token, nil
+			}
 		}
 		if account != nil && (allow == nil || allow(account)) && s.reservedImageSlotAvailable(reservation) {
 			return reservation.token, nil
 		}
 		s.releaseImageReservation(reservation.token)
 	}
+}
+
+func (s *AccountService) cachedAccountForTransientRefreshError(accessToken string, err error) map[string]any {
+	if err == nil {
+		return nil
+	}
+	if _, ok := util.SummarizeUpstreamConnectionError(err.Error()); !ok {
+		return nil
+	}
+	account := s.GetAccount(accessToken)
+	if account == nil {
+		return nil
+	}
+	if IsImageAccountAvailable(account) {
+		return account
+	}
+	return nil
 }
 
 func (s *AccountService) HasAvailableAccount() bool {
@@ -417,20 +696,28 @@ func (s *AccountService) RefreshAccountState(ctx context.Context, accessToken st
 	return s.UpdateAccount(accessToken, remote), nil
 }
 
+type pendingRefreshItem struct {
+	accessToken  string
+	sessionToken string
+}
+
 func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []string) map[string]any {
 	tokens := cleanTokens(accessTokens)
 	if len(tokens) == 0 {
 		return map[string]any{
-			"refreshed":   0,
-			"errors":      []map[string]string{},
-			"results":     []map[string]any{},
-			"total":       0,
-			"failed":      0,
-			"duration_ms": 0,
-			"items":       s.ListAccounts(),
+			"refreshed":         0,
+			"session_refreshed": 0,
+			"session_failed":    0,
+			"errors":            []map[string]string{},
+			"results":           []map[string]any{},
+			"total":             0,
+			"failed":            0,
+			"duration_ms":       0,
+			"items":             s.ListAccounts(),
 		}
 	}
 	startedAt := time.Now()
+	pendingRefresh := []pendingRefreshItem{}
 	type result struct {
 		token    string
 		info     map[string]any
@@ -471,6 +758,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 	refreshed := 0
 	errors := []map[string]string{}
 	details := make([]map[string]any, 0, len(tokens))
+	detailsByToken := make(map[string]map[string]any, len(tokens))
 	for _, token := range tokens {
 		res := resultsByToken[token]
 		detail := map[string]any{
@@ -481,6 +769,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			"status":        "error",
 			"duration_ms":   res.duration.Milliseconds(),
 		}
+		detailsByToken[token] = detail
 		if res.err == nil {
 			updated := s.UpdateAccount(res.token, res.info)
 			if updated != nil {
@@ -504,6 +793,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		if normalized, handled := s.ApplyAccountError(res.token, "refresh_accounts", res.err); handled {
 			message = normalized
 		}
+		pendingSessionRefresh := false
 		if current := s.GetAccount(res.token); current != nil {
 			detail["account_status"] = current["status"]
 			detail["email"] = current["email"]
@@ -511,6 +801,18 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			detail["quota"] = current["quota"]
 			detail["image_quota_unknown"] = current["image_quota_unknown"]
 			detail["restore_at"] = current["restore_at"]
+			if util.Clean(current["status"]) == "过期待刷新" {
+				if st := util.Clean(current["session_token"]); st != "" {
+					pendingRefresh = append(pendingRefresh, pendingRefreshItem{accessToken: res.token, sessionToken: st})
+					pendingSessionRefresh = true
+				}
+			}
+		}
+		detail["message"] = message
+		if pendingSessionRefresh {
+			detail["status"] = "pending_session_refresh"
+			details = append(details, detail)
+			continue
 		}
 		errorItem := map[string]string{
 			"account_id":   accountIDFromToken(res.token),
@@ -518,18 +820,82 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			"error":        message,
 		}
 		errors = append(errors, errorItem)
-		detail["message"] = message
 		detail["error"] = message
 		details = append(details, detail)
 	}
+
+	refreshedCount := 0
+	failedRefreshCount := 0
+	if len(pendingRefresh) > 0 {
+		sortPendingRefreshByPriority(pendingRefresh, s)
+	}
+	for _, item := range pendingRefresh {
+		detail := detailsByToken[item.accessToken]
+		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshToken(ctx, item.accessToken, item.sessionToken)
+		if err != nil {
+			s.UpdateAccount(item.accessToken, map[string]any{"status": "异常"})
+			failedRefreshCount++
+			message := fmt.Sprintf("token刷新失败: %s", err.Error())
+			errors = append(errors, map[string]string{
+				"account_id":   accountIDFromToken(item.accessToken),
+				"access_token": item.accessToken,
+				"error":        message,
+			})
+			if detail != nil {
+				detail["status"] = "error"
+				detail["message"] = message
+				detail["error"] = message
+				detail["account_status"] = "异常"
+			}
+			continue
+		}
+		if !s.RefreshAccountViaSession(item.accessToken, newAccessToken, newSessionToken, newExpires) {
+			failedRefreshCount++
+			message := "token刷新失败: 账号更新失败"
+			errors = append(errors, map[string]string{
+				"account_id":   accountIDFromToken(item.accessToken),
+				"access_token": item.accessToken,
+				"error":        message,
+			})
+			if detail != nil {
+				detail["status"] = "error"
+				detail["message"] = message
+				detail["error"] = message
+			}
+			continue
+		}
+		if info, err := s.FetchRemoteInfo(ctx, newAccessToken); err == nil {
+			s.UpdateAccount(newAccessToken, info)
+		}
+		if detail != nil {
+			detail["access_token"] = newAccessToken
+			detail["token_preview"] = util.AnonymizeToken(newAccessToken)
+			detail["success"] = true
+			detail["status"] = "success"
+			detail["message"] = "token刷新成功"
+			delete(detail, "error")
+			if current := s.GetAccount(newAccessToken); current != nil {
+				detail["account_status"] = current["status"]
+				detail["email"] = current["email"]
+				detail["type"] = current["type"]
+				detail["quota"] = current["quota"]
+				detail["image_quota_unknown"] = current["image_quota_unknown"]
+				detail["restore_at"] = current["restore_at"]
+			}
+		}
+		refreshedCount++
+	}
+
 	return map[string]any{
-		"refreshed":   refreshed,
-		"errors":      errors,
-		"results":     details,
-		"total":       len(tokens),
-		"failed":      len(errors),
-		"duration_ms": time.Since(startedAt).Milliseconds(),
-		"items":       s.ListAccounts(),
+		"refreshed":         refreshed,
+		"session_refreshed": refreshedCount,
+		"session_failed":    failedRefreshCount,
+		"errors":            errors,
+		"results":           details,
+		"total":             len(tokens),
+		"failed":            len(errors),
+		"duration_ms":       time.Since(startedAt).Milliseconds(),
+		"items":             s.ListAccounts(),
 	}
 }
 
@@ -612,6 +978,32 @@ func (s *AccountService) ApplyAccountError(accessToken, event string, err error)
 }
 
 func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message string) (string, bool) {
+	// token 过期但可能可以刷新
+	if IsAccountTokenExpiredErrorMessage(message) {
+		account := s.GetAccount(accessToken)
+		sessionToken := ""
+		if account != nil {
+			sessionToken = util.Clean(account["session_token"])
+		}
+		if sessionToken != "" {
+			// 有 session_token，实时请求异步刷新；批量扫描由 RefreshAccounts 第二阶段串行刷新
+			status := "过期待刷新"
+			if event != "refresh_accounts" {
+				status = "刷新中"
+			}
+			s.UpdateAccount(accessToken, map[string]any{"status": status})
+			if event != "refresh_accounts" {
+				s.refreshAccountViaSessionAsync(accessToken, sessionToken)
+			}
+			return "检测到token过期，已提交刷新任务", true
+		}
+		// 无 session_token，直接标记异常
+		if !s.RemoveInvalidToken(accessToken, event) {
+			s.UpdateAccount(accessToken, map[string]any{"status": "异常", "quota": 0, "image_quota_unknown": false})
+		}
+		return "检测到token过期且无法刷新", true
+	}
+	// token 被撤销/无效（不可刷新）
 	if IsAccountInvalidErrorMessage(message) {
 		if !s.RemoveInvalidToken(accessToken, event) {
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常", "quota": 0, "image_quota_unknown": false})
@@ -623,6 +1015,60 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 		return "检测到限流", true
 	}
 	return message, false
+}
+
+// RefreshAccountViaSession 刷新成功后更新账号数据
+func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires string) bool {
+	accessToken = util.Clean(accessToken)
+	newAccessToken = util.Clean(newAccessToken)
+	if accessToken == "" || newAccessToken == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.findIndexLocked(accessToken)
+	if idx < 0 {
+		return false
+	}
+	if accessToken != newAccessToken {
+		if duplicateIdx := s.findIndexLocked(newAccessToken); duplicateIdx >= 0 && duplicateIdx != idx {
+			s.items = append(s.items[:duplicateIdx], s.items[duplicateIdx+1:]...)
+			if duplicateIdx < idx {
+				idx--
+			}
+		}
+	}
+
+	account := normalizeAccount(mergeMaps(s.items[idx], map[string]any{
+		"access_token":    newAccessToken,
+		"session_token":   newSessionToken,
+		"session_expires": newExpires,
+		"status":          "正常",
+	}))
+	if account == nil {
+		return false
+	}
+	s.items[idx] = account
+	if accessToken != newAccessToken {
+		if count, ok := s.imageReservations[accessToken]; ok {
+			s.imageReservations[newAccessToken] = count
+			delete(s.imageReservations, accessToken)
+		}
+		if count, ok := s.textRequestCount[accessToken]; ok {
+			s.textRequestCount[newAccessToken] = count
+			delete(s.textRequestCount, accessToken)
+		}
+	}
+	_ = s.saveLocked()
+	s.logs.Add("刷新账号token", map[string]any{
+		"module":         "accounts",
+		"operation_type": "更新",
+		"token":          util.AnonymizeToken(newAccessToken),
+		"status":         account["status"],
+	})
+	return true
 }
 
 func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {
@@ -970,12 +1416,33 @@ func (s *AccountService) detectAccountType(accessToken string, mePayload, initPa
 	return "Free"
 }
 
+func sortPendingRefreshByPriority(items []pendingRefreshItem, s *AccountService) {
+	if len(items) < 2 {
+		return
+	}
+	paid := make([]pendingRefreshItem, 0, len(items))
+	free := make([]pendingRefreshItem, 0, len(items))
+	for _, item := range items {
+		if isPaidRefreshAccount(s, item.accessToken) {
+			paid = append(paid, item)
+		} else {
+			free = append(free, item)
+		}
+	}
+	copy(items, append(paid, free...))
+}
+
+func isPaidRefreshAccount(s *AccountService, accessToken string) bool {
+	account := s.GetAccount(accessToken)
+	return IsPaidImageAccount(account)
+}
+
 func IsImageAccountAvailable(account map[string]any) bool {
 	if account == nil {
 		return false
 	}
 	status := util.Clean(account["status"])
-	if status == "禁用" || status == "限流" || status == "异常" {
+	if status == "禁用" || status == "限流" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
 		return false
 	}
 	if util.ToBool(account["image_quota_unknown"]) {
@@ -1003,6 +1470,19 @@ func IsAccountInvalidErrorMessage(message string) bool {
 		strings.Contains(text, "authentication token has been invalidated") ||
 		strings.Contains(text, "invalidated oauth token") ||
 		strings.Contains(text, "token expired") ||
+		strings.Contains(text, "authentication token is expired")
+}
+
+// IsAccountTokenExpiredErrorMessage 专门检测"可刷新的 token 过期"场景。
+// 与 IsAccountInvalidErrorMessage 的区别：本函数不包含 token_invalidated / token_revoked /
+// invalidated oauth token 等不可刷新场景，仅精确匹配 token expired 相关消息。
+// 当本函数返回 true 且账户有 session_token 时，应触发刷新而不是直接标记异常。
+func IsAccountTokenExpiredErrorMessage(message string) bool {
+	text := strings.ToLower(strings.TrimSpace(message))
+	if text == "" || isBootstrapErrorMessage(text) {
+		return false
+	}
+	return strings.Contains(text, "token expired") ||
 		strings.Contains(text, "authentication token is expired")
 }
 

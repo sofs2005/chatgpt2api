@@ -26,13 +26,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { createAccounts, type Account } from "@/lib/api";
+import { createAccountFromSession, createAccounts, type Account } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ImportMethod = "menu" | "token" | "session" | "cpa";
 
 type AccountImportDialogProps = {
   disabled?: boolean;
+  canImportTokens: boolean;
+  canImportSession: boolean;
   onImported: (items: Account[]) => void;
 };
 
@@ -53,6 +55,11 @@ function splitTokens(value: string) {
 
 function getSessionAccessToken(value: unknown) {
   const token = (value as { accessToken?: unknown })?.accessToken;
+  return typeof token === "string" ? token.trim() : "";
+}
+
+function getSessionToken(value: unknown) {
+  const token = (value as { sessionToken?: unknown })?.sessionToken;
   return typeof token === "string" ? token.trim() : "";
 }
 
@@ -102,7 +109,7 @@ function MethodCard({
   );
 }
 
-export function AccountImportDialog({ disabled, onImported }: AccountImportDialogProps) {
+export function AccountImportDialog({ disabled, canImportTokens, canImportSession, onImported }: AccountImportDialogProps) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [method, setMethod] = useState<ImportMethod>("menu");
@@ -196,24 +203,45 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
   };
 
   const handleImportSessionJson = async () => {
-    if (!sessionInput.trim()) {
+    const sessionJson = sessionInput.trim();
+    if (!sessionJson) {
       toast.error("请先粘贴完整 Session JSON");
       return;
     }
 
     try {
-      const payload = JSON.parse(sessionInput) as unknown;
-      const token = getSessionAccessToken(payload);
+      const payload = JSON.parse(sessionJson) as unknown;
+      const accessToken = getSessionAccessToken(payload);
+      const sessionToken = getSessionToken(payload);
 
-      if (!token) {
+      if (!accessToken) {
         toast.error("未从 Session JSON 中提取到 accessToken");
         return;
       }
+      if (!sessionToken) {
+        toast.error("未从 Session JSON 中提取到 sessionToken");
+        return;
+      }
 
-      await submitTokens([token], "Session JSON 导入完成");
+      setIsSubmitting(true);
+      const data = await createAccountFromSession(sessionJson);
+      onImported(data.items);
+      setOpen(false);
+      resetState();
+
+      if ((data.errors?.length ?? 0) > 0) {
+        const firstError = data.errors?.[0]?.error;
+        toast.error(
+          `Session JSON 导入完成，新增 ${data.added ?? 0} 个，已刷新 ${data.refreshed ?? 0} 个，Session 刷新 ${data.session_refreshed ?? 0} 个，失败 ${data.errors?.length ?? 0} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+        );
+      } else {
+        toast.success("Session JSON 导入完成，已保存 sessionToken 并自动刷新账号信息");
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Session JSON 解析失败";
       toast.error(message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -336,7 +364,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               {sessionUrl}
               <ExternalLink className="size-3.5" />
             </a>
-            ，复制页面返回的完整 JSON，系统会自动提取其中的 `accessToken` 导入。
+            ，复制页面返回的完整 JSON，系统会保存其中的 `accessToken` 和 `sessionToken`。
           </div>
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
             <div className="font-medium">风险提示</div>
@@ -405,44 +433,52 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
 
     return (
       <div className="space-y-3">
-        <MethodCard
-          title="导入 Access Token"
-          description="支持直接粘贴，一行一个；也支持从 TXT 文件读取，一行一个。"
-          icon={KeyRound}
-          onClick={() => setMethod("token")}
-        />
-        <MethodCard
-          title="导入 Session JSON"
-          description="从 chatgpt.com 的 session 接口复制完整 JSON，自动提取 accessToken。"
-          icon={FileJson}
-          onClick={() => setMethod("session")}
-        />
-        <MethodCard
-          title="导入 CPA JSON 文件"
-          description="支持一次多选多个本地 JSON 文件，逐个读取对象里的 access_token 后导入。"
-          icon={Files}
-          onClick={() => setMethod("cpa")}
-        />
-        <MethodCard
-          title="从远程 CPA 服务器导入"
-          description="前往设置页面配置远程 CPA 服务器后再执行导入。"
-          icon={Files}
-          onClick={() => {
-            setOpen(false);
-            resetState();
-            navigate("/settings");
-          }}
-        />
-        <MethodCard
-          title="从 Sub2API 服务器导入"
-          description="前往设置页面配置 Sub2API 服务器，再选择其中的 OpenAI 账号导入。"
-          icon={ServerCog}
-          onClick={() => {
-            setOpen(false);
-            resetState();
-            navigate("/settings");
-          }}
-        />
+        {canImportTokens ? (
+          <MethodCard
+            title="导入 Access Token"
+            description="支持直接粘贴，一行一个；也支持从 TXT 文件读取，一行一个。"
+            icon={KeyRound}
+            onClick={() => setMethod("token")}
+          />
+        ) : null}
+        {canImportSession ? (
+          <MethodCard
+            title="导入 Session JSON"
+            description="从 chatgpt.com 的 session 接口复制完整 JSON，保存 accessToken 和 sessionToken。"
+            icon={FileJson}
+            onClick={() => setMethod("session")}
+          />
+        ) : null}
+        {canImportTokens ? (
+          <>
+            <MethodCard
+              title="导入 CPA JSON 文件"
+              description="支持一次多选多个本地 JSON 文件，逐个读取对象里的 access_token 后导入。"
+              icon={Files}
+              onClick={() => setMethod("cpa")}
+            />
+            <MethodCard
+              title="从远程 CPA 服务器导入"
+              description="前往设置页面配置远程 CPA 服务器后再执行导入。"
+              icon={Files}
+              onClick={() => {
+                setOpen(false);
+                resetState();
+                navigate("/settings");
+              }}
+            />
+            <MethodCard
+              title="从 Sub2API 服务器导入"
+              description="前往设置页面配置 Sub2API 服务器，再选择其中的 OpenAI 账号导入。"
+              icon={ServerCog}
+              onClick={() => {
+                setOpen(false);
+                resetState();
+                navigate("/settings");
+              }}
+            />
+          </>
+        ) : null}
       </div>
     );
   };
@@ -477,7 +513,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 : method === "token"
                   ? "支持手动粘贴或从 TXT 文件导入，一行一个 Token。"
                   : method === "session"
-                    ? "粘贴完整 Session JSON，系统会自动提取 accessToken。"
+                    ? "粘贴完整 Session JSON，系统会保存 accessToken 和 sessionToken。"
                     : "支持一次读取多个本地 JSON 文件，并在提交前做数量确认。"}
             </DialogDescription>
           </DialogHeader>

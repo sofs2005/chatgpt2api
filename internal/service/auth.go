@@ -550,6 +550,7 @@ func (s *AuthService) upsertLinuxDoSession(owner AuthOwner, allowCreate bool) (m
 		return item, raw, nil
 	}
 	if !ownerSeen && !allowCreate {
+		s.mu.Unlock()
 		return nil, "", ErrAuthUserCreationDisabled
 	}
 

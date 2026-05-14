@@ -4,24 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
 )
 
 func TestImageTaskServiceIdempotencyOwnerIsolationAndCompletion(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 4)
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		handlerCalls <- payload
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 
 	alice := Identity{ID: "alice", Name: "Alice", Role: "user"}
 	bob := Identity{ID: "bob", Name: "Bob", Role: "user"}
@@ -55,13 +53,12 @@ func TestImageTaskServiceIdempotencyOwnerIsolationAndCompletion(t *testing.T) {
 }
 
 func TestImageTaskServiceUsesOwnerIDAroundCredentialRotation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 4)
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		handlerCalls <- payload
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	ownerID := "linuxdo:123"
 	oldKey := Identity{ID: ownerID, OwnerID: ownerID, CredentialID: "key-old", Name: "Alice", Role: "user"}
 	newKey := Identity{ID: ownerID, OwnerID: ownerID, CredentialID: "key-new", Name: "Alice", Role: "user"}
@@ -86,8 +83,7 @@ func TestImageTaskServiceUsesOwnerIDAroundCredentialRotation(t *testing.T) {
 }
 
 func TestImageTaskServiceListTasksReturnsEmptyArrays(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
-	svc := NewImageTaskService(path, failingImageTaskHandler, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })
+	svc := newTestImageTaskService(t, failingImageTaskHandler, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	for name, got := range map[string]map[string]any{
@@ -121,8 +117,7 @@ func TestImageTaskServiceListTasksReturnsEmptyArrays(t *testing.T) {
 }
 
 func TestImageTaskServiceRejectsBlankPromptBeforeQueueing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
-	svc := NewImageTaskService(path, failingImageTaskHandler, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })
+	svc := newTestImageTaskService(t, failingImageTaskHandler, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	for name, submit := range map[string]func() (map[string]any, error){
@@ -150,13 +145,12 @@ func TestImageTaskServiceRejectsBlankPromptBeforeQueueing(t *testing.T) {
 }
 
 func TestImageTaskServicePassesMessagesToHandler(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 1)
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		handlerCalls <- payload
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 	messages := []any{
 		map[string]any{"role": "user", "content": "你好，你是什么模型？"},
@@ -187,13 +181,12 @@ func TestImageTaskServicePassesMessagesToHandler(t *testing.T) {
 }
 
 func TestImageTaskServicePassesImageRequestMetadataToHandler(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 1)
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		handlerCalls <- payload
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	if _, err := svc.SubmitGenerationWithMetadata(context.Background(), identity, "task-1", "draw", "gpt-image-2", "2048x2048", "high", "https://base.test", 1, nil, map[string]any{"image_resolution": "2k", "requested_size": "2048x2048"}); err != nil {
@@ -215,13 +208,12 @@ func TestImageTaskServicePassesImageRequestMetadataToHandler(t *testing.T) {
 }
 
 func TestImageTaskServicePassesImageToolOptionsToHandler(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 1)
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		handlerCalls <- payload
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 	partialImages := 2
 
@@ -243,7 +235,6 @@ func TestImageTaskServicePassesImageToolOptionsToHandler(t *testing.T) {
 }
 
 func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handlerCalls := make(chan map[string]any, 1)
 	imageHandler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
@@ -252,7 +243,7 @@ func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
 		handlerCalls <- payload
 		return map[string]any{"output_type": "text", "data": []map[string]any{{"text_response": "chat response"}}}, nil
 	}
-	svc := NewImageTaskService(path, imageHandler, imageHandler, chatHandler, func() int { return 30 })
+	svc := newTestImageTaskService(t, imageHandler, imageHandler, chatHandler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 	messages := []map[string]any{{"role": "user", "content": "hello"}}
 
@@ -283,7 +274,6 @@ func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
 }
 
 func TestImageTaskServiceDoesNotLimitGlobalImageSlots(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
@@ -291,7 +281,7 @@ func TestImageTaskServiceDoesNotLimitGlobalImageSlots(t *testing.T) {
 		<-release
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "first", "gpt-image-2", "1024x1024", "high", "https://base.test", 4, nil); err != nil {
@@ -312,7 +302,6 @@ func TestImageTaskServiceDoesNotLimitGlobalImageSlots(t *testing.T) {
 }
 
 func TestImageTaskServicePublishesPartialImageDataWhileRunning(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	partialPublished := make(chan struct{})
 	release := make(chan struct{})
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
@@ -331,7 +320,7 @@ func TestImageTaskServicePublishesPartialImageDataWhileRunning(t *testing.T) {
 			{"url": "https://example.test/second.png"},
 		}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
 
 	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
@@ -350,7 +339,6 @@ func TestImageTaskServicePublishesPartialImageDataWhileRunning(t *testing.T) {
 }
 
 func TestImageTaskServiceLimitsUserDefaultConcurrentCreationUnits(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	startedImages := make(chan int, 3)
 	release := make(chan struct{})
 	var mu sync.Mutex
@@ -407,7 +395,7 @@ func TestImageTaskServiceLimitsUserDefaultConcurrentCreationUnits(t *testing.T) 
 	chatHandler := func(context.Context, Identity, map[string]any) (map[string]any, error) {
 		return map[string]any{"output_type": "text", "data": []map[string]any{{"text_response": "chat response"}}}, nil
 	}
-	svc := NewImageTaskService(path, imageHandler, imageHandler, chatHandler, func() int { return 30 }, func() int { return 2 })
+	svc := newTestImageTaskService(t, imageHandler, imageHandler, chatHandler, func() int { return 30 }, func() int { return 2 })
 	alice := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
 
 	if _, err := svc.SubmitGeneration(context.Background(), alice, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 3, nil); err != nil {
@@ -438,8 +426,6 @@ func TestImageTaskServiceLimitsUserDefaultConcurrentCreationUnits(t *testing.T) 
 	if len(seen) != 3 {
 		t.Fatalf("started image indexes after release = %#v, want three images", seen)
 	}
-
-	path = filepath.Join(t.TempDir(), "image_tasks.json")
 	started := make(chan string, 3)
 	releaseImage := make(chan struct{})
 	releaseChat := make(chan struct{})
@@ -487,7 +473,7 @@ func TestImageTaskServiceLimitsUserDefaultConcurrentCreationUnits(t *testing.T) 
 		}
 		return map[string]any{"output_type": "text", "data": []map[string]any{{"text_response": "chat response"}}}, nil
 	}
-	svc = NewImageTaskService(path, imageHandler, imageHandler, chatHandler, func() int { return 30 }, func() int { return 2 })
+	svc = newTestImageTaskService(t, imageHandler, imageHandler, chatHandler, func() int { return 30 }, func() int { return 2 })
 	messages := []map[string]any{{"role": "user", "content": "hello"}}
 
 	if _, err := svc.SubmitEdit(context.Background(), alice, "edit-1", "edit", "gpt-image-2", "1024x1024", "high", "https://base.test", []any{"image"}, 2, nil); err != nil {
@@ -519,11 +505,10 @@ func TestImageTaskServiceLimitsUserDefaultConcurrentCreationUnits(t *testing.T) 
 }
 
 func TestImageTaskServiceLimitsUserDefaultRPM(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 }, nil, func() int { return 1 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 }, nil, func() int { return 1 })
 	user := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
 	admin := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
 
@@ -550,7 +535,6 @@ func TestImageTaskServiceLimitsUserDefaultRPM(t *testing.T) {
 }
 
 func TestImageTaskServiceCancelsRunningTask(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	started := make(chan struct{})
 	handlerDone := make(chan error, 1)
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
@@ -559,7 +543,7 @@ func TestImageTaskServiceCancelsRunningTask(t *testing.T) {
 		handlerDone <- ctx.Err()
 		return nil, ctx.Err()
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
@@ -590,11 +574,10 @@ func TestImageTaskServiceCancelsRunningTask(t *testing.T) {
 }
 
 func TestImageTaskServicePreservesPartialDataOnFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		return map[string]any{"data": []map[string]any{{"url": "https://example.test/first.png"}}}, errors.New("second image failed")
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 2, nil); err != nil {
@@ -627,7 +610,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 	}
 
 	t.Run("partial success consumes actual outputs", func(t *testing.T) {
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
 				return map[string]any{"data": []map[string]any{
 					{"url": "https://example.test/first.png"},
@@ -657,7 +640,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 	})
 
 	t.Run("handler failure consumes zero", func(t *testing.T) {
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
 				return map[string]any{"data": []map[string]any{{"url": "https://example.test/first.png"}}}, errors.New("upstream failed")
 			},
@@ -681,7 +664,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 	t.Run("cancel consumes zero", func(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 				close(started)
 				select {
@@ -726,7 +709,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 	})
 
 	t.Run("image task returning text consumes zero", func(t *testing.T) {
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
 				return map[string]any{"message": "text response", "output_type": "text"}, nil
 			},
@@ -748,7 +731,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 	})
 
 	t.Run("subscription task consumes used quota", func(t *testing.T) {
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
 				return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
 			},
@@ -775,7 +758,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 	t.Run("precharge protects running task from delivery-time drain", func(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 				close(started)
 				select {
@@ -829,7 +812,7 @@ func TestImageTaskServiceBillingSuccessFailureCancelAndTextOutput(t *testing.T) 
 
 	t.Run("insufficient balance rejects before queueing", func(t *testing.T) {
 		handlerCalled := false
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
 				handlerCalled = true
 				return map[string]any{"data": []map[string]any{{"url": "https://example.test/unpaid.png"}}}, nil
@@ -871,7 +854,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 	}
 
 	t.Run("pure text chat does not require billing", func(t *testing.T) {
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			failingImageTaskHandler,
 			failingImageTaskHandler,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
@@ -892,7 +875,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 	})
 
 	t.Run("billable chat consumes actual image outputs", func(t *testing.T) {
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			failingImageTaskHandler,
 			failingImageTaskHandler,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
@@ -915,7 +898,7 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 
 	t.Run("billable chat insufficient balance rejects before queueing", func(t *testing.T) {
 		handlerCalled := false
-		svc := NewImageTaskService(filepath.Join(t.TempDir(), "image_tasks.json"),
+		svc := newTestImageTaskService(t,
 			failingImageTaskHandler,
 			failingImageTaskHandler,
 			func(context.Context, Identity, map[string]any) (map[string]any, error) {
@@ -942,12 +925,11 @@ func TestImageTaskServiceBillingChatEquivalenceClasses(t *testing.T) {
 }
 
 func TestImageTaskServiceMarksTimedOutTaskAsError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	svc.SetTaskTimeoutGetter(func() time.Duration { return 20 * time.Millisecond })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
@@ -963,11 +945,10 @@ func TestImageTaskServiceMarksTimedOutTaskAsError(t *testing.T) {
 }
 
 func TestImageTaskServicePreservesTextOutputType(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		return map[string]any{"message": "text response", "output_type": "text"}, nil
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "who are you", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
@@ -986,11 +967,10 @@ func TestImageTaskServicePreservesTextOutputType(t *testing.T) {
 }
 
 func TestImageTaskServiceStoresTextOutputFromHandlerError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
 	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
 		return map[string]any{"message": "text response", "output_type": "text"}, errors.New("text response")
 	}
-	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
 	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "who are you", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
@@ -1016,20 +996,20 @@ func TestImageTaskServiceStoresTextOutputFromHandlerError(t *testing.T) {
 }
 
 func TestImageTaskServiceRestoresUnfinishedTasksAsErrors(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	backend := newTestStorageBackend(t)
 	raw := map[string]any{"tasks": []map[string]any{
 		{"id": "queued", "owner_id": "alice", "status": TaskStatusQueued, "mode": "generate", "created_at": "2026-01-01 00:00:00", "updated_at": "2026-01-01 00:00:00"},
 		{"id": "running", "owner_id": "alice", "status": TaskStatusRunning, "mode": "edit", "created_at": "2026-01-01 00:00:00", "updated_at": "2026-01-01 00:00:00"},
 	}}
-	data, err := json.Marshal(raw)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
+	store, ok := backend.(storage.JSONDocumentBackend)
+	if !ok {
+		t.Fatalf("storage backend %T does not implement JSONDocumentBackend", backend)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
+	if err := store.SaveJSONDocument("image_tasks.json", raw); err != nil {
+		t.Fatalf("SaveJSONDocument() error = %v", err)
 	}
 
-	svc := NewImageTaskService(path, failingImageTaskHandler, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })
+	svc := NewStoredImageTaskService(backend, failingImageTaskHandler, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })
 	got := svc.ListTasks(Identity{ID: "alice"}, []string{"queued", "running"})
 	items := got["items"].([]map[string]any)
 	if len(items) != 2 {
@@ -1043,6 +1023,11 @@ func TestImageTaskServiceRestoresUnfinishedTasksAsErrors(t *testing.T) {
 			t.Fatalf("restored task missing error text: %#v", item)
 		}
 	}
+}
+
+func newTestImageTaskService(t *testing.T, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
+	t.Helper()
+	return NewStoredImageTaskService(newTestStorageBackend(t), generation, edit, chat, retentionGetter, limitGetters...)
 }
 
 func waitForStartedTask(t *testing.T, started <-chan string) string {

@@ -1,10 +1,9 @@
 package service
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -22,10 +21,17 @@ const (
 )
 
 type LogService struct {
-	mu    sync.Mutex
-	path  string
-	store storage.LogBackend
+	mu              sync.Mutex
+	store           storage.LogBackend
+	usageStatsCache map[string]cachedUserUsageStats
 }
+
+type cachedUserUsageStats struct {
+	expiresAt time.Time
+	stats     map[string]map[string]any
+}
+
+const userUsageStatsCacheTTL = 15 * time.Second
 
 type LogQuery struct {
 	Username      string
@@ -71,10 +77,12 @@ type userUsageAccumulator struct {
 	Daily     map[string]*userUsageDay
 }
 
-func NewLogService(dataDir string, backend ...storage.Backend) *LogService {
-	path := filepath.Join(dataDir, filepath.FromSlash(storage.LogEventsDocumentName))
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	return &LogService{path: path, store: firstLogStore(backend)}
+func NewLogService(backend ...storage.Backend) *LogService {
+	var store storage.LogBackend
+	if len(backend) > 0 {
+		store, _ = backend[0].(storage.LogBackend)
+	}
+	return &LogService{store: store}
 }
 
 func (s *LogService) Add(summary string, detail map[string]any) error {
@@ -92,19 +100,7 @@ func (s *LogService) Add(summary string, detail map[string]any) error {
 		defer s.mu.Unlock()
 		return s.store.AppendLog(item)
 	}
-	data, err := json.Marshal(item)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	file, err := os.OpenFile(s.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	_, err = file.Write(append(data, '\n'))
-	return err
+	return fmt.Errorf("log storage backend is required")
 }
 
 func (s *LogService) List(startDate, endDate string, limit int) []map[string]any {
@@ -186,49 +182,7 @@ func (s *LogService) deleteLogsBeforeLocked(day string) (int, error) {
 			return maintenance.DeleteLogsBefore(day)
 		}
 	}
-	return s.deleteFileLogsBeforeLocked(day)
-}
-
-func (s *LogService) deleteFileLogsBeforeLocked(day string) (int, error) {
-	day = strings.TrimSpace(day)
-	if day == "" {
-		return 0, nil
-	}
-	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
-	kept := make([]string, 0, len(lines))
-	removed := 0
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var item map[string]any
-		if json.Unmarshal([]byte(line), &item) == nil {
-			itemDay := logDay(item)
-			if itemDay != "" && itemDay < day {
-				removed++
-				continue
-			}
-		}
-		kept = append(kept, line)
-	}
-	if removed == 0 {
-		return 0, nil
-	}
-	next := []byte{}
-	if len(kept) > 0 {
-		next = []byte(strings.Join(kept, "\n") + "\n")
-	}
-	if err := os.WriteFile(s.path, next, 0o644); err != nil {
-		return 0, err
-	}
-	return removed, nil
+	return 0, fmt.Errorf("log maintenance backend is required")
 }
 
 func (s *LogService) loadLogItems(startDate, endDate string) ([]map[string]any, bool) {
@@ -238,28 +192,7 @@ func (s *LogService) loadLogItems(startDate, endDate string) ([]map[string]any, 
 			return items, true
 		}
 	}
-	file, err := os.Open(s.path)
-	if err != nil {
-		return nil, false
-	}
-	defer file.Close()
-	var lines []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	out := make([]map[string]any, 0, len(lines))
-	for i := len(lines) - 1; i >= 0; i-- {
-		var item map[string]any
-		if json.Unmarshal([]byte(lines[i]), &item) != nil {
-			continue
-		}
-		if !matchLogDate(item, startDate, endDate) {
-			continue
-		}
-		out = append(out, item)
-	}
-	return out, true
+	return nil, false
 }
 
 func normalizedLogLimit(limit int) int {
@@ -427,11 +360,41 @@ func containsFold(value, filter string) bool {
 }
 
 func (s *LogService) UserUsageStats(days int) map[string]map[string]any {
+	return cloneUserUsageStats(s.cachedUserUsageStats(days))
+}
+
+func (s *LogService) UserUsageStatsForUsers(days int, userIDs []string) map[string]map[string]any {
+	targets := userUsageTargetSet(userIDs)
+	if len(targets) == 0 {
+		return map[string]map[string]any{}
+	}
+	stats := s.cachedUserUsageStats(days)
+	out := make(map[string]map[string]any, min(len(targets), len(stats)))
+	for userID := range targets {
+		usage := stats[userID]
+		if usage == nil {
+			continue
+		}
+		out[userID] = cloneUserUsageMap(usage)
+	}
+	return out
+}
+
+func (s *LogService) cachedUserUsageStats(days int) map[string]map[string]any {
 	dates := usageDates(days)
 	out := map[string]map[string]any{}
 	if len(dates) == 0 {
 		return out
 	}
+	cacheKey := userUsageStatsCacheKey(dates)
+	now := time.Now()
+	s.mu.Lock()
+	if cached, ok := s.usageStatsCache[cacheKey]; ok && now.Before(cached.expiresAt) {
+		s.mu.Unlock()
+		return cached.stats
+	}
+	s.mu.Unlock()
+
 	startDate := dates[0]
 	endDate := dates[len(dates)-1]
 	byUser := map[string]*userUsageAccumulator{}
@@ -444,24 +407,73 @@ func (s *LogService) UserUsageStats(days int) map[string]map[string]any {
 			for userID, acc := range byUser {
 				out[userID] = userUsageStatsMap(acc, dates)
 			}
+			s.cacheUserUsageStats(cacheKey, out, now)
 			return out
 		}
 	}
-	file, err := os.Open(s.path)
-	if err != nil {
-		return out
+	return out
+}
+
+func (s *LogService) cacheUserUsageStats(key string, stats map[string]map[string]any, now time.Time) {
+	if key == "" {
+		return
 	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		var item map[string]any
-		if json.Unmarshal([]byte(scanner.Text()), &item) != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.usageStatsCache == nil {
+		s.usageStatsCache = map[string]cachedUserUsageStats{}
+	}
+	s.usageStatsCache[key] = cachedUserUsageStats{
+		expiresAt: now.Add(userUsageStatsCacheTTL),
+		stats:     stats,
+	}
+}
+
+func userUsageStatsCacheKey(dates []string) string {
+	if len(dates) == 0 {
+		return ""
+	}
+	return dates[0] + "\x00" + dates[len(dates)-1]
+}
+
+func userUsageTargetSet(userIDs []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, userID := range userIDs {
+		userID = util.Clean(userID)
+		if userID == "" {
 			continue
 		}
-		accumulateUserUsageLog(byUser, item, startDate, endDate)
+		out[userID] = struct{}{}
 	}
-	for userID, acc := range byUser {
-		out[userID] = userUsageStatsMap(acc, dates)
+	return out
+}
+
+func cloneUserUsageStats(stats map[string]map[string]any) map[string]map[string]any {
+	out := make(map[string]map[string]any, len(stats))
+	for userID, usage := range stats {
+		out[userID] = cloneUserUsageMap(usage)
+	}
+	return out
+}
+
+func cloneUserUsageMap(usage map[string]any) map[string]any {
+	out := make(map[string]any, len(usage))
+	for key, value := range usage {
+		if key == "usage_curve" {
+			if curve, ok := value.([]map[string]any); ok {
+				nextCurve := make([]map[string]any, 0, len(curve))
+				for _, point := range curve {
+					nextPoint := make(map[string]any, len(point))
+					for pointKey, pointValue := range point {
+						nextPoint[pointKey] = pointValue
+					}
+					nextCurve = append(nextCurve, nextPoint)
+				}
+				out[key] = nextCurve
+				continue
+			}
+		}
+		out[key] = value
 	}
 	return out
 }

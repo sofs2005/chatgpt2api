@@ -1298,30 +1298,7 @@ func listManagedAuthUsersLocked(items []map[string]any, roles []ManagedRole, acc
 		}
 		user := byID[id]
 		if user == nil {
-			user = map[string]any{
-				"id":               id,
-				"name":             managedAuthUserName(item),
-				"role":             AuthRoleUser,
-				"role_id":          DefaultManagedRoleID,
-				"role_name":        managedRoleName(roles, DefaultManagedRoleID),
-				"provider":         util.Clean(item["provider"]),
-				"owner_id":         util.Clean(item["owner_id"]),
-				"owner_name":       util.Clean(item["owner_name"]),
-				"linuxdo_level":    util.Clean(item["linuxdo_level"]),
-				"enabled":          false,
-				"has_api_key":      false,
-				"has_session":      false,
-				"api_key_id":       "",
-				"api_key_name":     "",
-				"session_id":       "",
-				"session_name":     "",
-				"credential_count": 0,
-				"created_at":       nil,
-				"last_used_at":     nil,
-				"updated_at":       nil,
-				"menu_paths":       []string{},
-				"api_permissions":  []string{},
-			}
+			user = managedAuthUserForItem(item, roles)
 			byID[id] = user
 		}
 		mergeManagedAuthUser(user, item)
@@ -1344,6 +1321,34 @@ func listManagedAuthUsersLocked(items []map[string]any, roles []ManagedRole, acc
 		return util.Clean(out[i]["name"]) < util.Clean(out[j]["name"])
 	})
 	return out
+}
+
+func managedAuthUserForItem(item map[string]any, roles []ManagedRole) map[string]any {
+	id := managedAuthUserID(item)
+	return map[string]any{
+		"id":               id,
+		"name":             managedAuthUserName(item),
+		"role":             AuthRoleUser,
+		"role_id":          DefaultManagedRoleID,
+		"role_name":        managedRoleName(roles, DefaultManagedRoleID),
+		"provider":         util.Clean(item["provider"]),
+		"owner_id":         util.Clean(item["owner_id"]),
+		"owner_name":       util.Clean(item["owner_name"]),
+		"linuxdo_level":    util.Clean(item["linuxdo_level"]),
+		"enabled":          false,
+		"has_api_key":      false,
+		"has_session":      false,
+		"api_key_id":       "",
+		"api_key_name":     "",
+		"session_id":       "",
+		"session_name":     "",
+		"credential_count": 0,
+		"created_at":       nil,
+		"last_used_at":     nil,
+		"updated_at":       nil,
+		"menu_paths":       []string{},
+		"api_permissions":  []string{},
+	}
 }
 
 func managedAuthUserForAccount(account PasswordAccount, roles []ManagedRole) map[string]any {
@@ -1381,12 +1386,24 @@ func managedAuthUserForAccount(account PasswordAccount, roles []ManagedRole) map
 }
 
 func managedAuthUserByIDLocked(items []map[string]any, roles []ManagedRole, accounts []PasswordAccount, id string) map[string]any {
-	for _, user := range listManagedAuthUsersLocked(items, roles, accounts) {
-		if user["id"] == id {
-			return user
-		}
+	id = util.Clean(id)
+	if id == "" {
+		return nil
 	}
-	return nil
+	var user map[string]any
+	if account, ok := passwordAccountByIDLocked(accounts, id); ok && account.Role == AuthRoleUser && account.ID != "" {
+		user = managedAuthUserForAccount(account, roles)
+	}
+	for _, item := range items {
+		if managedAuthUserID(item) != id {
+			continue
+		}
+		if user == nil {
+			user = managedAuthUserForItem(item, roles)
+		}
+		mergeManagedAuthUser(user, item)
+	}
+	return user
 }
 
 func managedAuthOwnerLocked(items []map[string]any, accounts []PasswordAccount, id string) (AuthOwner, bool) {

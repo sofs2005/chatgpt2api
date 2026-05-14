@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"chatgpt2api/internal/backend"
 	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
+	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
 	"chatgpt2api/internal/version"
 )
@@ -3006,24 +3008,54 @@ func TestAdminUsersListPaginationAndFilters(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 
-	if _, err := app.auth.CreatePasswordUser("enabled_one", "Password123", "Enabled One", service.DefaultManagedRoleID, true); err != nil {
+	enabledOne, err := app.auth.CreatePasswordUser("enabled_one", "Password123", "Enabled One", service.DefaultManagedRoleID, true)
+	if err != nil {
 		t.Fatalf("CreatePasswordUser(enabled_one) error = %v", err)
 	}
-	if _, err := app.auth.CreatePasswordUser("disabled_one", "Password123", "Disabled One", service.DefaultManagedRoleID, false); err != nil {
+	disabledOne, err := app.auth.CreatePasswordUser("disabled_one", "Password123", "Disabled One", service.DefaultManagedRoleID, false)
+	if err != nil {
 		t.Fatalf("CreatePasswordUser(disabled_one) error = %v", err)
 	}
-	if _, err := app.auth.CreatePasswordUser("enabled_two", "Password123", "Enabled Two", service.DefaultManagedRoleID, true); err != nil {
+	enabledTwo, err := app.auth.CreatePasswordUser("enabled_two", "Password123", "Enabled Two", service.DefaultManagedRoleID, true)
+	if err != nil {
 		t.Fatalf("CreatePasswordUser(enabled_two) error = %v", err)
 	}
+	expectedDefaultIDs := []string{
+		enabledOne["id"].(string),
+		disabledOne["id"].(string),
+		enabledTwo["id"].(string),
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(expectedDefaultIDs)))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/users?page=2&page_size=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/users?page=1&page_size=3", nil)
 	req.Header.Set("Authorization", adminAuthHeader(t, app))
 	res := httptest.NewRecorder()
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
-		t.Fatalf("paged users status = %d body = %s", res.Code, res.Body.String())
+		t.Fatalf("default sorted users status = %d body = %s", res.Code, res.Body.String())
 	}
 	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("default sorted users json: %v", err)
+	}
+	items := logItems(payload)
+	if len(items) != len(expectedDefaultIDs) || payload["sort_by"] != "id" || payload["sort_order"] != "desc" {
+		t.Fatalf("default sorted metadata/items = %#v", payload)
+	}
+	for index, item := range items {
+		if item["id"] != expectedDefaultIDs[index] {
+			t.Fatalf("default sorted ids = %#v, want %#v", items, expectedDefaultIDs)
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=2&page_size=2", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("paged users status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("paged users json: %v", err)
 	}
@@ -3032,6 +3064,27 @@ func TestAdminUsersListPaginationAndFilters(t *testing.T) {
 	}
 	if items := logItems(payload); len(items) != 1 {
 		t.Fatalf("paged items length = %d payload = %#v", len(items), payload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=1&page_size=3&sort_by=username&sort_order=asc", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("username sorted users status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("username sorted users json: %v", err)
+	}
+	items = logItems(payload)
+	if payload["sort_by"] != "username" || payload["sort_order"] != "asc" || len(items) != 3 {
+		t.Fatalf("username sorted payload = %#v", payload)
+	}
+	for index, username := range []string{"disabled_one", "enabled_one", "enabled_two"} {
+		if items[index]["username"] != username {
+			t.Fatalf("username sorted items = %#v", items)
+		}
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=99&page_size=2", nil)
@@ -3060,7 +3113,7 @@ func TestAdminUsersListPaginationAndFilters(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("filtered users json: %v", err)
 	}
-	items := logItems(payload)
+	items = logItems(payload)
 	if payload["total"] != float64(1) || len(items) != 1 || items[0]["username"] != "disabled_one" {
 		t.Fatalf("filtered users payload = %#v", payload)
 	}
@@ -3571,14 +3624,21 @@ func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 
-	logDir := filepath.Join(app.config.DataDir, "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("mkdir logs: %v", err)
+	backend, err := app.config.StorageBackend()
+	if err != nil {
+		t.Fatalf("StorageBackend() error = %v", err)
 	}
-	logData := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧日志","detail":{"status":"success"}}` + "\n" +
-		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
-	if err := os.WriteFile(filepath.Join(logDir, "events.jsonl"), logData, 0o644); err != nil {
-		t.Fatalf("write log data: %v", err)
+	logStore, ok := backend.(storage.LogBackend)
+	if !ok {
+		t.Fatalf("storage backend %T does not implement LogBackend", backend)
+	}
+	for _, item := range []map[string]any{
+		{"time": "2000-01-01 00:00:00", "type": "event", "summary": "旧日志", "detail": map[string]any{"status": "success"}},
+		{"time": time.Now().Format("2006-01-02 15:04:05"), "type": "event", "summary": "新日志", "detail": map[string]any{"status": 200}},
+	} {
+		if err := logStore.AppendLog(item); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/logs/governance", nil)
@@ -3802,7 +3862,7 @@ func newTestAppWithBillingDefaults(t *testing.T, billingType, standardBalance, s
 	t.Setenv("CHATGPT2API_DEFAULT_SUBSCRIPTION_QUOTA", subscriptionQuota)
 	t.Setenv("CHATGPT2API_DEFAULT_SUBSCRIPTION_PERIOD", subscriptionPeriod)
 	unsetTestEnv(t, "CHATGPT2API_REGISTRATION_ENABLED")
-	t.Setenv("STORAGE_BACKEND", "json")
+	t.Setenv("STORAGE_BACKEND", "sqlite")
 	t.Setenv("DATABASE_URL", "")
 	app, err := NewApp()
 	if err != nil {

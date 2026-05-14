@@ -3,13 +3,10 @@ package service
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
 )
 
@@ -38,18 +35,17 @@ func (d testBillingDefaults) DefaultSubscriptionPeriod() string {
 
 func newTestBillingService(t *testing.T, defaults testBillingDefaults) *BillingService {
 	t.Helper()
-	dir := t.TempDir()
-	backend := storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json"))
-	svc := NewBillingService(dir, backend, defaults)
+	backend := newTestStorageBackend(t)
+	svc := NewBillingService(backend, defaults)
 	svc.InitializeUserDefaults("alice")
 	svc.InitializeUserDefaults("bob")
 	return svc
 }
 
-func newTestBillingServiceAt(t *testing.T, dir string, defaults testBillingDefaults) *BillingService {
+func newTestBillingServiceAt(t *testing.T, defaults testBillingDefaults) *BillingService {
 	t.Helper()
-	backend := storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json"))
-	return NewBillingService(dir, backend, defaults)
+	backend := newTestStorageBackend(t)
+	return NewBillingService(backend, defaults)
 }
 
 func billingTestUser(id string) Identity {
@@ -156,9 +152,8 @@ func TestBillingServiceApplyBulkAdjustmentReportsPerUserFailures(t *testing.T) {
 }
 
 func TestBillingServiceMissingStateDoesNotUseCurrentDefaults(t *testing.T) {
-	dir := t.TempDir()
-	backend := storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json"))
-	svc := NewBillingService(dir, backend, testBillingDefaults{
+	backend := newTestStorageBackend(t)
+	svc := NewBillingService(backend, testBillingDefaults{
 		billingType:        BillingTypeSubscription,
 		standardBalance:    7,
 		subscriptionQuota:  12,
@@ -567,26 +562,16 @@ func TestBillingServiceSubscriptionPeriodBounds(t *testing.T) {
 }
 
 func TestBillingServicePersistsCurrentMapShapeOnly(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, billingDocumentName)
-	if err := os.WriteFile(path, []byte(`{
-		"states": [
-			{
-				"user_id": "legacy-array",
-				"billing_type": "standard",
-				"unit": "image",
-				"unlimited": false,
-				"standard": {"balance": 9, "balance_reserved": 0, "lifetime_consumed": 0},
-				"subscription": {"quota_limit": 0, "quota_used": 0, "quota_reserved": 0, "manual_delta": 0, "quota_period": "monthly", "quota_period_started_at": "2026-05-01T00:00:00Z", "quota_period_ends_at": "2026-06-01T00:00:00Z"}
-			}
-		]
-	}`), 0o644); err != nil {
-		t.Fatalf("write billing document: %v", err)
+	svc := newTestBillingServiceAt(t, testBillingDefaults{})
+	svc.InitializeUserDefaults("alice")
+	if _, err := svc.ApplyAdjustment("alice", billingTestUser("admin"), map[string]any{"type": "increase_balance", "amount": 3}); err != nil {
+		t.Fatalf("ApplyAdjustment() error = %v", err)
 	}
-	svc := newTestBillingServiceAt(t, dir, testBillingDefaults{})
-	got := svc.Get("legacy-array")
-	if got["type"] != BillingTypeStandard || util.ToInt(got["available"], -1) != 0 {
-		t.Fatalf("array-shaped states should not be loaded: %#v", got)
+
+	raw := loadStoredJSON(svc.store, billingDocumentName)
+	doc, _ := raw.(map[string]any)
+	if _, ok := doc["states"].(map[string]any); !ok {
+		t.Fatalf("states should persist as map shape: %#v", doc["states"])
 	}
 }
 

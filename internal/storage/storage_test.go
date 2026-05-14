@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -128,35 +129,6 @@ func TestDatabaseBackendDeletesLogsBeforeDay(t *testing.T) {
 	}
 }
 
-func TestJSONBackendDeletesLogsBeforeDay(t *testing.T) {
-	dir := t.TempDir()
-	backend := NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json"))
-	for _, item := range []map[string]any{
-		{"time": "2026-04-28 10:00:00", "type": "event", "summary": "old"},
-		{"time": "2026-04-29 10:00:00", "type": "event", "summary": "cutoff"},
-		{"time": "2026-04-30 10:00:00", "type": "event", "summary": "new"},
-	} {
-		if err := backend.AppendLog(item); err != nil {
-			t.Fatalf("AppendLog() error = %v", err)
-		}
-	}
-
-	deleted, err := backend.DeleteLogsBefore("2026-04-29")
-	if err != nil {
-		t.Fatalf("DeleteLogsBefore() error = %v", err)
-	}
-	if deleted != 1 {
-		t.Fatalf("DeleteLogsBefore() deleted = %d, want 1", deleted)
-	}
-	logs, err := backend.QueryLogs("", "", 0)
-	if err != nil {
-		t.Fatalf("QueryLogs() error = %v", err)
-	}
-	if len(logs) != 2 {
-		t.Fatalf("remaining logs = %#v, want 2", logs)
-	}
-}
-
 func TestNewBackendFromEnvDefaultsToSQLiteProjectDatabase(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("STORAGE_BACKEND", "")
@@ -177,6 +149,19 @@ func TestNewBackendFromEnvDefaultsToSQLiteProjectDatabase(t *testing.T) {
 	want := filepath.ToSlash(filepath.Join(dir, "chatgpt2api.db"))
 	if database.dsn != want {
 		t.Fatalf("dsn = %q, want %q", database.dsn, want)
+	}
+}
+
+func TestNewBackendFromEnvRejectsJSONBackend(t *testing.T) {
+	t.Setenv("STORAGE_BACKEND", "json")
+	t.Setenv("DATABASE_URL", "")
+
+	_, err := NewBackendFromEnv(t.TempDir())
+	if err == nil {
+		t.Fatal("NewBackendFromEnv() succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unknown storage backend: json") {
+		t.Fatalf("NewBackendFromEnv() error = %v", err)
 	}
 }
 

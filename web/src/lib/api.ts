@@ -630,6 +630,9 @@ export type ManagedUsersQuery = {
   search?: string;
   provider?: "all" | "local" | "linuxdo" | string;
   status?: "all" | "enabled" | "disabled" | string;
+  sort_by?: string;
+  sort_order?: "asc" | "desc" | string;
+  signal?: AbortSignal;
 };
 
 export type ManagedUsersResponse = {
@@ -1290,8 +1293,11 @@ export async function fetchManagedUsers(query: ManagedUsersQuery = {}) {
   if (query.search?.trim()) params.set("search", query.search.trim());
   if (query.provider && query.provider !== "all") params.set("provider", query.provider);
   if (query.status && query.status !== "all") params.set("status", query.status);
+  if (query.sort_by) params.set("sort_by", query.sort_by);
+  if (query.sort_order) params.set("sort_order", query.sort_order);
   const data = await httpRequest<Partial<ManagedUsersResponse>>(
     `/api/admin/users${params.toString() ? `?${params.toString()}` : ""}`,
+    { signal: query.signal },
   );
   return {
     items: Array.isArray(data.items) ? data.items : [],

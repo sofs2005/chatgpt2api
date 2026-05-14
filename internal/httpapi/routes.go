@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -637,6 +638,8 @@ type managedUsersQuery struct {
 	Search     string
 	Provider   string
 	Status     string
+	SortBy     string
+	SortOrder  string
 	Total      int
 	TotalPages int
 }
@@ -647,6 +650,8 @@ func (a *App) managedUsersResponse(r *http.Request) (map[string]any, error) {
 		return nil, err
 	}
 	items := filterManagedUsers(a.auth.ListUsers(), query)
+	a.prepareManagedUsersSortValues(items, query.SortBy)
+	sortManagedUsers(items, query)
 	query.Total = len(items)
 	query.TotalPages = managedUsersTotalPages(query.Total, query.PageSize)
 	if query.Page > query.TotalPages {
@@ -667,6 +672,8 @@ func (a *App) managedUsersResponse(r *http.Request) (map[string]any, error) {
 		"total":       query.Total,
 		"page":        query.Page,
 		"page_size":   query.PageSize,
+		"sort_by":     query.SortBy,
+		"sort_order":  query.SortOrder,
 		"total_pages": query.TotalPages,
 	}, nil
 }
@@ -681,14 +688,26 @@ func (a *App) managedUser(id string) map[string]any {
 }
 
 func (a *App) attachManagedUserUsage(items []map[string]any) {
-	stats := a.logs.UserUsageStats(14)
+	userIDs := managedUserIDs(items)
+	if len(userIDs) == 0 {
+		return
+	}
+	a.attachManagedUserUsageStats(items, userIDs)
+	a.attachManagedUserBillingStates(items, userIDs)
+}
+
+func managedUserIDs(items []map[string]any) []string {
 	userIDs := make([]string, 0, len(items))
 	for _, item := range items {
 		if userID := util.Clean(item["id"]); userID != "" {
 			userIDs = append(userIDs, userID)
 		}
 	}
-	billingStates := a.billing.GetMany(userIDs)
+	return userIDs
+}
+
+func (a *App) attachManagedUserUsageStats(items []map[string]any, userIDs []string) {
+	stats := a.logs.UserUsageStatsForUsers(14, userIDs)
 	for _, item := range items {
 		userID := util.Clean(item["id"])
 		usage := stats[userID]
@@ -698,7 +717,26 @@ func (a *App) attachManagedUserUsage(items []map[string]any) {
 		for key, value := range usage {
 			item[key] = value
 		}
+	}
+}
+
+func (a *App) attachManagedUserBillingStates(items []map[string]any, userIDs []string) {
+	billingStates := a.billing.GetMany(userIDs)
+	for _, item := range items {
+		userID := util.Clean(item["id"])
 		item["billing"] = billingStates[userID]
+	}
+}
+
+func (a *App) prepareManagedUsersSortValues(items []map[string]any, sortBy string) {
+	if len(items) == 0 {
+		return
+	}
+	switch sortBy {
+	case "call_count", "quota_used", "failure_count":
+		a.attachManagedUserUsageStats(items, managedUserIDs(items))
+	case "billing_available":
+		a.attachManagedUserBillingStates(items, managedUserIDs(items))
 	}
 }
 
@@ -819,12 +857,22 @@ func parseManagedUsersQuery(r *http.Request) (managedUsersQuery, error) {
 	if err != nil {
 		return managedUsersQuery{}, err
 	}
+	sortBy, err := parseManagedUsersSortBy(values.Get("sort_by"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
+	sortOrder, err := parseManagedUsersSortOrder(values.Get("sort_order"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
 	return managedUsersQuery{
-		Page:     page,
-		PageSize: pageSize,
-		Search:   strings.TrimSpace(values.Get("search")),
-		Provider: strings.TrimSpace(values.Get("provider")),
-		Status:   strings.TrimSpace(values.Get("status")),
+		Page:      page,
+		PageSize:  pageSize,
+		Search:    strings.TrimSpace(values.Get("search")),
+		Provider:  strings.TrimSpace(values.Get("provider")),
+		Status:    strings.TrimSpace(values.Get("status")),
+		SortBy:    sortBy,
+		SortOrder: sortOrder,
 	}, nil
 }
 
@@ -872,6 +920,32 @@ func managedUsersTotalPages(total, pageSize int) int {
 	return (total + pageSize - 1) / pageSize
 }
 
+func parseManagedUsersSortBy(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "id", nil
+	}
+	switch value {
+	case "id", "name", "username", "provider", "enabled", "role_id", "role_name", "billing_available", "call_count", "quota_used", "failure_count", "created_at", "last_used_at", "updated_at":
+		return value, nil
+	default:
+		return "", fmt.Errorf("sort_by 参数无效")
+	}
+}
+
+func parseManagedUsersSortOrder(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "desc", nil
+	}
+	switch value {
+	case "asc", "desc":
+		return value, nil
+	default:
+		return "", fmt.Errorf("sort_order 参数无效")
+	}
+}
+
 func filterManagedUsers(items []map[string]any, query managedUsersQuery) []map[string]any {
 	out := make([]map[string]any, 0, len(items))
 	search := strings.ToLower(strings.TrimSpace(query.Search))
@@ -893,6 +967,79 @@ func filterManagedUsers(items []map[string]any, query managedUsersQuery) []map[s
 		out = append(out, item)
 	}
 	return out
+}
+
+func sortManagedUsers(items []map[string]any, query managedUsersQuery) {
+	desc := query.SortOrder == "desc"
+	sort.SliceStable(items, func(i, j int) bool {
+		cmp := compareManagedUsers(items[i], items[j], query.SortBy)
+		if cmp == 0 {
+			cmp = strings.Compare(util.Clean(items[i]["id"]), util.Clean(items[j]["id"]))
+		}
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func compareManagedUsers(left, right map[string]any, sortBy string) int {
+	switch sortBy {
+	case "enabled":
+		return compareManagedUserInts(managedUserSortBool(left, sortBy), managedUserSortBool(right, sortBy))
+	case "billing_available", "call_count", "quota_used", "failure_count":
+		return compareManagedUserInts(managedUserSortInt(left, sortBy), managedUserSortInt(right, sortBy))
+	default:
+		return strings.Compare(strings.ToLower(managedUserSortString(left, sortBy)), strings.ToLower(managedUserSortString(right, sortBy)))
+	}
+}
+
+func managedUserSortString(item map[string]any, sortBy string) string {
+	switch sortBy {
+	case "name":
+		return util.Clean(item["name"])
+	case "username":
+		return util.Clean(item["username"])
+	case "provider":
+		return util.Clean(item["provider"])
+	case "role_id":
+		return util.Clean(item["role_id"])
+	case "role_name":
+		return util.Clean(item["role_name"])
+	case "created_at":
+		return util.Clean(item["created_at"])
+	case "last_used_at":
+		return util.Clean(item["last_used_at"])
+	case "updated_at":
+		return util.Clean(item["updated_at"])
+	default:
+		return util.Clean(item["id"])
+	}
+}
+
+func managedUserSortBool(item map[string]any, sortBy string) int {
+	if sortBy == "enabled" && util.ToBool(item["enabled"]) {
+		return 1
+	}
+	return 0
+}
+
+func managedUserSortInt(item map[string]any, sortBy string) int {
+	if sortBy == "billing_available" {
+		return util.ToInt(util.StringMap(item["billing"])["available"], 0)
+	}
+	return util.ToInt(item[sortBy], 0)
+}
+
+func compareManagedUserInts(left, right int) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func managedUserSearchText(item map[string]any) string {

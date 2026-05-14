@@ -3,8 +3,6 @@ package service
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -103,7 +101,6 @@ func NewBillingLimitError(billingType string) BillingLimitError {
 
 type BillingService struct {
 	mu       sync.Mutex
-	path     string
 	store    storage.JSONDocumentBackend
 	defaults BillingDefaults
 
@@ -112,11 +109,8 @@ type BillingService struct {
 	transactions []map[string]any
 }
 
-func NewBillingService(dataDir string, backend storage.Backend, defaults BillingDefaults) *BillingService {
-	path := filepath.Join(dataDir, billingDocumentName)
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+func NewBillingService(backend storage.Backend, defaults BillingDefaults) *BillingService {
 	s := &BillingService{
-		path:     path,
 		store:    jsonDocumentStoreFromBackend(backend),
 		defaults: defaults,
 		states:   map[string]map[string]any{},
@@ -667,7 +661,7 @@ func (s *BillingService) resetSubscriptionIfDueLocked(state map[string]any, now 
 }
 
 func (s *BillingService) loadLocked() {
-	raw := loadStoredJSON(s.store, billingDocumentName, s.path)
+	raw := loadStoredJSON(s.store, billingDocumentName)
 	doc, _ := raw.(map[string]any)
 	s.states = map[string]map[string]any{}
 	if states, ok := doc["states"].(map[string]any); ok {
@@ -704,7 +698,7 @@ func (s *BillingService) saveLocked() error {
 		"transactions": s.transactions,
 		"updated_at":   util.NowISO(),
 	}
-	return saveStoredJSON(s.store, billingDocumentName, s.path, doc)
+	return saveStoredJSON(s.store, billingDocumentName, doc)
 }
 
 func (s *BillingService) addTransactionLocked(item map[string]any) {

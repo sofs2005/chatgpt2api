@@ -2,10 +2,7 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -48,7 +45,6 @@ type ImageToolOptions struct {
 
 type ImageTaskService struct {
 	mu                  sync.RWMutex
-	path                string
 	store               storage.JSONDocumentBackend
 	docName             string
 	generation          ImageTaskHandler
@@ -74,16 +70,12 @@ func (e ImageTaskLimitError) Error() string {
 	return e.Message
 }
 
-func NewImageTaskService(path string, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
-	return newImageTaskService(path, nil, generation, edit, chat, retentionGetter, limitGetters...)
+func NewStoredImageTaskService(backend storage.Backend, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
+	return newImageTaskService(jsonDocumentStoreFromBackend(backend), generation, edit, chat, retentionGetter, limitGetters...)
 }
 
-func NewStoredImageTaskService(path string, backend storage.Backend, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
-	return newImageTaskService(path, jsonDocumentStoreFromBackend(backend), generation, edit, chat, retentionGetter, limitGetters...)
-}
-
-func newImageTaskService(path string, store storage.JSONDocumentBackend, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
-	s := &ImageTaskService{path: path, store: store, docName: "image_tasks.json", generation: generation, edit: edit, chat: chat, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}, ownerSubmitTimes: map[string][]time.Time{}, ownerRunningUnits: map[string]int{}}
+func newImageTaskService(store storage.JSONDocumentBackend, generation ImageTaskHandler, edit ImageTaskHandler, chat ImageTaskHandler, retentionGetter func() int, limitGetters ...func() int) *ImageTaskService {
+	s := &ImageTaskService{store: store, docName: "image_tasks.json", generation: generation, edit: edit, chat: chat, retentionGetter: retentionGetter, tasks: map[string]map[string]any{}, cancels: map[string]context.CancelFunc{}, ownerSubmitTimes: map[string][]time.Time{}, ownerRunningUnits: map[string]int{}}
 	s.creationUnitCond = sync.NewCond(&s.mu)
 	if len(limitGetters) > 0 {
 		s.userConcurrentLimit = limitGetters[0]
@@ -91,7 +83,6 @@ func newImageTaskService(path string, store storage.JSONDocumentBackend, generat
 	if len(limitGetters) > 1 {
 		s.userRPMLimit = limitGetters[1]
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 	s.mu.Lock()
 	s.tasks = s.loadLocked()
 	changed := s.recoverUnfinishedLocked()
@@ -801,7 +792,7 @@ func (s *ImageTaskService) removeTaskCancel(key string) {
 }
 
 func (s *ImageTaskService) loadLocked() map[string]map[string]any {
-	raw := loadStoredJSON(s.store, s.docName, s.path)
+	raw := loadStoredJSON(s.store, s.docName)
 	if obj, ok := raw.(map[string]any); ok {
 		raw = obj["tasks"]
 	}
@@ -874,15 +865,7 @@ func (s *ImageTaskService) saveLocked() error {
 	if s.store != nil {
 		return s.store.SaveJSONDocument(s.docName, value)
 	}
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return fmt.Errorf("storage document backend is required")
 }
 
 func (s *ImageTaskService) recoverUnfinishedLocked() bool {

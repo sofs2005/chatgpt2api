@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Ban,
   CheckCircle2,
   ChevronLeft,
@@ -152,6 +155,18 @@ function normalizeBillingAdjustmentType(type: BillingType, value: string): Billi
 const accountUsernamePattern = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
 const userPageSizeOptions = ["10", "20", "50", "100"];
 const billingAdjustmentHistoryLimit = 8;
+type UserSortField = "id" | "name" | "role_name" | "billing_available" | "call_count" | "last_used_at";
+type UserSortOrder = "asc" | "desc";
+
+function defaultUserSortOrder(field: UserSortField): UserSortOrder {
+  switch (field) {
+    case "name":
+    case "role_name":
+      return "asc";
+    default:
+      return "desc";
+  }
+}
 
 function createEmptyUserForm(roleId = ""): CreateUserForm {
   return {
@@ -456,11 +471,16 @@ function isBulkAdjustmentNoAmount(type: BillingAdjustmentType) {
 
 function UsersContent() {
   const rolesLoadedRef = useRef(false);
+  const loadUsersAbortRef = useRef<AbortController | null>(null);
+  const loadUsersRequestRef = useRef(0);
   const [items, setItems] = useState<ManagedUser[]>([]);
   const [roles, setRoles] = useState<ManagedRole[]>([]);
+  const [searchInput, setSearchInput] = useState("");
   const [searchText, setSearchText] = useState("");
   const [providerFilter, setProviderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<UserSortField>("id");
+  const [sortOrder, setSortOrder] = useState<UserSortOrder>("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("20");
   const [total, setTotal] = useState(0);
@@ -490,6 +510,11 @@ function UsersContent() {
   const loadUsers = useCallback(async (overrides: { page?: number; includeRoles?: boolean } = {}) => {
     const requestedPage = overrides.page ?? page;
     const includeRoles = overrides.includeRoles ?? !rolesLoadedRef.current;
+    const requestID = loadUsersRequestRef.current + 1;
+    loadUsersRequestRef.current = requestID;
+    loadUsersAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadUsersAbortRef.current = controller;
     setIsLoading(true);
     try {
       const usersPromise = fetchManagedUsers({
@@ -498,11 +523,17 @@ function UsersContent() {
         search: searchText,
         provider: providerFilter,
         status: statusFilter,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+        signal: controller.signal,
       });
       const [usersData, rolesData] = await Promise.all([
         usersPromise,
         includeRoles ? fetchManagedRoles() : Promise.resolve(null),
       ]);
+      if (requestID !== loadUsersRequestRef.current) {
+        return;
+      }
       setItems(normalizeManagedUsers(usersData.items));
       setTotal(Number.isFinite(usersData.total) ? usersData.total : 0);
       setTotalPages(Math.max(1, Number.isFinite(usersData.total_pages) ? usersData.total_pages : 1));
@@ -523,15 +554,35 @@ function UsersContent() {
         }));
       }
     } catch (error) {
+      if (controller.signal.aborted || requestID !== loadUsersRequestRef.current) {
+        return;
+      }
       toast.error(error instanceof Error ? error.message : "加载用户失败");
     } finally {
-      setIsLoading(false);
+      if (requestID === loadUsersRequestRef.current) {
+        setIsLoading(false);
+        if (loadUsersAbortRef.current === controller) {
+          loadUsersAbortRef.current = null;
+        }
+      }
     }
-  }, [page, pageSize, providerFilter, searchText, statusFilter]);
+  }, [page, pageSize, providerFilter, searchText, sortBy, sortOrder, statusFilter]);
 
   useEffect(() => {
     void loadUsers();
+    return () => {
+      loadUsersRequestRef.current += 1;
+      loadUsersAbortRef.current?.abort();
+    };
   }, [loadUsers]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setSearchText(searchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [searchInput]);
 
   useEffect(() => {
     const visibleIds = new Set(items.map((item) => item.id));
@@ -544,7 +595,7 @@ function UsersContent() {
   const safePage = Math.min(page, totalPages);
   const startIndex = total === 0 ? 0 : (safePage - 1) * Number(pageSize) + 1;
   const endIndex = Math.min(safePage * Number(pageSize), total);
-  const hasActiveFilters = searchText.trim() !== "" || providerFilter !== "all" || statusFilter !== "all";
+  const hasActiveFilters = searchInput.trim() !== "" || providerFilter !== "all" || statusFilter !== "all";
   const pageUserIds = useMemo(() => items.map((item) => item.id), [items]);
   const selectedUsers = useMemo(() => items.filter((item) => selectedUserIds.has(item.id)), [items, selectedUserIds]);
   const selectedCount = selectedUserIds.size;
@@ -601,6 +652,51 @@ function UsersContent() {
       return next;
     });
   };
+
+  const handleSort = (field: UserSortField) => {
+    setPage(1);
+    if (sortBy === field) {
+      setSortOrder((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortBy(field);
+    setSortOrder(defaultUserSortOrder(field));
+  };
+
+  const sortIcon = (field: UserSortField) => {
+    if (sortBy !== field) {
+      return <ArrowUpDown className="size-3.5 opacity-45" aria-hidden="true" />;
+    }
+    return sortOrder === "asc" ? (
+      <ArrowUp className="size-3.5" aria-hidden="true" />
+    ) : (
+      <ArrowDown className="size-3.5" aria-hidden="true" />
+    );
+  };
+
+  const nextSortOrder = (field: UserSortField): UserSortOrder => {
+    if (sortBy === field) {
+      return sortOrder === "asc" ? "desc" : "asc";
+    }
+    return defaultUserSortOrder(field);
+  };
+
+  const sortableHead = (field: UserSortField, label: string, className: string) => (
+    <TableHead
+      className={className}
+      aria-sort={sortBy === field ? (sortOrder === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        className="-ml-1 inline-flex h-8 items-center gap-1 rounded-md px-1 text-left font-semibold transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={() => handleSort(field)}
+        aria-label={`按${label}${nextSortOrder(field) === "asc" ? "升序" : "降序"}排序`}
+      >
+        <span>{label}</span>
+        {sortIcon(field)}
+      </button>
+    </TableHead>
+  );
 
   const openBulkBillingDialog = () => {
     setBulkBillingForm((current) => ({
@@ -948,10 +1044,15 @@ function UsersContent() {
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
-                  value={searchText}
+                  value={searchInput}
                   onChange={(event) => {
-                    setSearchText(event.target.value);
-                    setPage(1);
+                    setSearchInput(event.target.value);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      setSearchText(searchInput.trim());
+                      setPage(1);
+                    }
                   }}
                   placeholder="搜索用户名、用户 ID、owner 或会话"
                   className="h-10 rounded-lg pl-9"
@@ -995,6 +1096,7 @@ function UsersContent() {
                 className="h-10 rounded-lg px-3"
                 disabled={!hasActiveFilters}
                 onClick={() => {
+                  setSearchInput("");
                   setSearchText("");
                   setProviderFilter("all");
                   setStatusFilter("all");
@@ -1007,7 +1109,7 @@ function UsersContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[1180px]">
+            <Table className="min-w-[1380px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12">
@@ -1017,11 +1119,12 @@ function UsersContent() {
                       aria-label="选择当前页用户"
                     />
                   </TableHead>
-                  <TableHead className="w-[280px]">用户</TableHead>
-                  <TableHead className="w-[180px]">角色</TableHead>
-                  <TableHead className="w-[170px]">本地计费</TableHead>
-                  <TableHead className="w-[280px]">近 14 日调用</TableHead>
-                  <TableHead className="w-[170px]">时间</TableHead>
+                  {sortableHead("id", "用户 ID", "w-[220px]")}
+                  {sortableHead("name", "用户", "w-[240px]")}
+                  {sortableHead("role_name", "角色", "w-[180px]")}
+                  {sortableHead("billing_available", "本地计费", "w-[170px]")}
+                  {sortableHead("call_count", "近 14 日调用", "w-[280px]")}
+                  {sortableHead("last_used_at", "时间", "w-[170px]")}
                   <TableHead className="w-[180px] text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -1037,6 +1140,11 @@ function UsersContent() {
                           onCheckedChange={(checked) => toggleSelectedUser(user.id, checked === true)}
                           aria-label={`选择 ${user.name || user.username || user.id}`}
                         />
+                      </TableCell>
+                      <TableCell>
+                        <code className="block max-w-[220px] truncate font-mono text-xs text-muted-foreground" title={user.id}>
+                          {user.id}
+                        </code>
                       </TableCell>
                       <TableCell>
                         <div className="min-w-0 space-y-1.5">
@@ -1063,7 +1171,6 @@ function UsersContent() {
                               })()}
                             </Badge>
                           </div>
-                          <code className="block max-w-[260px] truncate font-mono text-[11px] text-muted-foreground">{user.id}</code>
                         </div>
                       </TableCell>
                       <TableCell>

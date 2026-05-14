@@ -70,7 +70,7 @@ func NewApp() (*App, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	logs := service.NewLogService(cfg.DataDir, storageBackend)
+	logs := service.NewLogService(storageBackend)
 	logger, err := service.NewLogger(cfg.DataDir, cfg.LogLevels)
 	if err != nil {
 		cancel()
@@ -79,7 +79,7 @@ func NewApp() (*App, error) {
 	proxy := service.NewProxyService(cfg)
 	accounts := service.NewAccountService(storageBackend, cfg, proxy, logs)
 	auth := service.NewAuthService(storageBackend)
-	billing := service.NewBillingService(cfg.DataDir, storageBackend, cfg)
+	billing := service.NewBillingService(storageBackend, cfg)
 	auth.SetUserCreatedHook(func(userID string) {
 		billing.InitializeUserDefaults(userID)
 	})
@@ -94,11 +94,11 @@ func NewApp() (*App, error) {
 	}
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger}
-	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), prompts: service.NewPromptFavoriteService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), cancel: cancel}
 	app.cpaImport = service.NewCPAImportService(app.cpa, accounts, proxy)
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
-	app.register = service.NewRegisterService(cfg.DataDir, accounts, storageBackend)
-	app.tasks = service.NewStoredImageTaskService(filepath.Join(cfg.DataDir, "image_tasks.json"), storageBackend,
+	app.register = service.NewRegisterService(accounts, storageBackend)
+	app.tasks = service.NewStoredImageTaskService(storageBackend,
 		func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
 			return app.runLoggedImageTask(ctx, identity, payload, "/api/creation-tasks/image-generations", "文生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
 				result, _, err := engine.HandleImageGenerations(ctx, payload)
@@ -147,6 +147,13 @@ func (a *App) Close() {
 	}
 	if a.logger != nil {
 		_ = a.logger.Close()
+	}
+	if a.config != nil {
+		if backend, err := a.config.StorageBackend(); err == nil {
+			if closer, ok := backend.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}
 	}
 }
 

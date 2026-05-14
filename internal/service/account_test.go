@@ -6,14 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"chatgpt2api/internal/storage"
 )
 
 type testAccountConfig struct{}
@@ -568,12 +565,12 @@ func TestSummarizeRefreshErrorBodyPrefersJSONMessage(t *testing.T) {
 
 func newTestAccountService(t *testing.T) *AccountService {
 	t.Helper()
-	dir := t.TempDir()
+	backend := newTestStorageBackend(t)
 	return NewAccountService(
-		storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json")),
+		backend,
 		testAccountConfig{},
 		NewProxyService(testAccountConfig{}),
-		NewLogService(dir),
+		NewLogService(backend),
 	)
 }
 

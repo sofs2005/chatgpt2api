@@ -1,17 +1,9 @@
 package service
 
-import (
-	"path/filepath"
-	"testing"
-
-	"chatgpt2api/internal/storage"
-)
+import "testing"
 
 func TestAuthServiceCreateAuthenticateDisableAndDelete(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	filter := AuthKeyFilter{Role: AuthRoleUser, Kind: AuthKindAPIKey}
@@ -63,10 +55,7 @@ func TestAuthServiceCreateAuthenticateDisableAndDelete(t *testing.T) {
 }
 
 func TestAuthServiceAssignsManagedRolesToUsers(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	user, raw, err := auth.CreateAPIKey(AuthRoleUser, "operator", AuthOwner{})
@@ -123,10 +112,7 @@ func TestAuthServiceAssignsManagedRolesToUsers(t *testing.T) {
 }
 
 func TestAuthServicePasswordAccountLoginAndRoleUpdates(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	bootstrap, err := auth.EnsureBootstrapAdmin("admin", "AdminPass123!")
@@ -209,10 +195,7 @@ func TestAuthServicePasswordAccountLoginAndRoleUpdates(t *testing.T) {
 }
 
 func TestAuthServiceLinuxDoSessionOwnsAPIKeys(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	owner := AuthOwner{ID: "linuxdo:123", Name: "linuxdo_user", Provider: AuthProviderLinuxDo, LinuxDoLevel: "3"}
@@ -255,10 +238,7 @@ func TestAuthServiceLinuxDoSessionOwnsAPIKeys(t *testing.T) {
 }
 
 func TestAuthServiceUpsertLinuxDoSessionHonorsCreateGate(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	owner := AuthOwner{ID: "linuxdo:blocked", Name: "blocked_user", Provider: AuthProviderLinuxDo, LinuxDoLevel: "1"}
@@ -287,10 +267,7 @@ func TestAuthServiceUpsertLinuxDoSessionHonorsCreateGate(t *testing.T) {
 }
 
 func TestAuthServiceUpsertAPIKeyForOwnerKeepsOneToken(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	owner := AuthOwner{ID: "linuxdo:123", Name: "linuxdo_user", Provider: AuthProviderLinuxDo, LinuxDoLevel: "3"}
@@ -325,10 +302,7 @@ func TestAuthServiceUpsertAPIKeyForOwnerKeepsOneToken(t *testing.T) {
 }
 
 func TestAuthServiceListSingleAPIKeyForOwnerPrunesDuplicates(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	owner := AuthOwner{ID: "linuxdo:123", Name: "linuxdo_user", Provider: AuthProviderLinuxDo, LinuxDoLevel: "3"}
@@ -353,10 +327,7 @@ func TestAuthServiceListSingleAPIKeyForOwnerPrunesDuplicates(t *testing.T) {
 }
 
 func TestAuthServiceManagedUsersGroupAndControlCredentials(t *testing.T) {
-	backend := storage.NewJSONBackend(
-		filepath.Join(t.TempDir(), "accounts.json"),
-		filepath.Join(t.TempDir(), "auth_keys.json"),
-	)
+	backend := newTestStorageBackend(t)
 	auth := NewAuthService(backend)
 
 	owner := AuthOwner{ID: "linuxdo:123", Name: "linuxdo_user", Provider: AuthProviderLinuxDo, LinuxDoLevel: "3"}

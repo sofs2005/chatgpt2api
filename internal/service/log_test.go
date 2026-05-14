@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,4 +156,29 @@ func TestLogServiceCleansOldLogs(t *testing.T) {
 	if len(items) != 1 || items[0]["summary"] != "新日志" {
 		t.Fatalf("remaining logs = %#v", items)
 	}
+}
+
+func TestLogServiceRetentionCleanerRunsImmediately(t *testing.T) {
+	dir := t.TempDir()
+	logs := NewLogService(dir)
+	path := filepath.Join(dir, "logs", "events.jsonl")
+	data := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧调用","detail":{"status":"success"}}` + "\n" +
+		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write logs: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logs.StartRetentionCleaner(ctx, func() int { return 1 }, time.Hour, nil)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items := logs.Search(LogQuery{Limit: 10})
+		if len(items) == 1 && items[0]["summary"] == "新日志" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("retention cleaner did not remove old logs, remaining = %#v", logs.Search(LogQuery{Limit: 10}))
 }

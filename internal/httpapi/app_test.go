@@ -2638,6 +2638,38 @@ func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
 	}
 }
 
+func TestNewAppStartsLogRetentionCleaner(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	t.Setenv("CHATGPT2API_ADMIN_USERNAME", testAdminUsername)
+	t.Setenv("CHATGPT2API_ADMIN_PASSWORD", testAdminPassword)
+	t.Setenv("STORAGE_BACKEND", "json")
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("CHATGPT2API_LOG_RETENTION_DAYS", "1")
+	unsetTestEnv(t, "CHATGPT2API_REGISTRATION_ENABLED")
+
+	logDir := filepath.Join(root, "data", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	logData := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧日志","detail":{"status":"success"}}` + "\n" +
+		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
+	if err := os.WriteFile(filepath.Join(logDir, "events.jsonl"), logData, 0o644); err != nil {
+		t.Fatalf("write log data: %v", err)
+	}
+
+	app, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp() error = %v", err)
+	}
+	defer app.Close()
+
+	waitForHTTPTestCondition(t, func() bool {
+		items := app.logs.Search(service.LogQuery{Limit: 10})
+		return len(items) == 1 && items[0]["summary"] == "新日志"
+	})
+}
+
 func logItems(payload map[string]any) []map[string]any {
 	rawItems, _ := payload["items"].([]any)
 	items := make([]map[string]any, 0, len(rawItems))

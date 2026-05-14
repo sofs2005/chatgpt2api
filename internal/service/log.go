@@ -158,6 +158,35 @@ func (s *LogService) CleanupOlderThan(retentionDays int) (LogCleanupResult, erro
 	}, nil
 }
 
+func (s *LogService) StartRetentionCleaner(ctx context.Context, retentionGetter func() int, interval time.Duration, logger *Logger) {
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	if retentionGetter == nil {
+		retentionGetter = func() int { return 7 }
+	}
+	go func() {
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				result, err := s.CleanupOlderThan(retentionGetter())
+				if err != nil {
+					if logger != nil {
+						logger.Warning("log retention cleanup failed", "error", err)
+					}
+				} else if result.Deleted > 0 && logger != nil {
+					logger.Info("log retention cleanup completed", "deleted", result.Deleted, "remaining", result.Remaining, "retention_days", result.RetentionDays)
+				}
+				timer.Reset(interval)
+			}
+		}
+	}()
+}
+
 func (s *LogService) governanceSummaryLocked() LogGovernanceSummary {
 	items, ok := s.loadLogItems("", "")
 	summary := LogGovernanceSummary{}

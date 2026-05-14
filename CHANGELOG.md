@@ -16,6 +16,7 @@
 
 - 修复管理端按单个用户 ID 查询时仍重建完整用户列表的问题。
 - 关闭应用时释放数据库连接，避免 Windows 环境下 SQLite 文件被占用。
+- 修复 release workflow 重跑 `v0.2.1` 时同名 GitHub Release 资产上传失败的问题。
 
 ### 破坏性变更
 

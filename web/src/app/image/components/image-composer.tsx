@@ -73,6 +73,9 @@ type ImageComposerProps = {
   imageOutputFormat: ImageOutputFormat;
   imageOutputCompression: string;
   highResolutionHint?: ReactNode;
+  billingSummary: string;
+  estimatedBillingUnits: number;
+  billingBlocked: boolean;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -289,6 +292,9 @@ export function ImageComposer({
   imageOutputFormat,
   imageOutputCompression,
   highResolutionHint,
+  billingSummary,
+  estimatedBillingUnits,
+  billingBlocked,
   referenceImages,
   textareaRef,
   fileInputRef,
@@ -1120,14 +1126,21 @@ export function ImageComposer({
                 <button
                   type="button"
                   onClick={() => void onSubmit()}
-                  disabled={!prompt.trim()}
+                  disabled={!prompt.trim() || billingBlocked}
                   className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-[#181e25] text-white shadow-[0_4px_10px_rgba(24,30,37,0.12)] transition hover:bg-[#2a323d] disabled:cursor-not-allowed disabled:bg-[#e1e2e4] disabled:text-[#73777f] dark:bg-foreground dark:text-background dark:hover:bg-foreground/90 dark:disabled:bg-muted dark:disabled:text-muted-foreground sm:size-10"
                   aria-label={submitLabel}
-                  title={submitLabel}
+                  title={billingBlocked ? "用户余额或配额不足" : `${submitLabel}，预计消耗 ${estimatedBillingUnits}`}
                 >
                   <ArrowUp className="size-5 sm:size-4" />
                 </button>
               </div>
+            </div>
+            <div className={cn(
+              "mt-1 flex flex-wrap items-center justify-between gap-2 px-2 text-[11px] leading-5",
+              billingBlocked ? "text-rose-600 dark:text-rose-400" : "text-[#8e8e93] dark:text-muted-foreground",
+            )}>
+              <span>{billingSummary}</span>
+              <span>预计消耗 {estimatedBillingUnits} 图片单位</span>
             </div>
           </div>
         </div>

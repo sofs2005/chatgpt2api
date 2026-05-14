@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,7 @@ import (
 	"chatgpt2api/internal/backend"
 	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
+	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
 	"chatgpt2api/internal/version"
 )
@@ -290,6 +293,9 @@ func TestPasswordAccountLoginAndRegistrationToggle(t *testing.T) {
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("disabled registration status = %d body = %s", res.Code, res.Body.String())
 	}
+	if !strings.Contains(res.Body.String(), "已关闭注册通道") {
+		t.Fatalf("disabled registration body = %s", res.Body.String())
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"registration_enabled":true}`))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
@@ -525,6 +531,83 @@ func TestRunLoggedImageTaskLogsTextOutputAsFailure(t *testing.T) {
 	}
 }
 
+func TestRecordGeneratedImagesForPayloadStoresReusableRequestMetadata(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	rel := "2026/05/12/reusable.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("writeHTTPTestPNG() error = %v", err)
+	}
+
+	app.recordGeneratedImagesForPayload(
+		service.Identity{ID: "admin", Role: service.AuthRoleAdmin, Name: "Admin"},
+		[]string{rel},
+		service.ImageVisibilityPublic,
+		map[string]any{
+			"prompt":             "复用这个提示词",
+			"model":              "gpt-image-2",
+			"quality":            "high",
+			"image_resolution":   "2k",
+			"size":               "2048x2048",
+			"output_format":      "jpeg",
+			"output_compression": 42,
+			"background":         "transparent",
+			"moderation":         "low",
+			"style":              "vivid",
+			"partial_images":     2,
+			"input_image_mask":   "mask-id",
+			"images": []protocol.UploadedImage{
+				{Filename: "source.png", ContentType: "image/png", Data: []byte("reference-bytes")},
+			},
+			"share_prompt_parameters": true,
+			"share_reference_images":  true,
+		},
+	)
+
+	list := app.images.ListImages("http://127.0.0.1:8000", "", "", service.ImageAccessScope{Public: true})
+	items := list["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("ListImages() = %#v", list)
+	}
+	item := items[0]
+	if item["prompt"] != "复用这个提示词" ||
+		item["model"] != "gpt-image-2" ||
+		item["quality"] != "high" ||
+		item["resolution_preset"] != "2k" ||
+		item["requested_size"] != "2048x2048" ||
+		item["output_format"] != "jpeg" ||
+		item["output_compression"] != 42 ||
+		item["background"] != "transparent" ||
+		item["moderation"] != "low" ||
+		item["style"] != "vivid" ||
+		item["partial_images"] != 2 ||
+		item["input_image_mask"] != "mask-id" {
+		t.Fatalf("reusable metadata = %#v", item)
+	}
+	referenceURLs, ok := item["reference_image_urls"].([]string)
+	if !ok || len(referenceURLs) != 1 || !strings.Contains(referenceURLs[0], "/image-references/") {
+		t.Fatalf("reference_image_urls = %#v", item["reference_image_urls"])
+	}
+	parsedReferenceURL, err := url.Parse(referenceURLs[0])
+	if err != nil {
+		t.Fatalf("parse reference url: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, parsedReferenceURL.RequestURI(), nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "reference-bytes" {
+		t.Fatalf("public reference status/body = %d %q", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("reference Content-Type = %q, want image/png", got)
+	}
+}
+
 func TestDirectImageGenerationUsesCreationLimiter(t *testing.T) {
 	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
 	app := newTestApp(t)
@@ -689,6 +772,719 @@ func TestDirectImageGenerationDoesNotLimitAdminToken(t *testing.T) {
 	}
 	if res.Code != http.StatusOK {
 		t.Fatalf("admin image generation status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestProtocolImageBillingInsufficientErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		billingType       string
+		standardBalance   string
+		subscriptionQuota string
+		wantCode          string
+		wantMessage       string
+	}{
+		{
+			name:              "standard",
+			billingType:       service.BillingTypeStandard,
+			standardBalance:   "0",
+			subscriptionQuota: "100",
+			wantCode:          "user_balance_insufficient",
+			wantMessage:       "user balance insufficient",
+		},
+		{
+			name:              "subscription",
+			billingType:       service.BillingTypeSubscription,
+			standardBalance:   "100",
+			subscriptionQuota: "0",
+			wantCode:          "user_quota_exceeded",
+			wantMessage:       "user quota exceeded",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newTestAppWithBillingDefaults(t, tc.billingType, tc.standardBalance, tc.subscriptionQuota, service.BillingPeriodMonthly)
+			defer app.Close()
+
+			_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+			if err != nil {
+				t.Fatalf("CreateAPIKey() error = %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+			req.Header.Set("Authorization", "Bearer "+rawKey)
+			res := httptest.NewRecorder()
+			app.Handler().ServeHTTP(res, req)
+			if res.Code != http.StatusTooManyRequests {
+				t.Fatalf("image generation status = %d body = %s", res.Code, res.Body.String())
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("error json: %v", err)
+			}
+			errorBody := util.StringMap(payload["error"])
+			if errorBody["type"] != "insufficient_quota" || errorBody["code"] != tc.wantCode || errorBody["message"] != tc.wantMessage {
+				t.Fatalf("error body = %#v", payload)
+			}
+		})
+	}
+}
+
+func TestProtocolBillableUnitsBoundaryAndEquivalenceClasses(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		body     map[string]any
+		want     int
+	}{
+		{
+			name:     "image generation defaults to one",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{},
+			want:     1,
+		},
+		{
+			name:     "image generation zero clamps to one",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": 0},
+			want:     1,
+		},
+		{
+			name:     "image generation negative clamps to one",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": -3},
+			want:     1,
+		},
+		{
+			name:     "image generation upper bound",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": 4},
+			want:     4,
+		},
+		{
+			name:     "image generation above upper bound clamps",
+			endpoint: "/v1/images/generations",
+			body:     map[string]any{"n": 5},
+			want:     4,
+		},
+		{
+			name:     "text chat is free even with n",
+			endpoint: "/v1/chat/completions",
+			body: map[string]any{
+				"model":    "gpt-5",
+				"n":        4,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			},
+			want: 0,
+		},
+		{
+			name:     "image chat defaults to one",
+			endpoint: "/v1/chat/completions",
+			body: map[string]any{
+				"model":      "gpt-5",
+				"modalities": []any{"image"},
+				"messages":   []any{map[string]any{"role": "user", "content": "draw"}},
+			},
+			want: 1,
+		},
+		{
+			name:     "image chat above upper bound clamps",
+			endpoint: "/v1/chat/completions",
+			body: map[string]any{
+				"model":      "gpt-5",
+				"modalities": []any{"image"},
+				"n":          7,
+				"messages":   []any{map[string]any{"role": "user", "content": "draw"}},
+			},
+			want: 4,
+		},
+		{
+			name:     "text responses are free",
+			endpoint: "/v1/responses",
+			body: map[string]any{
+				"model": "gpt-5",
+				"input": "hello",
+			},
+			want: 0,
+		},
+		{
+			name:     "responses image tool defaults to one",
+			endpoint: "/v1/responses",
+			body: map[string]any{
+				"model": "gpt-image-2",
+				"input": "draw",
+				"tools": []any{map[string]any{"type": "image_generation"}},
+			},
+			want: 1,
+		},
+		{
+			name:     "responses image tool choice uses n upper bound",
+			endpoint: "/v1/responses",
+			body: map[string]any{
+				"model":       "gpt-image-2",
+				"input":       "draw",
+				"n":           4,
+				"tool_choice": map[string]any{"type": "image_generation"},
+			},
+			want: 4,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := protocolBillableUnits(tc.endpoint, tc.body); got != tc.want {
+				t.Fatalf("protocolBillableUnits(%q, %#v) = %d, want %d", tc.endpoint, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProtocolImageBillingStandardBalanceBoundary(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "4", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	installHTTPTestImageStream(t, app)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":4,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("image generation exact-balance status = %d body = %s", res.Code, res.Body.String())
+	}
+	state := profileBillingState(t, app, rawKey)
+	standard := util.StringMap(state["standard"])
+	if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 4 || util.ToInt(state["available"], -1) != 0 {
+		t.Fatalf("billing after exact-balance image generation = %#v", state)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusTooManyRequests {
+		t.Fatalf("image generation drained-balance status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestProtocolImageBillingRejectsBeforeUpstream(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "3", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	streamCalls := 0
+	installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		streamCalls++
+		return httpTestImageOutputStream(request, index)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":4,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusTooManyRequests {
+		t.Fatalf("image generation insufficient status = %d body = %s", res.Code, res.Body.String())
+	}
+	if streamCalls != 0 {
+		t.Fatalf("insufficient request reached upstream stream %d times", streamCalls)
+	}
+	state := profileBillingState(t, app, rawKey)
+	standard := util.StringMap(state["standard"])
+	if util.ToInt(standard["balance"], -1) != 3 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 3 {
+		t.Fatalf("billing after rejected image generation = %#v", state)
+	}
+}
+
+func TestProtocolImageBillingChargesBeforeDelivery(t *testing.T) {
+	t.Run("non-stream does not return generated image when delivery charge fails", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "1", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		userID := util.Clean(user["id"])
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if _, err := app.billing.ChargeUserID(userID, 1, service.BillingReference{ChargeKey: "external:protocol:non-stream-drain"}); err != nil {
+				t.Errorf("external ChargeUserID() error = %v", err)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("image generation delivery charge status = %d body = %s", res.Code, res.Body.String())
+		}
+		if strings.Contains(res.Body.String(), "https://example.test/1.png") || strings.Contains(res.Body.String(), "image-1") {
+			t.Fatalf("unpaid generated image leaked in response body: %s", res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing after failed delivery charge = %#v", state)
+		}
+	})
+
+	t.Run("stream stops before unpaid image event", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "1", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		userID := util.Clean(user["id"])
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if _, err := app.billing.ChargeUserID(userID, 1, service.BillingReference{ChargeKey: "external:protocol:stream-drain"}); err != nil {
+				t.Errorf("external ChargeUserID() error = %v", err)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url","stream":true}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		body := res.Body.String()
+		if res.Code != http.StatusOK {
+			t.Fatalf("stream image generation status = %d body = %s", res.Code, body)
+		}
+		if strings.Contains(body, "image.generation.result") || strings.Contains(body, "https://example.test/1.png") || strings.Contains(body, "image-1") {
+			t.Fatalf("unpaid generated image leaked in stream body: %s", body)
+		}
+		if !strings.Contains(body, `"code":"user_balance_insufficient"`) || !strings.Contains(body, "data: [DONE]") {
+			t.Fatalf("stream body missing billing error or done marker: %s", body)
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing after failed stream delivery charge = %#v", state)
+		}
+	})
+}
+
+func TestProtocolBillingChatAndResponsesEquivalenceClasses(t *testing.T) {
+	t.Run("text chat does not require billing", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code == http.StatusTooManyRequests {
+			t.Fatalf("text chat was rejected by billing: %s", res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing changed after text chat = %#v", state)
+		}
+	})
+
+	t.Run("image chat consumes actual outputs", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "2", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			if index > 1 {
+				return httpTestMessageOnlyImageOutputStream(request, index)
+			}
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-image-2","messages":[{"role":"user","content":"draw"}],"n":2}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("image chat status = %d body = %s", res.Code, res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 1 || util.ToInt(standard["lifetime_consumed"], -1) != 1 || util.ToInt(state["available"], -1) != 1 {
+			t.Fatalf("billing after partial image chat = %#v", state)
+		}
+	})
+
+	t.Run("image chat insufficient rejects before upstream", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		streamCalls := 0
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			streamCalls++
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","modalities":["image"],"messages":[{"role":"user","content":"draw"}],"n":1}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("image chat insufficient status = %d body = %s", res.Code, res.Body.String())
+		}
+		if streamCalls != 0 {
+			t.Fatalf("insufficient image chat reached upstream stream %d times", streamCalls)
+		}
+	})
+
+	t.Run("text responses do not require billing", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5","input":"hello"}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code == http.StatusTooManyRequests {
+			t.Fatalf("text responses was rejected by billing: %s", res.Body.String())
+		}
+		state := profileBillingState(t, app, rawKey)
+		standard := util.StringMap(state["standard"])
+		if util.ToInt(standard["balance"], -1) != 0 || util.ToInt(standard["lifetime_consumed"], -1) != 0 || util.ToInt(state["available"], -1) != 0 {
+			t.Fatalf("billing changed after text responses = %#v", state)
+		}
+	})
+
+	t.Run("responses image tool insufficient rejects before upstream", func(t *testing.T) {
+		app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+		defer app.Close()
+		_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+		if err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
+		streamCalls := 0
+		installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+			streamCalls++
+			return httpTestImageOutputStream(request, index)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-image-2","input":"draw","tools":[{"type":"image_generation"}]}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusTooManyRequests {
+			t.Fatalf("responses image insufficient status = %d body = %s", res.Code, res.Body.String())
+		}
+		if streamCalls != 0 {
+			t.Fatalf("insufficient responses image reached upstream stream %d times", streamCalls)
+		}
+	})
+}
+
+func TestProtocolBillingAdminBypassAndUserAdjustmentPermission(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+	installHTTPTestImageStream(t, app)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":4,"response_format":"url"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin image generation status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/users/"+url.PathEscape(util.Clean(user["id"]))+"/billing-adjustments", strings.NewReader(`{"type":"increase_balance","amount":1,"reason":"user attempt"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("user billing adjustment status = %d body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestProfileAndManagedUsersExposeBillingState(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeSubscription, "0", "12", service.BillingPeriodWeekly)
+	defer app.Close()
+
+	user, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "billing-user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	userID, _ := user["id"].(string)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("profile status = %d body = %s", res.Code, res.Body.String())
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("profile json: %v", err)
+	}
+	billing := util.StringMap(profile["billing"])
+	subscription := util.StringMap(billing["subscription"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], 0) != 12 || subscription["quota_period"] != service.BillingPeriodWeekly {
+		t.Fatalf("profile billing = %#v", billing)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var users map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &users); err != nil {
+		t.Fatalf("admin users json: %v", err)
+	}
+	item := findHTTPItem(logItems(users), userID)
+	if item == nil {
+		t.Fatalf("managed user %q missing from %#v", userID, users)
+	}
+	billing = util.StringMap(item["billing"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], 0) != 12 {
+		t.Fatalf("managed user billing = %#v", item["billing"])
+	}
+}
+
+func TestDefaultBillingSettingsOnlyInitializeNewUsers(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "0", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+
+	existing, existingKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "existing user", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey(existing) error = %v", err)
+	}
+	existingID := util.Clean(existing["id"])
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{
+		"default_billing_type": "subscription",
+		"default_standard_balance": 7,
+		"default_subscription_quota": 12,
+		"default_subscription_period": "weekly"
+	}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("update default billing settings status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var users map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &users); err != nil {
+		t.Fatalf("admin users json: %v", err)
+	}
+	item := findHTTPItem(logItems(users), existingID)
+	if item == nil {
+		t.Fatalf("existing user %q missing from %#v", existingID, users)
+	}
+	billing := util.StringMap(item["billing"])
+	if billing["type"] != service.BillingTypeStandard || util.ToInt(billing["available"], -1) != 0 {
+		t.Fatalf("existing listed billing changed after settings update = %#v", billing)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+existingKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("existing profile status = %d body = %s", res.Code, res.Body.String())
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("existing profile json: %v", err)
+	}
+	billing = util.StringMap(profile["billing"])
+	if billing["type"] != service.BillingTypeStandard || util.ToInt(billing["available"], -1) != 0 {
+		t.Fatalf("existing profile billing changed after settings update = %#v", billing)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/admin/users", strings.NewReader(`{"username":"newuser","password":"Password123","name":"New User"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("create new user status = %d body = %s", res.Code, res.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create user json: %v", err)
+	}
+	newUser := util.StringMap(created["item"])
+	billing = util.StringMap(newUser["billing"])
+	subscription := util.StringMap(billing["subscription"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], -1) != 12 || subscription["quota_period"] != service.BillingPeriodWeekly {
+		t.Fatalf("new user billing did not use updated defaults = %#v", billing)
+	}
+}
+
+func TestRegistrationInitializesDefaultBillingForNewUser(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeSubscription, "0", "9", service.BillingPeriodDaily)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"registration_enabled":true}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("enable registration status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"username":"alice","password":"Password123","name":"Alice"}`))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("register status = %d body = %s", res.Code, res.Body.String())
+	}
+	var registered map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &registered); err != nil {
+		t.Fatalf("register json: %v", err)
+	}
+	billing := util.StringMap(registered["billing"])
+	subscription := util.StringMap(billing["subscription"])
+	if billing["type"] != service.BillingTypeSubscription || util.ToInt(billing["available"], -1) != 9 || subscription["quota_period"] != service.BillingPeriodDaily {
+		t.Fatalf("registered billing = %#v", billing)
+	}
+}
+
+func TestAdminBulkBillingAdjustmentTargetsExplicitUsers(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "2", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+
+	alice, err := app.auth.CreatePasswordUser("bulk_alice", "Password123", "Bulk Alice", service.DefaultManagedRoleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(alice) error = %v", err)
+	}
+	bob, err := app.auth.CreatePasswordUser("bulk_bob", "Password123", "Bulk Bob", service.DefaultManagedRoleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(bob) error = %v", err)
+	}
+	aliceID := util.Clean(alice["id"])
+	bobID := util.Clean(bob["id"])
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/users/billing-adjustments/bulk", strings.NewReader(`{
+		"scope": "users",
+		"user_ids": [`+strconv.Quote(aliceID)+`, `+strconv.Quote(bobID)+`, `+strconv.Quote(aliceID)+`],
+		"billing": {"type":"increase_balance","amount":5,"reason":"batch topup"}
+	}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("bulk users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("bulk users json: %v", err)
+	}
+	summary := util.StringMap(payload["summary"])
+	if util.ToInt(summary["total"], 0) != 2 || util.ToInt(summary["succeeded"], 0) != 2 || util.ToInt(summary["failed"], -1) != 0 {
+		t.Fatalf("bulk users summary = %#v", summary)
+	}
+	for _, userID := range []string{aliceID, bobID} {
+		billing := app.billing.Get(userID)
+		if util.ToInt(billing["available"], -1) != 7 {
+			t.Fatalf("%s billing = %#v, want available 7", userID, billing)
+		}
+	}
+	if adjustments := app.billing.ListAdjustments("", 10); len(adjustments) != 2 {
+		t.Fatalf("bulk adjustments len = %d, want 2: %#v", len(adjustments), adjustments)
+	}
+}
+
+func TestAdminBulkBillingAdjustmentTargetsRoleAndReportsFailures(t *testing.T) {
+	app := newTestAppWithBillingDefaults(t, service.BillingTypeStandard, "2", "0", service.BillingPeriodMonthly)
+	defer app.Close()
+
+	role, err := app.auth.CreateRole(map[string]any{
+		"name":            "bulk role",
+		"menu_paths":      []string{},
+		"api_permissions": []string{},
+	})
+	if err != nil {
+		t.Fatalf("CreateRole() error = %v", err)
+	}
+	roleID := util.Clean(role["id"])
+	alice, err := app.auth.CreatePasswordUser("bulk_role_alice", "Password123", "Bulk Role Alice", roleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(alice) error = %v", err)
+	}
+	bob, err := app.auth.CreatePasswordUser("bulk_role_bob", "Password123", "Bulk Role Bob", roleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(bob) error = %v", err)
+	}
+	other, err := app.auth.CreatePasswordUser("bulk_role_other", "Password123", "Bulk Role Other", service.DefaultManagedRoleID, true)
+	if err != nil {
+		t.Fatalf("CreatePasswordUser(other) error = %v", err)
+	}
+	aliceID := util.Clean(alice["id"])
+	bobID := util.Clean(bob["id"])
+	otherID := util.Clean(other["id"])
+	if _, err := app.billing.ApplyAdjustment(bobID, service.Identity{ID: "admin", Name: "Admin", Role: service.AuthRoleAdmin}, map[string]any{"type": "decrease_balance", "amount": 1}); err != nil {
+		t.Fatalf("pre-adjust bob error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/users/billing-adjustments/bulk", strings.NewReader(`{
+		"scope": "role",
+		"role_id": `+strconv.Quote(roleID)+`,
+		"billing": {"type":"decrease_balance","amount":2,"reason":"batch debit"}
+	}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("bulk role status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("bulk role json: %v", err)
+	}
+	summary := util.StringMap(payload["summary"])
+	if util.ToInt(summary["total"], 0) != 2 || util.ToInt(summary["succeeded"], 0) != 1 || util.ToInt(summary["failed"], 0) != 1 {
+		t.Fatalf("bulk role summary = %#v", summary)
+	}
+	results := logItems(map[string]any{"items": payload["results"]})
+	if len(results) != 2 {
+		t.Fatalf("bulk role results = %#v", payload["results"])
+	}
+	if failed := findHTTPBulkBillingResult(results, bobID); failed == nil || util.Clean(failed["error"]) == "" {
+		t.Fatalf("bob failed result = %#v", failed)
+	}
+	if got := app.billing.Get(aliceID); util.ToInt(got["available"], -1) != 0 {
+		t.Fatalf("alice billing = %#v, want debited to 0", got)
+	}
+	if got := app.billing.Get(bobID); util.ToInt(got["available"], -1) != 1 {
+		t.Fatalf("bob billing = %#v, want unchanged at 1", got)
+	}
+	if got := app.billing.Get(otherID); util.ToInt(got["available"], -1) != 2 {
+		t.Fatalf("other billing = %#v, want unchanged at 2", got)
 	}
 }
 
@@ -1254,7 +2050,25 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	if err := writeHTTPTestPNG(imagePath); err != nil {
 		t.Fatalf("write image: %v", err)
 	}
-	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate)
+	app.images.RecordGeneratedImages([]string{rel}, owner.ID, owner.Name, service.ImageVisibilityPrivate, service.GeneratedImageMetadata{
+		ReferenceImages: []service.GeneratedImageReference{
+			{Filename: "private-source.png", ContentType: "image/png", Data: []byte("private-reference")},
+		},
+	})
+	privateList := app.images.ListImages("http://127.0.0.1:8000", "", "", service.ImageAccessScope{All: true})
+	privateItems := privateList["items"].([]map[string]any)
+	if len(privateItems) != 1 {
+		t.Fatalf("private image list = %#v", privateList)
+	}
+	privateReferenceURLs, ok := privateItems[0]["reference_image_urls"].([]string)
+	if !ok || len(privateReferenceURLs) != 1 {
+		t.Fatalf("private reference urls = %#v", privateItems[0])
+	}
+	parsedPrivateReferenceURL, err := url.Parse(privateReferenceURLs[0])
+	if err != nil {
+		t.Fatalf("parse private reference url: %v", err)
+	}
+	privateReferencePath := parsedPrivateReferenceURL.RequestURI()
 
 	req := httptest.NewRequest(http.MethodGet, "/images/2026/05/01", nil)
 	res := httptest.NewRecorder()
@@ -1268,6 +2082,29 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous private image status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private reference status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	req.Header.Set("Authorization", "Bearer "+bobKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("other user private reference status = %d body = %q, want 404", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "private-reference" {
+		t.Fatalf("owner private reference status/body = %d %q", res.Code, res.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
@@ -1316,6 +2153,23 @@ func TestManagedImageFilesRequireOwnerOrPublicAccess(t *testing.T) {
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("anonymous public image status = %d body = %q", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous unshared public reference status = %d body = %q, want 401", res.Code, res.Body.String())
+	}
+
+	if _, err := app.images.UpdateImageVisibility(rel, service.ImageVisibilityPublic, service.ImageAccessScope{OwnerID: owner.ID}, service.ImageVisibilityUpdateOptions{SharePromptParams: true, ShareReferences: true}); err != nil {
+		t.Fatalf("publish reference metadata: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, privateReferencePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "private-reference" {
+		t.Fatalf("anonymous shared public reference status/body = %d %q", res.Code, res.Body.String())
 	}
 }
 
@@ -2154,24 +3008,54 @@ func TestAdminUsersListPaginationAndFilters(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 
-	if _, err := app.auth.CreatePasswordUser("enabled_one", "Password123", "Enabled One", service.DefaultManagedRoleID, true); err != nil {
+	enabledOne, err := app.auth.CreatePasswordUser("enabled_one", "Password123", "Enabled One", service.DefaultManagedRoleID, true)
+	if err != nil {
 		t.Fatalf("CreatePasswordUser(enabled_one) error = %v", err)
 	}
-	if _, err := app.auth.CreatePasswordUser("disabled_one", "Password123", "Disabled One", service.DefaultManagedRoleID, false); err != nil {
+	disabledOne, err := app.auth.CreatePasswordUser("disabled_one", "Password123", "Disabled One", service.DefaultManagedRoleID, false)
+	if err != nil {
 		t.Fatalf("CreatePasswordUser(disabled_one) error = %v", err)
 	}
-	if _, err := app.auth.CreatePasswordUser("enabled_two", "Password123", "Enabled Two", service.DefaultManagedRoleID, true); err != nil {
+	enabledTwo, err := app.auth.CreatePasswordUser("enabled_two", "Password123", "Enabled Two", service.DefaultManagedRoleID, true)
+	if err != nil {
 		t.Fatalf("CreatePasswordUser(enabled_two) error = %v", err)
 	}
+	expectedDefaultIDs := []string{
+		enabledOne["id"].(string),
+		disabledOne["id"].(string),
+		enabledTwo["id"].(string),
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(expectedDefaultIDs)))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/users?page=2&page_size=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/users?page=1&page_size=3", nil)
 	req.Header.Set("Authorization", adminAuthHeader(t, app))
 	res := httptest.NewRecorder()
 	app.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
-		t.Fatalf("paged users status = %d body = %s", res.Code, res.Body.String())
+		t.Fatalf("default sorted users status = %d body = %s", res.Code, res.Body.String())
 	}
 	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("default sorted users json: %v", err)
+	}
+	items := logItems(payload)
+	if len(items) != len(expectedDefaultIDs) || payload["sort_by"] != "id" || payload["sort_order"] != "desc" {
+		t.Fatalf("default sorted metadata/items = %#v", payload)
+	}
+	for index, item := range items {
+		if item["id"] != expectedDefaultIDs[index] {
+			t.Fatalf("default sorted ids = %#v, want %#v", items, expectedDefaultIDs)
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=2&page_size=2", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("paged users status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("paged users json: %v", err)
 	}
@@ -2180,6 +3064,27 @@ func TestAdminUsersListPaginationAndFilters(t *testing.T) {
 	}
 	if items := logItems(payload); len(items) != 1 {
 		t.Fatalf("paged items length = %d payload = %#v", len(items), payload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=1&page_size=3&sort_by=username&sort_order=asc", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("username sorted users status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("username sorted users json: %v", err)
+	}
+	items = logItems(payload)
+	if payload["sort_by"] != "username" || payload["sort_order"] != "asc" || len(items) != 3 {
+		t.Fatalf("username sorted payload = %#v", payload)
+	}
+	for index, username := range []string{"disabled_one", "enabled_one", "enabled_two"} {
+		if items[index]["username"] != username {
+			t.Fatalf("username sorted items = %#v", items)
+		}
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=99&page_size=2", nil)
@@ -2208,7 +3113,7 @@ func TestAdminUsersListPaginationAndFilters(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("filtered users json: %v", err)
 	}
-	items := logItems(payload)
+	items = logItems(payload)
 	if payload["total"] != float64(1) || len(items) != 1 || items[0]["username"] != "disabled_one" {
 		t.Fatalf("filtered users payload = %#v", payload)
 	}
@@ -2258,6 +3163,9 @@ func TestLinuxDoOAuthCallbackCreatesSession(t *testing.T) {
 
 	app := newTestApp(t)
 	defer app.Close()
+	if _, err := app.config.Update(map[string]any{"registration_enabled": true}); err != nil {
+		t.Fatalf("enable registration: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/start?redirect=/settings", nil)
 	res := httptest.NewRecorder()
@@ -2329,6 +3237,127 @@ func TestLinuxDoOAuthCallbackCreatesSession(t *testing.T) {
 	linuxdoUser := findHTTPItem(logItems(users), "linuxdo:123")
 	if linuxdoUser == nil || linuxdoUser["linuxdo_level"] != "2" {
 		t.Fatalf("oauth linuxdo user level = %#v", linuxdoUser)
+	}
+}
+
+func TestLinuxDoOAuthCallbackRejectsNewUserWhenRegistrationDisabled(t *testing.T) {
+	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			util.WriteJSON(w, http.StatusOK, map[string]any{"access_token": "linuxdo-access", "token_type": "Bearer"})
+		case "/user":
+			util.WriteJSON(w, http.StatusOK, map[string]any{"id": 456, "username": "blocked_linuxdo", "trust_level": 1})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer oauthServer.Close()
+
+	t.Setenv("CHATGPT2API_LINUXDO_ENABLED", "true")
+	t.Setenv("CHATGPT2API_LINUXDO_CLIENT_ID", "client-id")
+	t.Setenv("CHATGPT2API_LINUXDO_CLIENT_SECRET", "client-secret")
+	t.Setenv("CHATGPT2API_LINUXDO_AUTHORIZE_URL", oauthServer.URL+"/authorize")
+	t.Setenv("CHATGPT2API_LINUXDO_TOKEN_URL", oauthServer.URL+"/token")
+	t.Setenv("CHATGPT2API_LINUXDO_USERINFO_URL", oauthServer.URL+"/user")
+	t.Setenv("CHATGPT2API_LINUXDO_REDIRECT_URL", "http://chatgpt2api.test/auth/linuxdo/oauth/callback")
+	t.Setenv("CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL", "/auth/linuxdo/callback")
+
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/start?redirect=/settings", nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("start status = %d body = %s", res.Code, res.Body.String())
+	}
+	authorizeURL, err := url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse authorize location: %v", err)
+	}
+	state := authorizeURL.Query().Get("state")
+	if state == "" {
+		t.Fatalf("authorize location missing state: %s", authorizeURL.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/auth/linuxdo/oauth/callback?code=oauth-code&state="+url.QueryEscape(state), nil)
+	for _, cookie := range res.Result().Cookies() {
+		req.AddCookie(cookie)
+	}
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body = %s", res.Code, res.Body.String())
+	}
+	callbackURL, err := url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse callback location: %v", err)
+	}
+	fragment, err := url.ParseQuery(callbackURL.Fragment)
+	if err != nil {
+		t.Fatalf("parse callback fragment: %v", err)
+	}
+	if fragment.Get("error") != "registration_disabled" || fragment.Get("error_message") != "已关闭注册通道" {
+		t.Fatalf("callback fragment = %#v", fragment)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var users map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &users); err != nil {
+		t.Fatalf("admin users json: %v", err)
+	}
+	if linuxdoUser := findHTTPItem(logItems(users), "linuxdo:456"); linuxdoUser != nil {
+		t.Fatalf("disabled registration created linuxdo user: %#v", linuxdoUser)
+	}
+
+	if _, _, err := app.auth.UpsertLinuxDoSession(service.AuthOwner{
+		ID:           "linuxdo:456",
+		Name:         "blocked_linuxdo",
+		Provider:     service.AuthProviderLinuxDo,
+		LinuxDoLevel: "1",
+	}); err != nil {
+		t.Fatalf("seed existing linuxdo user: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/auth/linuxdo/start?redirect=/settings", nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("second start status = %d body = %s", res.Code, res.Body.String())
+	}
+	authorizeURL, err = url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse second authorize location: %v", err)
+	}
+	state = authorizeURL.Query().Get("state")
+	if state == "" {
+		t.Fatalf("second authorize location missing state: %s", authorizeURL.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/linuxdo/oauth/callback?code=oauth-code&state="+url.QueryEscape(state), nil)
+	for _, cookie := range res.Result().Cookies() {
+		req.AddCookie(cookie)
+	}
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("second callback status = %d body = %s", res.Code, res.Body.String())
+	}
+	callbackURL, err = url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse second callback location: %v", err)
+	}
+	fragment, err = url.ParseQuery(callbackURL.Fragment)
+	if err != nil {
+		t.Fatalf("parse second callback fragment: %v", err)
+	}
+	if fragment.Get("error") != "" || fragment.Get("key") == "" || fragment.Get("subject_id") != "linuxdo:456" {
+		t.Fatalf("existing user callback fragment = %#v", fragment)
 	}
 }
 
@@ -2595,14 +3624,21 @@ func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 
-	logDir := filepath.Join(app.config.DataDir, "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("mkdir logs: %v", err)
+	backend, err := app.config.StorageBackend()
+	if err != nil {
+		t.Fatalf("StorageBackend() error = %v", err)
 	}
-	logData := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧日志","detail":{"status":"success"}}` + "\n" +
-		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
-	if err := os.WriteFile(filepath.Join(logDir, "events.jsonl"), logData, 0o644); err != nil {
-		t.Fatalf("write log data: %v", err)
+	logStore, ok := backend.(storage.LogBackend)
+	if !ok {
+		t.Fatalf("storage backend %T does not implement LogBackend", backend)
+	}
+	for _, item := range []map[string]any{
+		{"time": "2000-01-01 00:00:00", "type": "event", "summary": "旧日志", "detail": map[string]any{"status": "success"}},
+		{"time": time.Now().Format("2006-01-02 15:04:05"), "type": "event", "summary": "新日志", "detail": map[string]any{"status": 200}},
+	} {
+		if err := logStore.AppendLog(item); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/logs/governance", nil)
@@ -2643,19 +3679,35 @@ func TestNewAppStartsLogRetentionCleaner(t *testing.T) {
 	t.Setenv("CHATGPT2API_ROOT", root)
 	t.Setenv("CHATGPT2API_ADMIN_USERNAME", testAdminUsername)
 	t.Setenv("CHATGPT2API_ADMIN_PASSWORD", testAdminPassword)
-	t.Setenv("STORAGE_BACKEND", "json")
+	t.Setenv("STORAGE_BACKEND", "sqlite")
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("CHATGPT2API_LOG_RETENTION_DAYS", "1")
 	unsetTestEnv(t, "CHATGPT2API_REGISTRATION_ENABLED")
 
-	logDir := filepath.Join(root, "data", "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("mkdir logs: %v", err)
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
 	}
-	logData := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧日志","detail":{"status":"success"}}` + "\n" +
-		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
-	if err := os.WriteFile(filepath.Join(logDir, "events.jsonl"), logData, 0o644); err != nil {
-		t.Fatalf("write log data: %v", err)
+	backend, err := storage.NewBackendFromEnv(dataDir)
+	if err != nil {
+		t.Fatalf("NewBackendFromEnv() error = %v", err)
+	}
+	logStore, ok := backend.(storage.LogBackend)
+	if !ok {
+		t.Fatalf("storage backend %T does not implement LogBackend", backend)
+	}
+	for _, item := range []map[string]any{
+		{"time": "2000-01-01 00:00:00", "type": "event", "summary": "旧日志", "detail": map[string]any{"status": "success"}},
+		{"time": time.Now().Format("2006-01-02 15:04:05"), "type": "event", "summary": "新日志", "detail": map[string]any{"status": 200}},
+	} {
+		if err := logStore.AppendLog(item); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
+	}
+	if closer, ok := backend.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			t.Fatalf("close seed backend: %v", err)
+		}
 	}
 
 	app, err := NewApp()
@@ -2668,6 +3720,64 @@ func TestNewAppStartsLogRetentionCleaner(t *testing.T) {
 		items := app.logs.Search(service.LogQuery{Limit: 10})
 		return len(items) == 1 && items[0]["summary"] == "新日志"
 	})
+}
+
+func TestImageStorageGovernanceEndpointCleansThumbnails(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	rel := "2026/04/29/sample.png"
+	imagePath := filepath.Join(app.config.ImagesDir(), filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("mkdir image dir: %v", err)
+	}
+	if err := writeHTTPTestPNG(imagePath); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	app.images.RecordGeneratedImages([]string{rel}, "admin", "Admin", service.ImageVisibilityPrivate)
+	app.images.EnsureThumbnails([]string{rel})
+	thumbPath := filepath.Join(app.config.ImageThumbnailsDir(), filepath.FromSlash(rel)+".jpg")
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("thumbnail was not created: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/images/storage-governance", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("storage governance status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("storage governance json: %v", err)
+	}
+	governance, _ := payload["governance"].(map[string]any)
+	if governance["images_count"] != float64(1) || governance["thumbnail_files"] != float64(1) {
+		t.Fatalf("storage governance = %#v", governance)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/images/storage-governance", strings.NewReader(`{"action":"thumbnails"}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("thumbnail cleanup status = %d body = %s", res.Code, res.Body.String())
+	}
+	payload = map[string]any{}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("thumbnail cleanup json: %v", err)
+	}
+	cleanup, _ := payload["cleanup"].(map[string]any)
+	if cleanup["deleted_thumbnails"] != float64(1) || cleanup["deleted_images"] != float64(0) {
+		t.Fatalf("thumbnail cleanup = %#v", cleanup)
+	}
+	if _, err := os.Stat(imagePath); err != nil {
+		t.Fatalf("image should remain after thumbnail cleanup: %v", err)
+	}
+	if _, err := os.Stat(thumbPath); !os.IsNotExist(err) {
+		t.Fatalf("thumbnail still exists, stat error = %v", err)
+	}
 }
 
 func logItems(payload map[string]any) []map[string]any {
@@ -2693,6 +3803,15 @@ func findLogBySummary(items []map[string]any, summary string) map[string]any {
 func findHTTPItem(items []map[string]any, id string) map[string]any {
 	for _, item := range items {
 		if item["id"] == id {
+			return item
+		}
+	}
+	return nil
+}
+
+func findHTTPBulkBillingResult(items []map[string]any, userID string) map[string]any {
+	for _, item := range items {
+		if item["user_id"] == userID {
 			return item
 		}
 	}
@@ -2777,13 +3896,21 @@ func waitForHTTPTestCondition(t *testing.T, ok func() bool) {
 }
 
 func newTestApp(t *testing.T) *App {
+	return newTestAppWithBillingDefaults(t, "standard", "1000", "1000", "monthly")
+}
+
+func newTestAppWithBillingDefaults(t *testing.T, billingType, standardBalance, subscriptionQuota, subscriptionPeriod string) *App {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)
 	t.Setenv("CHATGPT2API_ADMIN_USERNAME", testAdminUsername)
 	t.Setenv("CHATGPT2API_ADMIN_PASSWORD", testAdminPassword)
+	t.Setenv("CHATGPT2API_DEFAULT_BILLING_TYPE", billingType)
+	t.Setenv("CHATGPT2API_DEFAULT_STANDARD_BALANCE", standardBalance)
+	t.Setenv("CHATGPT2API_DEFAULT_SUBSCRIPTION_QUOTA", subscriptionQuota)
+	t.Setenv("CHATGPT2API_DEFAULT_SUBSCRIPTION_PERIOD", subscriptionPeriod)
 	unsetTestEnv(t, "CHATGPT2API_REGISTRATION_ENABLED")
-	t.Setenv("STORAGE_BACKEND", "json")
+	t.Setenv("STORAGE_BACKEND", "sqlite")
 	t.Setenv("DATABASE_URL", "")
 	app, err := NewApp()
 	if err != nil {
@@ -2793,6 +3920,77 @@ func newTestApp(t *testing.T) *App {
 		return map[string]any{"object": "list", "data": []map[string]any{}}, nil
 	}
 	return app
+}
+
+func installHTTPTestImageStream(t *testing.T, app *App) {
+	t.Helper()
+	installHTTPTestImageStreamFunc(t, app, func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		return httpTestImageOutputStream(request, index)
+	})
+}
+
+func installHTTPTestImageStreamFunc(t *testing.T, app *App, fn func(context.Context, *backend.Client, protocol.ConversationRequest, int, int) (<-chan protocol.ImageOutput, <-chan error)) {
+	t.Helper()
+	app.engine.ImageTokenProvider = func(context.Context) (string, error) {
+		return "test-token", nil
+	}
+	app.engine.ImageClientFactory = func(string) *backend.Client {
+		return nil
+	}
+	app.engine.StreamImageOutputsFunc = fn
+}
+
+func httpTestImageOutputStream(request protocol.ConversationRequest, index int) (<-chan protocol.ImageOutput, <-chan error) {
+	out := make(chan protocol.ImageOutput, 1)
+	errCh := make(chan error, 1)
+	out <- protocol.ImageOutput{
+		Kind:    "result",
+		Model:   request.Model,
+		Index:   index,
+		Total:   request.N,
+		Created: int64(index),
+		Data: []map[string]any{{
+			"url":      fmt.Sprintf("https://example.test/%d.png", index),
+			"b64_json": fmt.Sprintf("image-%d", index),
+		}},
+	}
+	close(out)
+	errCh <- nil
+	close(errCh)
+	return out, errCh
+}
+
+func httpTestMessageOnlyImageOutputStream(request protocol.ConversationRequest, index int) (<-chan protocol.ImageOutput, <-chan error) {
+	out := make(chan protocol.ImageOutput, 1)
+	errCh := make(chan error, 1)
+	out <- protocol.ImageOutput{
+		Kind:    "message",
+		Model:   request.Model,
+		Index:   index,
+		Total:   request.N,
+		Created: int64(index),
+		Text:    "text only",
+	}
+	close(out)
+	errCh <- nil
+	close(errCh)
+	return out, errCh
+}
+
+func profileBillingState(t *testing.T, app *App, rawKey string) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("profile status = %d body = %s", res.Code, res.Body.String())
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("profile json: %v", err)
+	}
+	return util.StringMap(profile["billing"])
 }
 
 func unsetTestEnv(t *testing.T, key string) {

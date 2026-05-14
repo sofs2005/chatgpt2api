@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,7 +50,6 @@ var (
 
 type RegisterService struct {
 	mu          sync.Mutex
-	path        string
 	store       storage.JSONDocumentBackend
 	docName     string
 	accounts    *AccountService
@@ -84,9 +82,8 @@ type registerSentinelTokenGenerator struct {
 	sid       string
 }
 
-func NewRegisterService(dataDir string, accounts *AccountService, backend ...storage.Backend) *RegisterService {
+func NewRegisterService(accounts *AccountService, backend ...storage.Backend) *RegisterService {
 	s := &RegisterService{
-		path:        filepath.Join(dataDir, "register.json"),
 		store:       firstJSONDocumentStore(backend),
 		docName:     "register.json",
 		accounts:    accounts,
@@ -1101,7 +1098,7 @@ func normalizeRegisterMailConfig(raw map[string]any) map[string]any {
 }
 
 func (s *RegisterService) load() map[string]any {
-	raw, ok := loadStoredJSON(s.store, s.docName, s.path).(map[string]any)
+	raw, ok := loadStoredJSON(s.store, s.docName).(map[string]any)
 	if !ok {
 		return normalizeRegisterConfig(nil)
 	}
@@ -1109,7 +1106,7 @@ func (s *RegisterService) load() map[string]any {
 }
 
 func (s *RegisterService) saveLocked() {
-	_ = saveStoredJSON(s.store, s.docName, s.path, s.config)
+	_ = saveStoredJSON(s.store, s.docName, s.config)
 }
 
 func (s *RegisterService) snapshotLocked() map[string]any {

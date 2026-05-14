@@ -2,6 +2,8 @@
 
 import localforage from "localforage";
 
+import type { BillingState } from "@/lib/api";
+
 export type AuthRole = "admin" | "user";
 
 export type AuthMenuItem = {
@@ -22,6 +24,8 @@ export type StoredAuthSession = {
   name: string;
   provider?: string;
   creationConcurrentLimit: number;
+  creationRpmLimit: number;
+  billing?: BillingState | null;
   menuPaths: string[];
   apiPermissions: string[];
   menus: AuthMenuItem[];
@@ -85,6 +89,7 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
   const key = String(candidate.key || fallbackKey || "").trim();
   const role = candidate.role === "admin" || candidate.role === "user" ? candidate.role : null;
   const creationConcurrentLimit = Number(candidate.creationConcurrentLimit);
+  const creationRpmLimit = Number(candidate.creationRpmLimit ?? 0);
   if (!key || !role || !Number.isFinite(creationConcurrentLimit) || creationConcurrentLimit < 0) {
     return null;
   }
@@ -98,9 +103,27 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
     name: String(candidate.name || "").trim(),
     provider: String(candidate.provider || "").trim(),
     creationConcurrentLimit,
+    creationRpmLimit: Number.isFinite(creationRpmLimit) && creationRpmLimit > 0 ? creationRpmLimit : 0,
+    billing: normalizeBillingState(candidate.billing),
     menuPaths: normalizeStringList(candidate.menuPaths),
     apiPermissions: normalizeStringList(candidate.apiPermissions),
     menus: normalizeMenus(candidate.menus),
+  };
+}
+
+function normalizeBillingState(value: unknown): BillingState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const item = value as BillingState;
+  if (item.type !== "standard" && item.type !== "subscription") {
+    return null;
+  }
+  return {
+    ...item,
+    unit: "image",
+    unlimited: Boolean(item.unlimited),
+    available: Math.max(0, Number(item.available) || 0),
   };
 }
 

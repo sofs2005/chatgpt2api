@@ -23,6 +23,13 @@ type StreamResult struct {
 
 const ImageOutputSlotAcquirerPayloadKey = "image_output_slot_acquirer"
 
+// ImageOutputChargePayloadKey names the per-image-output billing charge hook
+// carried through the request body. The value must be an ImageOutputCharger
+// (or a compatible func(index int) error). The hook runs before each image
+// is persisted to disk and can veto the save by returning an error; returning
+// a service.BillingLimitError propagates as the request-level error.
+const ImageOutputChargePayloadKey = "image_output_charge"
+
 const xmlToolRule = "Tool output adapter: when calling tools, output ONLY this XML and no prose/markdown:\n<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters><PARAM><![CDATA[value]]></PARAM></parameters></tool_call></tool_calls>"
 
 func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {
@@ -41,7 +48,7 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	outputCompression, hasOutputCompression := normalizedImageOutputCompression(body["output_compression"])
 	responseFormat := firstNonEmpty(util.Clean(body["response_format"]), "b64_json")
 	baseURL := util.Clean(body["base_url"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), MessageAsError: true, AcquireImageOutputSlot: imageOutputSlotAcquirer(body)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), MessageAsError: true, AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
@@ -83,6 +90,7 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		InputImageMask:         responseImageMask(body["input_image_mask"]),
 		MessageAsError:         true,
 		AcquireImageOutputSlot: imageOutputSlotAcquirer(body),
+		ChargeImageOutput:      imageOutputCharger(body),
 	}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
@@ -119,6 +127,17 @@ func imageOutputSlotAcquirer(body map[string]any) ImageOutputSlotAcquirer {
 		return acquire
 	case func(context.Context, int) (func(), error):
 		return acquire
+	default:
+		return nil
+	}
+}
+
+func imageOutputCharger(body map[string]any) ImageOutputCharger {
+	switch charge := body[ImageOutputChargePayloadKey].(type) {
+	case ImageOutputCharger:
+		return charge
+	case func(int) error:
+		return charge
 	default:
 		return nil
 	}
@@ -668,7 +687,7 @@ func (e *Engine) ImageChatResponse(ctx context.Context, body map[string]any) (ma
 		return nil, nil, err
 	}
 	size := util.Clean(body["size"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
@@ -694,7 +713,7 @@ func (e *Engine) ImageChatEvents(ctx context.Context, body map[string]any) (<-ch
 			return
 		}
 		size := util.Clean(body["size"])
-		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body)}
+		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 		if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 			request.PartialImages = &partialImages
 		}
@@ -978,6 +997,7 @@ func (e *Engine) ResponseEventsScoped(ctx context.Context, body map[string]any, 
 		return nil, nil, err
 	}
 	request.AcquireImageOutputSlot = imageOutputSlotAcquirer(body)
+	request.ChargeImageOutput = imageOutputCharger(body)
 	var currentImages []string
 	if inputImages := ExtractResponseImages(body["input"]); len(inputImages) > 0 {
 		currentImages = EncodeImages(inputImages)

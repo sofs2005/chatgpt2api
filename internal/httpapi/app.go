@@ -18,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"chatgpt2api/internal/config"
@@ -41,6 +42,7 @@ type App struct {
 	config     *config.Store
 	auth       *service.AuthService
 	accounts   *service.AccountService
+	billing    *service.BillingService
 	logs       *service.LogService
 	logger     *service.Logger
 	proxy      *service.ProxyService
@@ -68,7 +70,7 @@ func NewApp() (*App, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	logs := service.NewLogService(cfg.DataDir, storageBackend)
+	logs := service.NewLogService(storageBackend)
 	logger, err := service.NewLogger(cfg.DataDir, cfg.LogLevels)
 	if err != nil {
 		cancel()
@@ -77,6 +79,10 @@ func NewApp() (*App, error) {
 	proxy := service.NewProxyService(cfg)
 	accounts := service.NewAccountService(storageBackend, cfg, proxy, logs)
 	auth := service.NewAuthService(storageBackend)
+	billing := service.NewBillingService(storageBackend, cfg)
+	auth.SetUserCreatedHook(func(userID string) {
+		billing.InitializeUserDefaults(userID)
+	})
 	bootstrap, err := auth.EnsureBootstrapAdmin(cfg.AdminUsername(), cfg.AdminPassword())
 	if err != nil {
 		cancel()
@@ -88,11 +94,11 @@ func NewApp() (*App, error) {
 	}
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger}
-	app := &App{config: cfg, auth: auth, accounts: accounts, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), prompts: service.NewPromptFavoriteService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), cancel: cancel}
 	app.cpaImport = service.NewCPAImportService(app.cpa, accounts, proxy)
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
-	app.register = service.NewRegisterService(cfg.DataDir, accounts, storageBackend)
-	app.tasks = service.NewStoredImageTaskService(filepath.Join(cfg.DataDir, "image_tasks.json"), storageBackend,
+	app.register = service.NewRegisterService(accounts, storageBackend)
+	app.tasks = service.NewStoredImageTaskService(storageBackend,
 		func(ctx context.Context, identity service.Identity, payload map[string]any) (map[string]any, error) {
 			return app.runLoggedImageTask(ctx, identity, payload, "/api/creation-tasks/image-generations", "文生图", func(ctx context.Context, payload map[string]any) (map[string]any, error) {
 				result, _, err := engine.HandleImageGenerations(ctx, payload)
@@ -113,12 +119,16 @@ func NewApp() (*App, error) {
 		cfg.UserDefaultConcurrentLimit,
 		cfg.UserDefaultRPMLimit,
 	)
+	app.tasks.SetBillingService(billing)
 	app.tasks.SetTaskTimeoutGetter(func() time.Duration {
 		return time.Duration(app.config.ImageTaskTimeoutSeconds()) * time.Second
 	})
 	accounts.StartLimitedWatcher(ctx, time.Duration(cfg.RefreshAccountIntervalMinute())*time.Minute)
 	logs.StartRetentionCleaner(ctx, cfg.LogRetentionDays, 24*time.Hour, logger)
-	cfg.CleanupOldImages()
+	_, _ = app.images.CleanupStorage(service.ImageStorageCleanupOptions{
+		RetentionDays: cfg.ImageRetentionDays(),
+		MaxBytes:      cfg.ImageStorageLimitBytes(),
+	})
 	return app, nil
 }
 
@@ -139,6 +149,13 @@ func (a *App) Close() {
 	if a.logger != nil {
 		_ = a.logger.Close()
 	}
+	if a.config != nil {
+		if backend, err := a.config.StorageBackend(); err == nil {
+			if closer, ok := backend.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}
+	}
 }
 
 func (a *App) Logger() *service.Logger {
@@ -151,7 +168,7 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.engine.ListModels(r.Context())
-	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate, service.BillingReference{})
 }
 
 func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -174,8 +191,14 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/images/generations", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, service.BillingReference{})
+		return
+	}
+	billingRef := a.protocolBillingReference(identity, "/v1/images/generations", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, billingRef, body)
 }
 
 func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
@@ -200,14 +223,21 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
 	a.attachCreationTaskLimiter(body, identity)
+	body["images"] = images
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/images/edits", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, service.BillingReference{})
+		return
+	}
+	billingRef := a.protocolBillingReference(identity, "/v1/images/edits", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, billingRef, body)
 }
 
 func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -224,8 +254,14 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/chat/completions", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, service.BillingReference{})
+		return
+	}
+	billingRef := a.protocolBillingReference(identity, "/v1/chat/completions", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, billingRef)
 }
 
 func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
@@ -242,8 +278,14 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	if err := a.checkProtocolBilling(identity, protocolBillableUnits("/v1/responses", body)); err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, service.BillingReference{})
+		return
+	}
+	billingRef := a.protocolBillingReference(identity, "/v1/responses", model)
+	a.attachProtocolBillingCharger(body, identity, billingRef)
 	result, stream, err := a.engine.HandleResponsesScoped(r.Context(), body, identityScope(identity))
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, billingRef)
 }
 
 func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -262,10 +304,10 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleMessages(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})
 }
 
-func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string) {
+func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, billingRef service.BillingReference, imagePayloads ...map[string]any) {
 	start := time.Now()
 	requestCapture := requestAuditCapture(r.Context())
 	if err != nil {
@@ -276,7 +318,7 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 	}
 	if stream == nil {
 		urls := collectURLs(result)
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
 		util.WriteJSON(w, http.StatusOK, result)
@@ -297,14 +339,14 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 			}
 		}
 		if err := <-stream.Err; err != nil {
-			a.recordGeneratedImages(identity, urls, visibility)
+			a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 			a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 			markRequestBusinessLogged(r)
 			fmt.Fprintf(w, "event: error\n")
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
 			return
 		}
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
 		return
@@ -322,12 +364,12 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		}
 	}
 	if err := <-stream.Err; err != nil {
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
 		markRequestBusinessLogged(r)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
-		a.recordGeneratedImages(identity, urls, visibility)
+		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
 		markRequestBusinessLogged(r)
 	}
@@ -338,6 +380,10 @@ func protocolErrorHTTPStatus(err error) int {
 	var httpErr protocol.HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.Status
+	}
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		return http.StatusTooManyRequests
 	}
 	var imageErr *protocol.ImageGenerationError
 	if errors.As(err, &imageErr) {
@@ -354,6 +400,11 @@ func (a *App) writeProtocolError(w http.ResponseWriter, err error) {
 	var httpErr protocol.HTTPError
 	if errors.As(err, &httpErr) {
 		util.WriteError(w, httpErr.Status, httpErr.Message)
+		return
+	}
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		util.WriteJSON(w, http.StatusTooManyRequests, billingErr.OpenAIError())
 		return
 	}
 	var imageErr *protocol.ImageGenerationError
@@ -397,7 +448,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleAccountRegister(w http.ResponseWriter, r *http.Request) {
 	if !a.config.RegistrationEnabled() {
-		util.WriteError(w, http.StatusForbidden, "registration is disabled")
+		util.WriteError(w, http.StatusForbidden, "已关闭注册通道")
 		return
 	}
 	body, err := readJSONMap(r)
@@ -438,6 +489,8 @@ func (a *App) writeLoginResponse(w http.ResponseWriter, identity service.Identit
 		"credential_id":             identity.CredentialID,
 		"credential_name":           identity.CredentialName,
 		"creation_concurrent_limit": a.identityCreationConcurrentLimit(identity),
+		"creation_rpm_limit":        a.identityCreationRPMLimit(identity),
+		"billing":                   a.identityBillingState(identity),
 		"menu_paths":                permissions.MenuPaths,
 		"api_permissions":           permissions.APIPermissions,
 		"menus":                     service.FilterMenuPermissions(permissions.MenuPaths),
@@ -453,6 +506,31 @@ func (a *App) identityCreationConcurrentLimit(identity service.Identity) int {
 		return 0
 	}
 	return a.config.UserDefaultConcurrentLimit()
+}
+
+func (a *App) identityCreationRPMLimit(identity service.Identity) int {
+	if identity.Role != service.AuthRoleUser {
+		return 0
+	}
+	return a.config.UserDefaultRPMLimit()
+}
+
+func (a *App) identityBillingState(identity service.Identity) map[string]any {
+	if identity.Role != service.AuthRoleUser {
+		return map[string]any{
+			"type":         service.BillingTypeStandard,
+			"unit":         service.BillingUnitImage,
+			"unlimited":    true,
+			"available":    0,
+			"standard":     nil,
+			"subscription": nil,
+			"limit_state":  "unlimited",
+		}
+	}
+	if a == nil || a.billing == nil {
+		return nil
+	}
+	return a.billing.Get(identityScope(identity))
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -718,11 +796,16 @@ func (a *App) handleImageVisibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	visibility := util.Clean(body["visibility"])
+	sharePromptParams := util.ToBool(body["share_prompt_parameters"])
+	shareReferences := sharePromptParams && util.ToBool(body["share_reference_images"])
 	scope := service.ImageAccessScope{OwnerID: identityScope(identity)}
 	if identity.Role == service.AuthRoleAdmin {
 		scope = service.ImageAccessScope{All: true}
 	}
-	item, err := a.images.UpdateImageVisibility(path, visibility, scope)
+	item, err := a.images.UpdateImageVisibility(path, visibility, scope, service.ImageVisibilityUpdateOptions{
+		SharePromptParams: sharePromptParams,
+		ShareReferences:   shareReferences,
+	})
 	if err != nil {
 		status := http.StatusBadRequest
 		if err.Error() == "image not found" {
@@ -748,6 +831,42 @@ func (a *App) handleImageFile(w http.ResponseWriter, r *http.Request) {
 	ref, ok := a.authorizeImageFileRequest(w, r, rel)
 	if !ok {
 		return
+	}
+	http.ServeFile(w, r, ref.Path)
+}
+
+func (a *App) handleImageReferenceFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	rel, err := imageReferenceFileRequestPath(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ref, err := a.images.ImageReferenceFileAccess(rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if ref.Visibility == service.ImageVisibilityPublic && ref.Shared {
+		if ref.ContentType != "" {
+			w.Header().Set("Content-Type", ref.ContentType)
+		}
+		http.ServeFile(w, r, ref.Path)
+		return
+	}
+	identity, ok := a.imageRequestIdentity(w, r)
+	if !ok {
+		return
+	}
+	if identity.Role != service.AuthRoleAdmin && (ref.OwnerID == "" || ref.OwnerID != identityScope(identity)) {
+		http.NotFound(w, r)
+		return
+	}
+	if ref.ContentType != "" {
+		w.Header().Set("Content-Type", ref.ContentType)
 	}
 	http.ServeFile(w, r, ref.Path)
 }
@@ -817,6 +936,18 @@ func imageFileRequestPath(r *http.Request) (string, error) {
 	return rel, nil
 }
 
+func imageReferenceFileRequestPath(r *http.Request) (string, error) {
+	raw := strings.TrimPrefix(r.URL.EscapedPath(), "/image-references/")
+	if raw == "" || raw == r.URL.EscapedPath() {
+		return "", errors.New("invalid image path")
+	}
+	rel, err := url.PathUnescape(raw)
+	if err != nil {
+		return "", err
+	}
+	return rel, nil
+}
+
 func imageThumbnailRequestPath(r *http.Request) (string, error) {
 	raw := strings.TrimPrefix(r.URL.EscapedPath(), "/image-thumbnails/")
 	if raw == "" || raw == r.URL.EscapedPath() {
@@ -868,6 +999,62 @@ func (a *App) handleLogGovernance(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *App) handleImageStorageGovernance(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireIdentity(w, r, ""); !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		util.WriteJSON(w, http.StatusOK, map[string]any{"governance": a.images.StorageGovernance()})
+	case http.MethodPost:
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		action := strings.TrimSpace(util.Clean(body["action"]))
+		options := service.ImageStorageCleanupOptions{
+			IncludePublic: util.ToBool(body["include_public"]),
+		}
+		switch action {
+		case "retention":
+			options.RetentionDays = util.ToInt(body["retention_days"], a.config.ImageRetentionDays())
+		case "quota":
+			options.MaxBytes = imageCleanupMaxBytes(body["max_bytes"], body["max_mb"], a.config.ImageStorageLimitBytes())
+		case "thumbnails":
+			options.ClearThumbnails = true
+		case "all":
+			options.RetentionDays = util.ToInt(body["retention_days"], a.config.ImageRetentionDays())
+			options.MaxBytes = imageCleanupMaxBytes(body["max_bytes"], body["max_mb"], a.config.ImageStorageLimitBytes())
+			options.ClearThumbnails = util.ToBool(body["clear_thumbnails"])
+		default:
+			util.WriteError(w, http.StatusBadRequest, "action must be retention, quota, thumbnails, or all")
+			return
+		}
+		result, err := a.images.CleanupStorage(options)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		util.WriteJSON(w, http.StatusOK, map[string]any{
+			"cleanup":    result,
+			"governance": a.images.StorageGovernance(),
+		})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func imageCleanupMaxBytes(rawBytes, rawMB any, fallback int64) int64 {
+	if n := int64(util.ToInt(rawBytes, 0)); n > 0 {
+		return n
+	}
+	if mb := util.ToInt(rawMB, 0); mb > 0 {
+		return int64(mb) * 1024 * 1024
+	}
+	return fallback
 }
 
 func (a *App) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
@@ -1088,22 +1275,25 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 		return nil, nil, err
 	}
 	body := map[string]any{
-		"client_task_id":     firstForm(r.MultipartForm, "client_task_id"),
-		"prompt":             firstForm(r.MultipartForm, "prompt"),
-		"model":              firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
-		"n":                  util.ToInt(firstForm(r.MultipartForm, "n"), 1),
-		"size":               firstForm(r.MultipartForm, "size"),
-		"quality":            firstForm(r.MultipartForm, "quality"),
-		"background":         firstForm(r.MultipartForm, "background"),
-		"moderation":         firstForm(r.MultipartForm, "moderation"),
-		"style":              firstForm(r.MultipartForm, "style"),
-		"partial_images":     firstForm(r.MultipartForm, "partial_images"),
-		"input_image_mask":   firstForm(r.MultipartForm, "input_image_mask"),
-		"output_format":      firstForm(r.MultipartForm, "output_format"),
-		"output_compression": firstForm(r.MultipartForm, "output_compression"),
-		"visibility":         firstForm(r.MultipartForm, "visibility"),
-		"response_format":    firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
-		"stream":             util.ToBool(firstForm(r.MultipartForm, "stream")),
+		"client_task_id":          firstForm(r.MultipartForm, "client_task_id"),
+		"prompt":                  firstForm(r.MultipartForm, "prompt"),
+		"model":                   firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
+		"n":                       util.ToInt(firstForm(r.MultipartForm, "n"), 1),
+		"size":                    firstForm(r.MultipartForm, "size"),
+		"image_resolution":        firstForm(r.MultipartForm, "image_resolution"),
+		"quality":                 firstForm(r.MultipartForm, "quality"),
+		"background":              firstForm(r.MultipartForm, "background"),
+		"moderation":              firstForm(r.MultipartForm, "moderation"),
+		"style":                   firstForm(r.MultipartForm, "style"),
+		"partial_images":          firstForm(r.MultipartForm, "partial_images"),
+		"input_image_mask":        firstForm(r.MultipartForm, "input_image_mask"),
+		"output_format":           firstForm(r.MultipartForm, "output_format"),
+		"output_compression":      firstForm(r.MultipartForm, "output_compression"),
+		"share_prompt_parameters": firstForm(r.MultipartForm, "share_prompt_parameters"),
+		"share_reference_images":  firstForm(r.MultipartForm, "share_reference_images"),
+		"visibility":              firstForm(r.MultipartForm, "visibility"),
+		"response_format":         firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
+		"stream":                  util.ToBool(firstForm(r.MultipartForm, "stream")),
 	}
 	if rawMessages := strings.TrimSpace(firstForm(r.MultipartForm, "messages")); rawMessages != "" {
 		var messages any
@@ -1162,6 +1352,10 @@ func jsonString(v any) string {
 }
 
 func openAIErrorForStream(err error) map[string]any {
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		return billingErr.OpenAIError()
+	}
 	var imageErr *protocol.ImageGenerationError
 	if errors.As(err, &imageErr) {
 		return imageErr.OpenAIError()
@@ -1343,6 +1537,15 @@ func (a *App) recordGeneratedImages(identity service.Identity, urls []string, vi
 	}
 	ownerID := identityScope(identity)
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility)
+	a.cleanupImageStorage()
+}
+
+func (a *App) recordProtocolGeneratedImages(identity service.Identity, urls []string, visibility string, payloads ...map[string]any) {
+	if len(payloads) > 0 && payloads[0] != nil {
+		a.recordGeneratedImagesForPayload(identity, urls, visibility, payloads[0])
+		return
+	}
+	a.recordGeneratedImages(identity, urls, visibility)
 }
 
 func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []string, visibility string, payload map[string]any) {
@@ -1350,11 +1553,136 @@ func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []
 		return
 	}
 	ownerID := identityScope(identity)
+	outputCompression, hasOutputCompression := imageOutputCompressionFromBody(payload["output_compression"])
+	var outputCompressionPtr *int
+	if hasOutputCompression {
+		outputCompressionPtr = &outputCompression
+	}
+	var partialImagesPtr *int
+	if partialImages := util.ToInt(payload["partial_images"], 0); partialImages > 0 {
+		partialImagesPtr = &partialImages
+	}
+	sharePromptParams := util.ToBool(payload["share_prompt_parameters"])
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility, service.GeneratedImageMetadata{
-		ResolutionPreset: util.Clean(payload["image_resolution"]),
-		RequestedSize:    util.Clean(payload["size"]),
-		OutputFormat:     service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
+		Prompt:            util.Clean(payload["prompt"]),
+		Model:             firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto),
+		Quality:           util.Clean(payload["quality"]),
+		ResolutionPreset:  util.Clean(payload["image_resolution"]),
+		RequestedSize:     util.Clean(payload["size"]),
+		OutputFormat:      service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
+		OutputCompression: outputCompressionPtr,
+		Background:        util.Clean(payload["background"]),
+		Moderation:        util.Clean(payload["moderation"]),
+		Style:             util.Clean(payload["style"]),
+		PartialImages:     partialImagesPtr,
+		InputImageMask:    util.Clean(payload["input_image_mask"]),
+		ReferenceImages:   imageReferenceMetadataFromPayload(payload),
+		SharePromptParams: sharePromptParams,
+		ShareReferences:   sharePromptParams && util.ToBool(payload["share_reference_images"]),
 	})
+	a.cleanupImageStorage()
+}
+
+func (a *App) cleanupImageStorage() {
+	if a == nil || a.images == nil || a.config == nil {
+		return
+	}
+	_, _ = a.images.CleanupStorage(service.ImageStorageCleanupOptions{
+		RetentionDays: a.config.ImageRetentionDays(),
+		MaxBytes:      a.config.ImageStorageLimitBytes(),
+	})
+}
+
+func imageReferenceMetadataFromPayload(payload map[string]any) []service.GeneratedImageReference {
+	if payload == nil {
+		return nil
+	}
+	images := uploadedImagesFromPayload(payload["images"])
+	if len(images) == 0 {
+		images = protocol.ExtractChatContextImages(payload)
+	}
+	if len(images) == 0 {
+		return nil
+	}
+	refs := make([]service.GeneratedImageReference, 0, len(images))
+	for _, image := range images {
+		if len(image.Data) == 0 {
+			continue
+		}
+		refs = append(refs, service.GeneratedImageReference{
+			Filename:    image.Filename,
+			ContentType: image.ContentType,
+			Data:        append([]byte(nil), image.Data...),
+		})
+	}
+	return refs
+}
+
+func uploadedImagesFromPayload(value any) []protocol.UploadedImage {
+	switch images := value.(type) {
+	case []protocol.UploadedImage:
+		return images
+	case protocol.UploadedImage:
+		return []protocol.UploadedImage{images}
+	default:
+		return nil
+	}
+}
+
+func (a *App) checkProtocolBilling(identity service.Identity, amount int) error {
+	if amount <= 0 || a == nil || a.billing == nil {
+		return nil
+	}
+	return a.billing.CheckAvailable(identity, amount)
+}
+
+func (a *App) protocolBillingReference(identity service.Identity, endpoint, model string) service.BillingReference {
+	return service.BillingReference{
+		Endpoint:       endpoint,
+		Model:          model,
+		RequestID:      "req_" + util.NewHex(18),
+		CredentialID:   identity.CredentialID,
+		CredentialName: identity.CredentialName,
+	}
+}
+
+func (a *App) chargeProtocolBilling(identity service.Identity, consumed int, ref service.BillingReference) error {
+	if a == nil || a.billing == nil || consumed <= 0 {
+		return nil
+	}
+	return a.billing.Charge(identity, consumed, ref)
+}
+
+// attachProtocolBillingCharger sets the per-image-output inline charge hook on
+// the request body. The hook atomically deducts 1 billing unit before each
+// image is persisted to disk, preventing gallery writes when balance/quota is
+// insufficient. The chargeIndex counter ensures unique charge keys per output.
+func (a *App) attachProtocolBillingCharger(body map[string]any, identity service.Identity, billingRef service.BillingReference) {
+	if a == nil || a.billing == nil || body == nil {
+		return
+	}
+	if identity.Role != service.AuthRoleUser {
+		return
+	}
+	var mu sync.Mutex
+	chargeIndex := 0
+	body[protocol.ImageOutputChargePayloadKey] = func(index int) error {
+		mu.Lock()
+		idx := chargeIndex
+		chargeIndex++
+		mu.Unlock()
+		ref := protocolChargeReference(billingRef, "inline", idx)
+		return a.billing.Charge(identity, 1, ref)
+	}
+}
+
+func protocolChargeReference(ref service.BillingReference, scope string, index int) service.BillingReference {
+	if strings.TrimSpace(ref.ChargeKey) == "" && ref.Endpoint != "" {
+		keyID := firstNonEmpty(ref.RequestID, ref.TaskID, util.NewHex(12))
+		ref.ChargeKey = strings.Join([]string{"protocol", ref.Endpoint, keyID, scope, fmt.Sprint(index)}, ":")
+	}
+	ref.OutputIndex = index
+	return ref
 }
 
 func (a *App) decorateImageList(payload map[string]any) {
@@ -1516,6 +1844,139 @@ func collectURLs(v any) []string {
 	default:
 		return nil
 	}
+}
+
+func protocolBillableUnits(endpoint string, body map[string]any) int {
+	switch endpoint {
+	case "/v1/images/generations", "/v1/images/edits":
+		return normalizedProtocolImageCount(body["n"])
+	case "/v1/chat/completions":
+		if protocol.IsImageChatRequest(body) {
+			return normalizedProtocolImageCount(body["n"])
+		}
+	case "/v1/responses":
+		if protocol.HasResponseImageGenerationTool(body) {
+			return normalizedProtocolImageCount(body["n"])
+		}
+	}
+	return 0
+}
+
+func normalizedProtocolImageCount(value any) int {
+	n := util.ToInt(value, 1)
+	if n < 1 {
+		return 1
+	}
+	if n > 4 {
+		return 4
+	}
+	return n
+}
+
+func billableProtocolOutputCount(endpoint string, result map[string]any) int {
+	if len(result) == 0 {
+		return 0
+	}
+	switch endpoint {
+	case "/v1/images/generations", "/v1/images/edits":
+		return billableImageDataCount(result["data"])
+	case "/v1/chat/completions":
+		return countChatCompletionImages(result)
+	case "/v1/responses":
+		return countResponseOutputImages(result)
+	default:
+		return billableURLCount(collectURLs(result))
+	}
+}
+
+func billableProtocolStreamItemCount(endpoint string, item map[string]any) int {
+	if len(item) == 0 {
+		return 0
+	}
+	switch endpoint {
+	case "/v1/images/generations", "/v1/images/edits":
+		if util.Clean(item["object"]) == "image.generation.result" {
+			return billableImageDataCount(item["data"])
+		}
+	case "/v1/chat/completions":
+		for _, choice := range util.AsMapSlice(item["choices"]) {
+			delta := util.StringMap(choice["delta"])
+			if len(delta) == 0 {
+				delta = util.StringMap(choice["message"])
+			}
+			if count := countImagesInChatContent(delta["content"]); count > 0 {
+				return count
+			}
+		}
+	case "/v1/responses":
+		eventType := util.Clean(item["type"])
+		switch eventType {
+		case "response.output_item.done", "response.output_item.added":
+			if count := countResponseOutputItemImages(util.StringMap(item["item"])); count > 0 {
+				return count
+			}
+		}
+	}
+	return 0
+}
+
+func billableImageDataCount(value any) int {
+	count := 0
+	for _, item := range util.AsMapSlice(value) {
+		if util.Clean(item["url"]) != "" || util.Clean(item["b64_json"]) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countChatCompletionImages(result map[string]any) int {
+	count := 0
+	for _, choice := range util.AsMapSlice(result["choices"]) {
+		message := util.StringMap(choice["message"])
+		count += countImagesInChatContent(message["content"])
+	}
+	return count
+}
+
+func countImagesInChatContent(content any) int {
+	switch value := content.(type) {
+	case string:
+		return strings.Count(value, "![")
+	case []any:
+		count := 0
+		for _, raw := range value {
+			item := util.StringMap(raw)
+			if util.Clean(item["type"]) == "image_url" || util.Clean(item["image_url"]) != "" {
+				count++
+			}
+			if util.Clean(item["type"]) == "text" {
+				count += strings.Count(util.Clean(item["text"]), "![")
+			}
+		}
+		return count
+	default:
+		return 0
+	}
+}
+
+func countResponseOutputImages(result map[string]any) int {
+	count := 0
+	for _, item := range util.AsMapSlice(result["output"]) {
+		count += countResponseOutputItemImages(item)
+	}
+	return count
+}
+
+func countResponseOutputItemImages(item map[string]any) int {
+	if util.Clean(item["type"]) == "image_generation_call" && util.Clean(item["result"]) != "" {
+		return 1
+	}
+	return 0
+}
+
+func billableURLCount(urls []string) int {
+	return len(dedupe(urls))
 }
 
 func dedupe(items []string) []string {

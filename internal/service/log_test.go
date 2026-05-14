@@ -2,26 +2,16 @@ package service
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestLogServiceUsesUnifiedLogsDirectory(t *testing.T) {
-	dir := t.TempDir()
-	logs := NewLogService(dir)
+func TestLogServiceStoresLogsInDatabase(t *testing.T) {
+	logs := NewLogService(newTestStorageBackend(t))
 
 	if err := logs.Add("新增账号", map[string]any{"module": "accounts", "operation_type": "新增", "added": 1}); err != nil {
 		t.Fatalf("Add() error = %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, "logs", "events.jsonl")); err != nil {
-		t.Fatalf("expected unified log file under data/logs: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "logs.jsonl")); !os.IsNotExist(err) {
-		t.Fatalf("root logs.jsonl should not be used, stat error = %v", err)
 	}
 
 	items := logs.List("", "", 10)
@@ -37,8 +27,7 @@ func TestLogServiceUsesUnifiedLogsDirectory(t *testing.T) {
 }
 
 func TestLogServiceSearchFiltersUnifiedLogs(t *testing.T) {
-	dir := t.TempDir()
-	logs := NewLogService(dir)
+	logs := NewLogService(newTestStorageBackend(t))
 
 	if err := logs.Add("新增账号", map[string]any{"module": "accounts", "operation_type": "新增", "added": 1}); err != nil {
 		t.Fatalf("Add(account event) error = %v", err)
@@ -127,22 +116,43 @@ func TestSanitizeLogValueMasksSessionCredentials(t *testing.T) {
 	}
 }
 
+func TestLogServiceUserUsageStatsForUsersFiltersResults(t *testing.T) {
+	logs := NewLogService(newTestStorageBackend(t))
+
+	if err := logs.Add("Alice 调用", map[string]any{
+		"key_id":   "alice-key",
+		"endpoint": "/v1/images/generations",
+		"status":   200,
+	}); err != nil {
+		t.Fatalf("Add(alice) error = %v", err)
+	}
+	if err := logs.Add("Bob 调用", map[string]any{
+		"key_id":   "bob-key",
+		"endpoint": "/v1/images/generations",
+		"status":   200,
+	}); err != nil {
+		t.Fatalf("Add(bob) error = %v", err)
+	}
+
+	usage := logs.UserUsageStatsForUsers(1, []string{"alice-key"})
+	if usage["alice-key"] == nil {
+		t.Fatalf("missing requested user usage: %#v", usage)
+	}
+	if usage["bob-key"] != nil {
+		t.Fatalf("returned unrequested user usage: %#v", usage)
+	}
+}
+
 func TestLogServiceCleansOldLogs(t *testing.T) {
-	dir := t.TempDir()
-	logs := NewLogService(dir)
+	logs := NewLogService(newTestStorageBackend(t))
 
-	if err := logs.Add("旧调用", map[string]any{"status": "success"}); err != nil {
-		t.Fatalf("Add(old) error = %v", err)
-	}
-	if err := logs.Add("新日志", map[string]any{"status": 200}); err != nil {
-		t.Fatalf("Add(new) error = %v", err)
-	}
-
-	path := filepath.Join(dir, "logs", "events.jsonl")
-	data := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧调用","detail":{"status":"success"}}` + "\n" +
-		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("rewrite logs: %v", err)
+	for _, item := range []map[string]any{
+		{"time": "2000-01-01 00:00:00", "type": "event", "summary": "旧调用", "detail": map[string]any{"status": "success"}},
+		{"time": time.Now().Format("2006-01-02 15:04:05"), "type": "event", "summary": "新日志", "detail": map[string]any{"status": 200}},
+	} {
+		if err := logs.store.AppendLog(item); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
 	}
 
 	result, err := logs.CleanupOlderThan(1)
@@ -159,13 +169,14 @@ func TestLogServiceCleansOldLogs(t *testing.T) {
 }
 
 func TestLogServiceRetentionCleanerRunsImmediately(t *testing.T) {
-	dir := t.TempDir()
-	logs := NewLogService(dir)
-	path := filepath.Join(dir, "logs", "events.jsonl")
-	data := []byte(`{"time":"2000-01-01 00:00:00","type":"event","summary":"旧调用","detail":{"status":"success"}}` + "\n" +
-		`{"time":"` + time.Now().Format("2006-01-02 15:04:05") + `","type":"event","summary":"新日志","detail":{"status":200}}` + "\n")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write logs: %v", err)
+	logs := NewLogService(newTestStorageBackend(t))
+	for _, item := range []map[string]any{
+		{"time": "2000-01-01 00:00:00", "type": "event", "summary": "旧调用", "detail": map[string]any{"status": "success"}},
+		{"time": time.Now().Format("2006-01-02 15:04:05"), "type": "event", "summary": "新日志", "detail": map[string]any{"status": 200}},
+	} {
+		if err := logs.store.AppendLog(item); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

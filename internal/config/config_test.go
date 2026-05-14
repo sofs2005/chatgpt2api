@@ -17,6 +17,7 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 	unsetEnv(t, "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT")
 	unsetEnv(t, "CHATGPT2API_USER_DEFAULT_RPM_LIMIT")
 	unsetEnv(t, "CHATGPT2API_IMAGE_RETENTION_DAYS")
+	unsetEnv(t, "CHATGPT2API_IMAGE_STORAGE_LIMIT_MB")
 	unsetEnv(t, "CHATGPT2API_LOG_RETENTION_DAYS")
 	unsetEnv(t, "CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS")
 	unsetEnv(t, "CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS")
@@ -38,6 +39,7 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 		"user_default_concurrent_limit":   2,
 		"user_default_rpm_limit":          30,
 		"image_retention_days":            14,
+		"image_storage_limit_mb":          512,
 		"log_retention_days":              21,
 		"registration_enabled":            true,
 		"log_levels":                      []any{"debug", "error"},
@@ -66,6 +68,7 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT=2",
 		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT=30",
 		"CHATGPT2API_IMAGE_RETENTION_DAYS=14",
+		"CHATGPT2API_IMAGE_STORAGE_LIMIT_MB=512",
 		"CHATGPT2API_LOG_RETENTION_DAYS=21",
 		"CHATGPT2API_REGISTRATION_ENABLED=true",
 		"CHATGPT2API_LOG_LEVELS=debug,error",
@@ -247,6 +250,7 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT=2",
 		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT=30",
 		"CHATGPT2API_IMAGE_RETENTION_DAYS=30",
+		"CHATGPT2API_IMAGE_STORAGE_LIMIT_MB=2048",
 		"CHATGPT2API_LOG_RETENTION_DAYS=7",
 		"CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS=true",
 		"CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS=false",
@@ -264,6 +268,7 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	t.Setenv("CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT", "2")
 	t.Setenv("CHATGPT2API_USER_DEFAULT_RPM_LIMIT", "30")
 	t.Setenv("CHATGPT2API_IMAGE_RETENTION_DAYS", "30")
+	t.Setenv("CHATGPT2API_IMAGE_STORAGE_LIMIT_MB", "2048")
 	t.Setenv("CHATGPT2API_LOG_RETENTION_DAYS", "7")
 	t.Setenv("CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS", "true")
 	t.Setenv("CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS", "false")
@@ -281,6 +286,7 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"user_default_concurrent_limit":     3,
 		"user_default_rpm_limit":            45,
 		"image_retention_days":              12,
+		"image_storage_limit_mb":            1024,
 		"log_retention_days":                30,
 		"auto_remove_invalid_accounts":      false,
 		"auto_remove_rate_limited_accounts": true,
@@ -297,6 +303,10 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	assertConfigValue(t, got, "user_default_concurrent_limit", 3)
 	assertConfigValue(t, got, "user_default_rpm_limit", 45)
 	assertConfigValue(t, got, "image_retention_days", 12)
+	assertConfigValue(t, got, "image_storage_limit_mb", 1024)
+	if store.ImageStorageLimitBytes() != 1024*1024*1024 {
+		t.Fatalf("ImageStorageLimitBytes() = %d, want 1GiB", store.ImageStorageLimitBytes())
+	}
 	assertConfigValue(t, got, "log_retention_days", 30)
 	assertConfigValue(t, got, "auto_remove_invalid_accounts", false)
 	assertConfigValue(t, got, "auto_remove_rate_limited_accounts", true)
@@ -312,6 +322,7 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT":     "3",
 		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT":            "45",
 		"CHATGPT2API_IMAGE_RETENTION_DAYS":              "12",
+		"CHATGPT2API_IMAGE_STORAGE_LIMIT_MB":            "1024",
 		"CHATGPT2API_LOG_RETENTION_DAYS":                "30",
 		"CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS":      "false",
 		"CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS": "true",
@@ -323,28 +334,246 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	}
 }
 
-func TestStoreKeepsDifferentExternalEnvironmentOverride(t *testing.T) {
+func TestStoreEnvFileValueWinsOverStaleProcessEnvironment(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte(strings.Join([]string{
-		"CHATGPT2API_BASE_URL=https://file.example",
+		"CHATGPT2API_REGISTRATION_ENABLED=false",
 		"",
 	}, "\n")), 0o644); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
 	t.Setenv("CHATGPT2API_ROOT", root)
-	t.Setenv("CHATGPT2API_BASE_URL", "https://external.example")
+	t.Setenv("CHATGPT2API_REGISTRATION_ENABLED", "true")
 
 	store, err := NewStore()
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-	got, err := store.Update(map[string]any{"base_url": "https://saved.example"})
+	if store.RegistrationEnabled() {
+		t.Fatal("RegistrationEnabled() used stale process environment instead of .env")
+	}
+	got, err := store.Update(map[string]any{"registration_enabled": false})
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	assertConfigValue(t, got, "base_url", "https://external.example")
-	if gotEnv := os.Getenv("CHATGPT2API_BASE_URL"); gotEnv != "https://external.example" {
-		t.Fatalf("CHATGPT2API_BASE_URL = %q, want external override unchanged", gotEnv)
+	assertConfigValue(t, got, "registration_enabled", false)
+	if gotEnv := os.Getenv("CHATGPT2API_REGISTRATION_ENABLED"); gotEnv != "false" {
+		t.Fatalf("CHATGPT2API_REGISTRATION_ENABLED = %q, want saved false", gotEnv)
+	}
+}
+
+func TestStoreUpdateOverridesEnvOnlyRuntimeSetting(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	t.Setenv("CHATGPT2API_REGISTRATION_ENABLED", "true")
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	if !store.RegistrationEnabled() {
+		t.Fatal("RegistrationEnabled() should seed from env-only setting")
+	}
+	got, err := store.Update(map[string]any{"registration_enabled": false})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertConfigValue(t, got, "registration_enabled", false)
+	if store.RegistrationEnabled() {
+		t.Fatal("RegistrationEnabled() stayed enabled after saving false")
+	}
+	if gotEnv := os.Getenv("CHATGPT2API_REGISTRATION_ENABLED"); gotEnv != "false" {
+		t.Fatalf("CHATGPT2API_REGISTRATION_ENABLED = %q, want saved false", gotEnv)
+	}
+	envData, err := os.ReadFile(filepath.Join(root, ".env"))
+	if err != nil {
+		t.Fatalf("read .env: %v", err)
+	}
+	if !strings.Contains(string(envData), "CHATGPT2API_REGISTRATION_ENABLED=false") {
+		t.Fatalf(".env missing saved registration setting:\n%s", string(envData))
+	}
+}
+
+func TestStoreUpdateOverridesEnvOnlyRuntimeSettings(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetLinuxDoEnv(t)
+	for key, value := range map[string]string{
+		"CHATGPT2API_BASE_URL":                          "https://old.example/root",
+		"CHATGPT2API_PROXY":                             "http://127.0.0.1:8080",
+		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE":   "5",
+		"CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS":        "300",
+		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT":     "2",
+		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT":            "30",
+		"CHATGPT2API_DEFAULT_BILLING_TYPE":              "standard",
+		"CHATGPT2API_DEFAULT_STANDARD_BALANCE":          "1",
+		"CHATGPT2API_DEFAULT_SUBSCRIPTION_QUOTA":        "2",
+		"CHATGPT2API_DEFAULT_SUBSCRIPTION_PERIOD":       "monthly",
+		"CHATGPT2API_IMAGE_RETENTION_DAYS":              "30",
+		"CHATGPT2API_IMAGE_STORAGE_LIMIT_MB":            "2048",
+		"CHATGPT2API_LOG_RETENTION_DAYS":                "7",
+		"CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS":      "true",
+		"CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS": "false",
+		"CHATGPT2API_LOG_LEVELS":                        "warning,error",
+		"CHATGPT2API_REGISTRATION_ENABLED":              "true",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_URL":              "https://old.example/login.png",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_MODE":             "contain",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_ZOOM":             "1",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_X":       "50",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y":       "50",
+	} {
+		t.Setenv(key, value)
+	}
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	got, err := store.Update(map[string]any{
+		"base_url":                          "https://new.example/root/",
+		"proxy":                             "http://127.0.0.1:9090",
+		"refresh_account_interval_minute":   9,
+		"image_task_timeout_seconds":        480,
+		"user_default_concurrent_limit":     3,
+		"user_default_rpm_limit":            45,
+		"default_billing_type":              "subscription",
+		"default_standard_balance":          11,
+		"default_subscription_quota":        22,
+		"default_subscription_period":       "weekly",
+		"image_retention_days":              12,
+		"image_storage_limit_mb":            1024,
+		"log_retention_days":                30,
+		"auto_remove_invalid_accounts":      false,
+		"auto_remove_rate_limited_accounts": true,
+		"log_levels":                        []any{"debug", "info"},
+		"registration_enabled":              false,
+		"login_page_image_url":              "https://new.example/login.png",
+		"login_page_image_mode":             "cover",
+		"login_page_image_zoom":             2,
+		"login_page_image_position_x":       25,
+		"login_page_image_position_y":       75,
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	assertConfigValue(t, got, "base_url", "https://new.example/root")
+	assertConfigValue(t, got, "proxy", "http://127.0.0.1:9090")
+	assertConfigValue(t, got, "refresh_account_interval_minute", 9)
+	assertConfigValue(t, got, "image_task_timeout_seconds", 480)
+	assertConfigValue(t, got, "user_default_concurrent_limit", 3)
+	assertConfigValue(t, got, "user_default_rpm_limit", 45)
+	assertConfigValue(t, got, "default_billing_type", "subscription")
+	assertConfigValue(t, got, "default_standard_balance", 11)
+	assertConfigValue(t, got, "default_subscription_quota", 22)
+	assertConfigValue(t, got, "default_subscription_period", "weekly")
+	assertConfigValue(t, got, "image_retention_days", 12)
+	assertConfigValue(t, got, "image_storage_limit_mb", 1024)
+	assertConfigValue(t, got, "log_retention_days", 30)
+	assertConfigValue(t, got, "auto_remove_invalid_accounts", false)
+	assertConfigValue(t, got, "auto_remove_rate_limited_accounts", true)
+	assertConfigValue(t, got, "registration_enabled", false)
+	assertConfigValue(t, got, "login_page_image_url", "https://new.example/login.png")
+	assertConfigValue(t, got, "login_page_image_mode", "cover")
+	assertConfigValue(t, got, "login_page_image_zoom", float64(2))
+	assertConfigValue(t, got, "login_page_image_position_x", float64(25))
+	assertConfigValue(t, got, "login_page_image_position_y", float64(75))
+	if levels := strings.Join(store.LogLevels(), ","); levels != "debug,info" {
+		t.Fatalf("LogLevels() = %q, want debug,info", levels)
+	}
+
+	for key, want := range map[string]string{
+		"CHATGPT2API_BASE_URL":                          "https://new.example/root/",
+		"CHATGPT2API_PROXY":                             "http://127.0.0.1:9090",
+		"CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE":   "9",
+		"CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS":        "480",
+		"CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT":     "3",
+		"CHATGPT2API_USER_DEFAULT_RPM_LIMIT":            "45",
+		"CHATGPT2API_DEFAULT_BILLING_TYPE":              "subscription",
+		"CHATGPT2API_DEFAULT_STANDARD_BALANCE":          "11",
+		"CHATGPT2API_DEFAULT_SUBSCRIPTION_QUOTA":        "22",
+		"CHATGPT2API_DEFAULT_SUBSCRIPTION_PERIOD":       "weekly",
+		"CHATGPT2API_IMAGE_RETENTION_DAYS":              "12",
+		"CHATGPT2API_IMAGE_STORAGE_LIMIT_MB":            "1024",
+		"CHATGPT2API_LOG_RETENTION_DAYS":                "30",
+		"CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS":      "false",
+		"CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS": "true",
+		"CHATGPT2API_LOG_LEVELS":                        "debug,info",
+		"CHATGPT2API_REGISTRATION_ENABLED":              "false",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_URL":              "https://new.example/login.png",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_MODE":             "cover",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_ZOOM":             "2",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_X":       "25",
+		"CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y":       "75",
+	} {
+		if gotEnv := os.Getenv(key); gotEnv != want {
+			t.Fatalf("%s = %q, want %q", key, gotEnv, want)
+		}
+	}
+}
+
+func TestStoreUpdateOverridesLinuxDoEnvOnlyRuntimeSettings(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	t.Setenv("CHATGPT2API_BASE_URL", "https://old.example")
+	t.Setenv("CHATGPT2API_LINUXDO_ENABLED", "true")
+	t.Setenv("CHATGPT2API_LINUXDO_CLIENT_ID", "old-client")
+	t.Setenv("CHATGPT2API_LINUXDO_CLIENT_SECRET", "old-secret")
+	t.Setenv("CHATGPT2API_LINUXDO_REDIRECT_URL", "https://old.example/auth/linuxdo/oauth/callback")
+	t.Setenv("CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL", "/old/callback")
+	for _, key := range []string{
+		"CHATGPT2API_LINUXDO_AUTHORIZE_URL",
+		"CHATGPT2API_LINUXDO_TOKEN_URL",
+		"CHATGPT2API_LINUXDO_USERINFO_URL",
+		"CHATGPT2API_LINUXDO_SCOPES",
+		"CHATGPT2API_LINUXDO_TOKEN_AUTH_METHOD",
+		"CHATGPT2API_LINUXDO_USE_PKCE",
+		"CHATGPT2API_LINUXDO_USERINFO_EMAIL_PATH",
+		"CHATGPT2API_LINUXDO_USERINFO_ID_PATH",
+		"CHATGPT2API_LINUXDO_USERINFO_USERNAME_PATH",
+	} {
+		unsetEnv(t, key)
+	}
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	got, err := store.Update(map[string]any{
+		"base_url":                      "https://new.example",
+		"linuxdo_enabled":               false,
+		"linuxdo_client_id":             "new-client",
+		"linuxdo_client_secret":         "new-secret",
+		"linuxdo_redirect_url":          "https://new.example/auth/linuxdo/oauth/callback",
+		"linuxdo_frontend_redirect_url": "/auth/linuxdo/callback",
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertConfigValue(t, got, "linuxdo_enabled", false)
+	assertConfigValue(t, got, "linuxdo_client_id", "new-client")
+	assertConfigValue(t, got, "linuxdo_redirect_url", "https://new.example/auth/linuxdo/oauth/callback")
+	assertConfigValue(t, got, "linuxdo_frontend_redirect_url", "/auth/linuxdo/callback")
+	if got["linuxdo_client_secret_configured"] != true {
+		t.Fatalf("linuxdo_client_secret_configured = %#v, want true", got["linuxdo_client_secret_configured"])
+	}
+	linuxdo := store.LinuxDoOAuth()
+	if linuxdo.Enabled || linuxdo.ClientID != "new-client" || linuxdo.ClientSecret != "new-secret" ||
+		linuxdo.RedirectURL != "https://new.example/auth/linuxdo/oauth/callback" ||
+		linuxdo.FrontendRedirectURL != "/auth/linuxdo/callback" {
+		t.Fatalf("LinuxDoOAuth() = %#v", linuxdo)
+	}
+	for key, want := range map[string]string{
+		"CHATGPT2API_BASE_URL":                      "https://new.example",
+		"CHATGPT2API_LINUXDO_ENABLED":               "false",
+		"CHATGPT2API_LINUXDO_CLIENT_ID":             "new-client",
+		"CHATGPT2API_LINUXDO_CLIENT_SECRET":         "new-secret",
+		"CHATGPT2API_LINUXDO_REDIRECT_URL":          "https://new.example/auth/linuxdo/oauth/callback",
+		"CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL": "/auth/linuxdo/callback",
+	} {
+		if gotEnv := os.Getenv(key); gotEnv != want {
+			t.Fatalf("%s = %q, want %q", key, gotEnv, want)
+		}
 	}
 }
 

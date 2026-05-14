@@ -2,10 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Ban,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Gauge,
   KeyRound,
   LoaderCircle,
   Plus,
@@ -14,6 +18,7 @@ import {
   ShieldCheck,
   Trash2,
   UserRound,
+  UsersRound,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -22,6 +27,7 @@ import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -34,11 +40,21 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
+  createBillingAdjustment,
+  createBulkBillingAdjustment,
   createManagedUser,
   deleteManagedUser,
+  fetchBillingAdjustments,
+  fetchManagedUser,
   fetchManagedRoles,
   fetchManagedUsers,
   updateManagedUser,
+  type BillingAdjustment,
+  type BillingAdjustmentPayload,
+  type BillingPeriod,
+  type BillingType,
+  type BulkBillingAdjustmentResult,
+  type BulkBillingAdjustmentSummary,
   type CreateManagedUserPayload,
   type ManagedUser,
   type ManagedRole,
@@ -80,9 +96,77 @@ type CreateUserForm = {
 };
 
 type CreateUserErrors = Partial<Record<"username" | "password" | "confirmPassword", string>>;
+type BillingEditForm = {
+  billingType: BillingType;
+  unlimited: boolean;
+  standardBalance: string;
+  subscriptionQuotaLimit: string;
+  subscriptionPeriod: BillingPeriod;
+  adjustmentType: BillingAdjustmentType;
+  adjustmentAmount: string;
+  reason: string;
+};
+
+type BillingAdjustmentType =
+  | "increase_balance"
+  | "decrease_balance"
+  | "increase_quota"
+  | "decrease_quota"
+  | "reset_quota"
+  | "clear_quota_used";
+
+type BulkBillingForm = {
+  scope: "users" | "role";
+  roleId: string;
+  operation: "adjust" | "switch_type";
+  billingType: BillingType;
+  adjustmentType: BillingAdjustmentType;
+  amount: string;
+  subscriptionPeriod: BillingPeriod;
+  reason: string;
+};
+
+const standardBillingAdjustmentOptions: Array<{ value: BillingAdjustmentType; label: string }> = [
+  { value: "increase_balance", label: "增加余额" },
+  { value: "decrease_balance", label: "扣减余额" },
+];
+
+const subscriptionBillingAdjustmentOptions: Array<{ value: BillingAdjustmentType; label: string }> = [
+  { value: "increase_quota", label: "增加当期配额" },
+  { value: "decrease_quota", label: "扣减当期配额" },
+  { value: "reset_quota", label: "重置当前周期" },
+  { value: "clear_quota_used", label: "清零已用配额" },
+];
+
+function billingAdjustmentOptions(type: BillingType) {
+  return type === "subscription" ? subscriptionBillingAdjustmentOptions : standardBillingAdjustmentOptions;
+}
+
+function defaultBillingAdjustmentType(type: BillingType): BillingAdjustmentType {
+  return billingAdjustmentOptions(type)[0].value;
+}
+
+function normalizeBillingAdjustmentType(type: BillingType, value: string): BillingAdjustmentType {
+  const options = billingAdjustmentOptions(type);
+  const matched = options.find((item) => item.value === value);
+  return matched?.value || options[0].value;
+}
 
 const accountUsernamePattern = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
 const userPageSizeOptions = ["10", "20", "50", "100"];
+const billingAdjustmentHistoryLimit = 8;
+type UserSortField = "id" | "name" | "role_name" | "billing_available" | "call_count" | "last_used_at";
+type UserSortOrder = "asc" | "desc";
+
+function defaultUserSortOrder(field: UserSortField): UserSortOrder {
+  switch (field) {
+    case "name":
+    case "role_name":
+      return "asc";
+    default:
+      return "desc";
+  }
+}
 
 function createEmptyUserForm(roleId = ""): CreateUserForm {
   return {
@@ -126,14 +210,33 @@ function createUserPayload(values: CreateUserForm): CreateManagedUserPayload {
   };
 }
 
-function providerLabel(provider?: string) {
+function providerFilterLabel(provider?: string) {
   if (provider === "linuxdo") {
     return "Linuxdo";
   }
   if (provider === "local") {
-    return "本地";
+    return "账号/API Key";
   }
   return provider || "未知";
+}
+
+function userSourceLabel(user: Pick<ManagedUser, "provider" | "username" | "has_api_key" | "has_session">) {
+  if (user.provider === "linuxdo") {
+    return "Linuxdo";
+  }
+  if (user.provider === "local") {
+    if (user.username) {
+      return "账号用户";
+    }
+    if (user.has_api_key) {
+      return "API Key";
+    }
+    if (user.has_session) {
+      return "登录会话";
+    }
+    return "本地凭据";
+  }
+  return user.provider || "未知";
 }
 
 const linuxDoLevelColors: Record<string, string> = {
@@ -258,7 +361,7 @@ function UsageSparkline({ points }: { points?: ManagedUser["usage_curve"] }) {
   const label = `近 ${safePoints.length} 日调用曲线，今日 ${latestPoint.calls} 次，峰值 ${peakPoint.calls} 次`;
 
   return (
-    <div className="w-[230px] space-y-1.5" aria-label={label}>
+    <div className="w-[180px] space-y-1.5" aria-label={label}>
       <div className="h-16 overflow-hidden rounded-lg border border-border/70 bg-background">
         <svg viewBox={`0 0 ${width} ${height}`} role="img" className="h-full w-full">
           <title>{label}</title>
@@ -297,19 +400,94 @@ function roleLabel(user: ManagedUser, roles: ManagedRole[]) {
   return user.role_name || role?.name || "普通用户";
 }
 
+function billingTypeLabel(type?: string) {
+  return type === "subscription" ? "订阅配额" : "标准余额";
+}
+
+function billingPeriodLabel(period?: string) {
+  switch (period) {
+    case "daily":
+      return "每日";
+    case "weekly":
+      return "每周";
+    default:
+      return "每月";
+  }
+}
+
+function billingSummary(user: ManagedUser) {
+  const billing = user.billing;
+  if (!billing) {
+    return { title: "--", detail: "未加载" };
+  }
+  if (billing.unlimited) {
+    return { title: "无限额度", detail: billingTypeLabel(billing.type) };
+  }
+  if (billing.type === "subscription") {
+    const sub = billing.subscription;
+    return {
+      title: `${billing.available} / ${sub?.quota_limit ?? 0}`,
+      detail: `已用 ${sub?.quota_used ?? 0} · ${billingPeriodLabel(sub?.quota_period)}`,
+    };
+  }
+  const standard = billing.standard;
+  return {
+    title: String(standard?.available_balance ?? billing.available),
+    detail: `余额 ${standard?.balance ?? 0}`,
+  };
+}
+
+function billingFormFromUser(user: ManagedUser): BillingEditForm {
+  const billing = user.billing;
+  const billingType = billing?.type || "standard";
+  return {
+    billingType,
+    unlimited: Boolean(billing?.unlimited),
+    standardBalance: String(billing?.standard?.balance ?? 0),
+    subscriptionQuotaLimit: String(billing?.subscription?.quota_limit ?? 0),
+    subscriptionPeriod: billing?.subscription?.quota_period || "monthly",
+    adjustmentType: defaultBillingAdjustmentType(billingType),
+    adjustmentAmount: "",
+    reason: "",
+  };
+}
+
+function createBulkBillingForm(roleId = ""): BulkBillingForm {
+  return {
+    scope: "users",
+    roleId,
+    operation: "adjust",
+    billingType: "standard",
+    adjustmentType: defaultBillingAdjustmentType("standard"),
+    amount: "",
+    subscriptionPeriod: "monthly",
+    reason: "",
+  };
+}
+
+function isBulkAdjustmentNoAmount(type: BillingAdjustmentType) {
+  return type === "reset_quota" || type === "clear_quota_used";
+}
+
 function UsersContent() {
   const rolesLoadedRef = useRef(false);
+  const loadUsersAbortRef = useRef<AbortController | null>(null);
+  const loadUsersRequestRef = useRef(0);
   const [items, setItems] = useState<ManagedUser[]>([]);
   const [roles, setRoles] = useState<ManagedRole[]>([]);
+  const [searchInput, setSearchInput] = useState("");
   const [searchText, setSearchText] = useState("");
   const [providerFilter, setProviderFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<UserSortField>("id");
+  const [sortOrder, setSortOrder] = useState<UserSortOrder>("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("20");
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(() => new Set());
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [createForm, setCreateForm] = useState<CreateUserForm>(() => createEmptyUserForm());
   const [createErrors, setCreateErrors] = useState<CreateUserErrors>({});
@@ -318,10 +496,25 @@ function UsersContent() {
   const [roleUser, setRoleUser] = useState<ManagedUser | null>(null);
   const [selectedRoleId, setSelectedRoleId] = useState("");
   const [isSavingRole, setIsSavingRole] = useState(false);
+  const [billingUser, setBillingUser] = useState<ManagedUser | null>(null);
+  const [billingForm, setBillingForm] = useState<BillingEditForm | null>(null);
+  const [billingAdjustments, setBillingAdjustments] = useState<BillingAdjustment[]>([]);
+  const [isLoadingBilling, setIsLoadingBilling] = useState(false);
+  const [isSavingBilling, setIsSavingBilling] = useState(false);
+  const [isBulkBillingDialogOpen, setIsBulkBillingDialogOpen] = useState(false);
+  const [bulkBillingForm, setBulkBillingForm] = useState<BulkBillingForm>(() => createBulkBillingForm());
+  const [bulkBillingSummary, setBulkBillingSummary] = useState<BulkBillingAdjustmentSummary | null>(null);
+  const [bulkBillingResults, setBulkBillingResults] = useState<BulkBillingAdjustmentResult[]>([]);
+  const [isApplyingBulkBilling, setIsApplyingBulkBilling] = useState(false);
 
   const loadUsers = useCallback(async (overrides: { page?: number; includeRoles?: boolean } = {}) => {
     const requestedPage = overrides.page ?? page;
     const includeRoles = overrides.includeRoles ?? !rolesLoadedRef.current;
+    const requestID = loadUsersRequestRef.current + 1;
+    loadUsersRequestRef.current = requestID;
+    loadUsersAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadUsersAbortRef.current = controller;
     setIsLoading(true);
     try {
       const usersPromise = fetchManagedUsers({
@@ -330,11 +523,17 @@ function UsersContent() {
         search: searchText,
         provider: providerFilter,
         status: statusFilter,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+        signal: controller.signal,
       });
       const [usersData, rolesData] = await Promise.all([
         usersPromise,
         includeRoles ? fetchManagedRoles() : Promise.resolve(null),
       ]);
+      if (requestID !== loadUsersRequestRef.current) {
+        return;
+      }
       setItems(normalizeManagedUsers(usersData.items));
       setTotal(Number.isFinite(usersData.total) ? usersData.total : 0);
       setTotalPages(Math.max(1, Number.isFinite(usersData.total_pages) ? usersData.total_pages : 1));
@@ -349,22 +548,59 @@ function UsersContent() {
           ...current,
           role_id: current.role_id || nextRoles[0]?.id || "",
         }));
+        setBulkBillingForm((current) => ({
+          ...current,
+          roleId: current.roleId || nextRoles[0]?.id || "",
+        }));
       }
     } catch (error) {
+      if (controller.signal.aborted || requestID !== loadUsersRequestRef.current) {
+        return;
+      }
       toast.error(error instanceof Error ? error.message : "加载用户失败");
     } finally {
-      setIsLoading(false);
+      if (requestID === loadUsersRequestRef.current) {
+        setIsLoading(false);
+        if (loadUsersAbortRef.current === controller) {
+          loadUsersAbortRef.current = null;
+        }
+      }
     }
-  }, [page, pageSize, providerFilter, searchText, statusFilter]);
+  }, [page, pageSize, providerFilter, searchText, sortBy, sortOrder, statusFilter]);
 
   useEffect(() => {
     void loadUsers();
+    return () => {
+      loadUsersRequestRef.current += 1;
+      loadUsersAbortRef.current?.abort();
+    };
   }, [loadUsers]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setSearchText(searchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [searchInput]);
+
+  useEffect(() => {
+    const visibleIds = new Set(items.map((item) => item.id));
+    setSelectedUserIds((current) => {
+      const next = new Set([...current].filter((id) => visibleIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [items]);
 
   const safePage = Math.min(page, totalPages);
   const startIndex = total === 0 ? 0 : (safePage - 1) * Number(pageSize) + 1;
   const endIndex = Math.min(safePage * Number(pageSize), total);
-  const hasActiveFilters = searchText.trim() !== "" || providerFilter !== "all" || statusFilter !== "all";
+  const hasActiveFilters = searchInput.trim() !== "" || providerFilter !== "all" || statusFilter !== "all";
+  const pageUserIds = useMemo(() => items.map((item) => item.id), [items]);
+  const selectedUsers = useMemo(() => items.filter((item) => selectedUserIds.has(item.id)), [items, selectedUserIds]);
+  const selectedCount = selectedUserIds.size;
+  const allPageSelected = pageUserIds.length > 0 && pageUserIds.every((id) => selectedUserIds.has(id));
+  const somePageSelected = pageUserIds.some((id) => selectedUserIds.has(id));
   const paginationItems = useMemo(() => {
     const nextItems: (number | "...")[] = [];
     const start = Math.max(1, safePage - 1);
@@ -389,6 +625,88 @@ function UsersContent() {
       }
       return next;
     });
+  };
+
+  const toggleSelectedUser = (userId: string, checked: boolean) => {
+    setSelectedUserIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(userId);
+      } else {
+        next.delete(userId);
+      }
+      return next;
+    });
+  };
+
+  const togglePageSelection = (checked: boolean) => {
+    setSelectedUserIds((current) => {
+      const next = new Set(current);
+      for (const id of pageUserIds) {
+        if (checked) {
+          next.add(id);
+        } else {
+          next.delete(id);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleSort = (field: UserSortField) => {
+    setPage(1);
+    if (sortBy === field) {
+      setSortOrder((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortBy(field);
+    setSortOrder(defaultUserSortOrder(field));
+  };
+
+  const sortIcon = (field: UserSortField) => {
+    if (sortBy !== field) {
+      return <ArrowUpDown className="size-3.5 opacity-45" aria-hidden="true" />;
+    }
+    return sortOrder === "asc" ? (
+      <ArrowUp className="size-3.5" aria-hidden="true" />
+    ) : (
+      <ArrowDown className="size-3.5" aria-hidden="true" />
+    );
+  };
+
+  const nextSortOrder = (field: UserSortField): UserSortOrder => {
+    if (sortBy === field) {
+      return sortOrder === "asc" ? "desc" : "asc";
+    }
+    return defaultUserSortOrder(field);
+  };
+
+  const sortableHead = (field: UserSortField, label: string, className: string) => (
+    <TableHead
+      className={className}
+      aria-sort={sortBy === field ? (sortOrder === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        className="-ml-1 inline-flex h-8 items-center gap-1 rounded-md px-1 text-left font-semibold transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={() => handleSort(field)}
+        aria-label={`按${label}${nextSortOrder(field) === "asc" ? "升序" : "降序"}排序`}
+      >
+        <span>{label}</span>
+        {sortIcon(field)}
+      </button>
+    </TableHead>
+  );
+
+  const openBulkBillingDialog = () => {
+    setBulkBillingForm((current) => ({
+      ...current,
+      scope: selectedCount > 0 ? "users" : current.scope,
+      roleId: current.roleId || roles[0]?.id || "",
+    }));
+    setBulkBillingSummary(null);
+    setBulkBillingResults([]);
+    setIsBulkBillingDialogOpen(true);
   };
 
   const updateCreateField = <Key extends keyof CreateUserForm>(field: Key, value: CreateUserForm[Key]) => {
@@ -457,6 +775,196 @@ function UsersContent() {
     setSelectedRoleId(user.role_id || roles[0]?.id || "");
   };
 
+  const openBillingDialog = async (user: ManagedUser) => {
+    setBillingUser(user);
+    setBillingForm(billingFormFromUser(user));
+    setBillingAdjustments([]);
+    setIsLoadingBilling(true);
+    try {
+      const data = await fetchBillingAdjustments(user.id, billingAdjustmentHistoryLimit);
+      setBillingAdjustments(Array.isArray(data.items) ? data.items.slice(0, billingAdjustmentHistoryLimit) : []);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载计费记录失败");
+    } finally {
+      setIsLoadingBilling(false);
+    }
+  };
+
+  const updateBillingForm = <Key extends keyof BillingEditForm>(key: Key, value: BillingEditForm[Key]) => {
+    setBillingForm((current) => {
+      if (!current) {
+        return current;
+      }
+      if (key === "billingType") {
+        const billingType = value as BillingType;
+        return {
+          ...current,
+          billingType,
+          adjustmentType: normalizeBillingAdjustmentType(billingType, current.adjustmentType),
+          adjustmentAmount: "",
+        };
+      }
+      return { ...current, [key]: value };
+    });
+  };
+
+  const updateBulkBillingForm = <Key extends keyof BulkBillingForm>(key: Key, value: BulkBillingForm[Key]) => {
+    setBulkBillingForm((current) => {
+      if (key === "billingType") {
+        const billingType = value as BillingType;
+        return {
+          ...current,
+          billingType,
+          adjustmentType: normalizeBillingAdjustmentType(billingType, current.adjustmentType),
+          amount: "",
+        };
+      }
+      return { ...current, [key]: value };
+    });
+    setBulkBillingSummary(null);
+    setBulkBillingResults([]);
+  };
+
+  const handleBillingAdjustment = async (payload: BillingAdjustmentPayload, successMessage: string) => {
+    if (!billingUser) {
+      return;
+    }
+    setIsSavingBilling(true);
+    setItemPending(billingUser.id, true);
+    try {
+      await createBillingAdjustment(billingUser.id, payload);
+      const current = billingUser;
+      const [detail, refreshed] = await Promise.all([
+        fetchManagedUser(current.id),
+        fetchBillingAdjustments(current.id, billingAdjustmentHistoryLimit),
+        loadUsers({ includeRoles: false }),
+      ]);
+      setBillingAdjustments(Array.isArray(refreshed.items) ? refreshed.items.slice(0, billingAdjustmentHistoryLimit) : []);
+      const nextUser = detail.item || current;
+      setBillingUser(nextUser);
+      setBillingForm((form) => form ? {
+        ...billingFormFromUser(nextUser),
+        reason: "",
+        adjustmentAmount: "",
+        adjustmentType: normalizeBillingAdjustmentType(nextUser.billing?.type || "standard", form.adjustmentType),
+      } : form);
+      toast.success(successMessage);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存计费调整失败");
+    } finally {
+      setIsSavingBilling(false);
+      setItemPending(billingUser.id, false);
+    }
+  };
+
+  const handleApplyBillingBase = async () => {
+    if (!billingUser || !billingForm) {
+      return;
+    }
+    const reason = billingForm.reason.trim();
+    if (billingForm.unlimited !== Boolean(billingUser.billing?.unlimited)) {
+      await handleBillingAdjustment({ type: "set_unlimited", unlimited: billingForm.unlimited, reason }, "无限额度状态已保存");
+      return;
+    }
+    if (billingForm.billingType === "subscription") {
+      await handleBillingAdjustment({
+        type: billingUser.billing?.type === "subscription" ? "set_quota_limit" : "switch_to_subscription",
+        quota_limit: Math.max(0, Number(billingForm.subscriptionQuotaLimit) || 0),
+        quota_period: billingForm.subscriptionPeriod,
+        reason,
+      }, "订阅配额已保存");
+      if (billingUser.billing?.type === "subscription" && billingForm.subscriptionPeriod !== billingUser.billing.subscription?.quota_period) {
+        await handleBillingAdjustment({ type: "set_quota_period", quota_period: billingForm.subscriptionPeriod, reason }, "订阅周期已保存");
+      }
+      return;
+    }
+    await handleBillingAdjustment({
+      type: billingUser.billing?.type === "standard" ? "set_balance" : "switch_to_standard",
+      balance: Math.max(0, Number(billingForm.standardBalance) || 0),
+      reason,
+    }, "标准余额已保存");
+  };
+
+  const handleApplyBillingOperation = async () => {
+    if (!billingUser || !billingForm) {
+      return;
+    }
+    const reason = billingForm.reason.trim();
+    const configuredBillingType = billingUser.billing?.type || billingForm.billingType;
+    if (billingForm.billingType !== configuredBillingType) {
+      toast.error("请先保存计费配置");
+      return;
+    }
+    const adjustmentType = normalizeBillingAdjustmentType(configuredBillingType, billingForm.adjustmentType);
+    const payload: BillingAdjustmentPayload = {
+      type: adjustmentType,
+      reason,
+    };
+    if (!["reset_quota", "clear_quota_used"].includes(adjustmentType)) {
+      payload.amount = Math.max(0, Number(billingForm.adjustmentAmount) || 0);
+    }
+    await handleBillingAdjustment(payload, "计费调整已执行");
+  };
+
+  const handleApplyBulkBilling = async () => {
+    const adjustmentType = normalizeBillingAdjustmentType(bulkBillingForm.billingType, bulkBillingForm.adjustmentType);
+    const needsAmount = bulkBillingForm.operation === "switch_type" || !isBulkAdjustmentNoAmount(adjustmentType);
+    const amount = Math.max(0, Number(bulkBillingForm.amount) || 0);
+    if (bulkBillingForm.scope === "users" && selectedUserIds.size === 0) {
+      toast.error("请先选择用户");
+      return;
+    }
+    if (bulkBillingForm.scope === "role" && !bulkBillingForm.roleId) {
+      toast.error("请选择角色");
+      return;
+    }
+    if (needsAmount && amount <= 0) {
+      toast.error("请输入大于 0 的调整数量");
+      return;
+    }
+
+    setIsApplyingBulkBilling(true);
+    try {
+      const reason = bulkBillingForm.reason.trim();
+      const payload: BillingAdjustmentPayload = bulkBillingForm.operation === "switch_type"
+        ? bulkBillingForm.billingType === "subscription"
+          ? {
+              type: "switch_to_subscription",
+              quota_limit: amount,
+              quota_period: bulkBillingForm.subscriptionPeriod,
+              reason,
+            }
+          : {
+              type: "switch_to_standard",
+              balance: amount,
+              reason,
+            }
+        : {
+            type: adjustmentType,
+            reason,
+          };
+      if (bulkBillingForm.operation === "adjust" && needsAmount) {
+        payload.amount = amount;
+      }
+      const data = await createBulkBillingAdjustment({
+        scope: bulkBillingForm.scope,
+        user_ids: bulkBillingForm.scope === "users" ? [...selectedUserIds] : undefined,
+        role_id: bulkBillingForm.scope === "role" ? bulkBillingForm.roleId : undefined,
+        billing: payload,
+      });
+      setBulkBillingSummary(data.summary || null);
+      setBulkBillingResults(Array.isArray(data.results) ? data.results : []);
+      await loadUsers({ includeRoles: false });
+      const succeeded = data.summary?.succeeded ?? 0;
+      const failed = data.summary?.failed ?? 0;
+      toast.success(failed > 0 ? `批量调整完成：成功 ${succeeded}，失败 ${failed}` : `批量调整完成：成功 ${succeeded}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "批量调整失败");
+    } finally {
+      setIsApplyingBulkBilling(false);
+    }
+  };
+
   const handleSaveRole = async () => {
     if (!roleUser || !selectedRoleId) {
       return;
@@ -513,6 +1021,10 @@ function UsersContent() {
               <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
               刷新
             </Button>
+            <Button variant="outline" onClick={openBulkBillingDialog} className="h-10 rounded-lg">
+              <UsersRound className="size-4" />
+              批量计费
+            </Button>
             <Button onClick={openCreateDialog} className="h-10 rounded-lg">
               <Plus className="size-4" />
               创建用户
@@ -526,15 +1038,21 @@ function UsersContent() {
           <div className="flex flex-col gap-3 border-b border-border px-5 py-4">
             <div className="flex items-center justify-between text-sm text-muted-foreground">
               <span>共 {total} 个用户</span>
+              <span>{selectedCount > 0 ? `已选择 ${selectedCount} 个` : "未选择用户"}</span>
             </div>
             <div className="grid gap-2 lg:grid-cols-[minmax(18rem,1fr)_160px_160px_auto]">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
-                  value={searchText}
+                  value={searchInput}
                   onChange={(event) => {
-                    setSearchText(event.target.value);
-                    setPage(1);
+                    setSearchInput(event.target.value);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      setSearchText(searchInput.trim());
+                      setPage(1);
+                    }
                   }}
                   placeholder="搜索用户名、用户 ID、owner 或会话"
                   className="h-10 rounded-lg pl-9"
@@ -553,7 +1071,7 @@ function UsersContent() {
                 <SelectContent>
                   <SelectItem value="all">全部来源</SelectItem>
                   <SelectItem value="linuxdo">Linuxdo</SelectItem>
-                  <SelectItem value="local">本地</SelectItem>
+                  <SelectItem value="local">{providerFilterLabel("local")}</SelectItem>
                 </SelectContent>
               </Select>
               <Select
@@ -578,6 +1096,7 @@ function UsersContent() {
                 className="h-10 rounded-lg px-3"
                 disabled={!hasActiveFilters}
                 onClick={() => {
+                  setSearchInput("");
                   setSearchText("");
                   setProviderFilter("all");
                   setStatusFilter("all");
@@ -590,34 +1109,68 @@ function UsersContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[1340px]">
+            <Table className="min-w-[1380px]">
               <TableHeader>
                 <TableRow>
-                  <TableHead>用户</TableHead>
-                  <TableHead>角色</TableHead>
-                  <TableHead>来源</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>额度消耗</TableHead>
-                  <TableHead className="w-[340px]">调用曲线</TableHead>
-                  <TableHead>时间</TableHead>
-                  <TableHead className="w-[260px]">操作</TableHead>
+                  <TableHead className="w-12">
+                    <Checkbox
+                      checked={allPageSelected || (somePageSelected ? "indeterminate" : false)}
+                      onCheckedChange={(checked) => togglePageSelection(checked === true)}
+                      aria-label="选择当前页用户"
+                    />
+                  </TableHead>
+                  {sortableHead("id", "用户 ID", "w-[220px]")}
+                  {sortableHead("name", "用户", "w-[240px]")}
+                  {sortableHead("role_name", "角色", "w-[180px]")}
+                  {sortableHead("billing_available", "本地计费", "w-[170px]")}
+                  {sortableHead("call_count", "近 14 日调用", "w-[280px]")}
+                  {sortableHead("last_used_at", "时间", "w-[170px]")}
+                  <TableHead className="w-[180px] text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {items.map((user) => {
                   const isPending = pendingIds.has(user.id);
+                  const billing = billingSummary(user);
                   return (
                     <TableRow key={user.id} className="text-muted-foreground">
                       <TableCell>
-                        <div className="min-w-0 space-y-1">
-                          <div className="truncate font-medium text-foreground">{user.name || "普通用户"}</div>
-                          {user.username ? (
-                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                              <UserRound className="size-3.5" />
-                              <span className="truncate">{user.username}</span>
-                            </div>
-                          ) : null}
-                          <code className="block max-w-[260px] truncate font-mono text-xs text-muted-foreground">{user.id}</code>
+                        <Checkbox
+                          checked={selectedUserIds.has(user.id)}
+                          onCheckedChange={(checked) => toggleSelectedUser(user.id, checked === true)}
+                          aria-label={`选择 ${user.name || user.username || user.id}`}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <code className="block max-w-[220px] truncate font-mono text-xs text-muted-foreground" title={user.id}>
+                          {user.id}
+                        </code>
+                      </TableCell>
+                      <TableCell>
+                        <div className="min-w-0 space-y-1.5">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="truncate font-medium text-foreground">{user.name || "普通用户"}</div>
+                            <Badge variant={user.enabled ? "success" : "danger"} className="shrink-0 rounded-md">
+                              {user.enabled ? "启用" : "禁用"}
+                            </Badge>
+                          </div>
+                          <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                            {user.username ? (
+                              <>
+                                <UserRound className="size-3.5" />
+                                <span className="truncate">{user.username}</span>
+                              </>
+                            ) : null}
+                            <Badge variant={user.provider === "linuxdo" ? "info" : "secondary"} className="rounded-md px-1.5 py-0 text-[11px]">
+                              {userSourceLabel(user)}
+                              {user.provider === "linuxdo" && (() => {
+                                const level = String(user.linuxdo_level || "").trim();
+                                return level ? (
+                                  <span className={`ml-1 ${linuxDoLevelColors[level] || "text-muted-foreground"}`}>· Lv{level}</span>
+                                ) : null;
+                              })()}
+                            </Badge>
+                          </div>
                         </div>
                       </TableCell>
                       <TableCell>
@@ -625,57 +1178,58 @@ function UsersContent() {
                           <Badge variant="secondary" className="rounded-md">
                             {roleLabel(user, roles)}
                           </Badge>
-                          <code className="max-w-[160px] truncate font-mono text-xs text-muted-foreground">
+                          <code className="max-w-[170px] truncate font-mono text-[11px] text-muted-foreground">
                             {user.role_id || "default-user"}
                           </code>
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="flex flex-col items-start gap-1.5">
-                          <Badge variant={user.provider === "linuxdo" ? "info" : "secondary"} className="rounded-md">
-                            {providerLabel(user.provider)}
-                            {user.provider === "linuxdo" && (() => {
-                              const level = String(user.linuxdo_level || "").trim();
-                              return level ? (
-                                <span className={`ml-1 ${linuxDoLevelColors[level] || "text-muted-foreground"}`}>· Lv{level}</span>
-                              ) : null;
-                            })()}
-                          </Badge>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={user.enabled ? "success" : "danger"} className="rounded-md">
-                          {user.enabled ? "已启用" : "已禁用"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
                         <div className="space-y-1">
-                          <div className="text-base font-semibold text-foreground">{numeric(user.quota_used)}</div>
-                          <div className="text-xs text-muted-foreground">今日 {todayQuotaUsed(user)}</div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant={user.billing?.type === "subscription" ? "info" : "secondary"} className="rounded-md">
+                              {billingTypeLabel(user.billing?.type)}
+                            </Badge>
+                            {user.billing?.unlimited ? (
+                              <Badge variant="success" className="rounded-md">无限</Badge>
+                            ) : null}
+                          </div>
+                          <div className="text-base font-semibold text-foreground">{billing.title}</div>
+                          <div className="text-xs text-muted-foreground">{billing.detail}</div>
                         </div>
                       </TableCell>
-                      <TableCell className="w-[340px]">
-                        <div className="flex items-center gap-4">
+                      <TableCell>
+                        <div className="flex items-center gap-3">
                           <UsageSparkline points={user.usage_curve} />
-                          <div className="min-w-[72px] space-y-1 text-xs text-muted-foreground">
+                          <div className="min-w-[70px] space-y-1 text-xs text-muted-foreground">
                             <div>总计 {formatCompactNumber(user.call_count)}</div>
                             <div>今日 {formatCompactNumber(todayCallCount(user))}</div>
+                            <div>额度 {formatCompactNumber(user.quota_used)}</div>
                             <div>失败 {formatCompactNumber(user.failure_count)}</div>
                           </div>
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="space-y-1 text-xs">
+                        <div className="space-y-1 text-xs leading-5">
                           <div>创建 {formatDateTime(user.created_at)}</div>
                           <div>使用 {formatDateTime(user.last_used_at)}</div>
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div className="flex flex-wrap justify-end gap-2">
+                        <div className="grid grid-cols-2 justify-items-end gap-2">
                           <Button
                             type="button"
                             variant="outline"
-                            className="h-8 rounded-lg px-3"
+                            className="h-8 w-full rounded-lg px-2"
+                            onClick={() => void openBillingDialog(user)}
+                            disabled={isPending}
+                          >
+                            <Gauge className="size-4" />
+                            计费
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-8 w-full rounded-lg px-2"
                             onClick={() => openRoleDialog(user)}
                             disabled={isPending}
                           >
@@ -685,7 +1239,7 @@ function UsersContent() {
                           <Button
                             type="button"
                             variant="outline"
-                            className="h-8 rounded-lg px-3"
+                            className="h-8 w-full rounded-lg px-2"
                             onClick={() => void handleToggle(user)}
                             disabled={isPending}
                           >
@@ -701,7 +1255,7 @@ function UsersContent() {
                           <Button
                             type="button"
                             variant="outline"
-                            className="h-8 rounded-lg border-rose-200 px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                            className="h-8 w-full rounded-lg border-rose-200 px-2 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
                             onClick={() => setDeletingUser(user)}
                             disabled={isPending}
                           >
@@ -892,6 +1446,223 @@ function UsersContent() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={isBulkBillingDialogOpen} onOpenChange={setIsBulkBillingDialogOpen}>
+        <DialogContent className="max-h-[88dvh] overflow-y-auto rounded-2xl p-6 sm:max-w-2xl">
+          <DialogHeader className="gap-2">
+            <DialogTitle className="flex items-center gap-2">
+              <UsersRound className="size-5 text-[#1456f0]" />
+              批量计费调整
+            </DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              选中用户或某个角色下的用户会被统一增加或扣减余额/配额。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700 dark:text-foreground">操作范围</label>
+                <Select value={bulkBillingForm.scope} onValueChange={(value) => updateBulkBillingForm("scope", value as BulkBillingForm["scope"])}>
+                  <SelectTrigger className="h-11 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="users">已选用户（{selectedCount}）</SelectItem>
+                    <SelectItem value="role">按角色</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {bulkBillingForm.scope === "role" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">目标角色</label>
+                  <Select value={bulkBillingForm.roleId} onValueChange={(value) => updateBulkBillingForm("roleId", value)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue placeholder="选择角色" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {roles.map((role) => (
+                        <SelectItem key={role.id} value={role.id}>
+                          {role.name}（{role.user_count || 0}）
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-border bg-muted/30 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-sm">
+                    <span className="font-medium text-foreground">已选用户</span>
+                    <span className="text-muted-foreground">{selectedCount} 个</span>
+                  </div>
+                  {selectedUsers.length === 0 ? (
+                    <div className="mt-2 text-sm leading-6 text-muted-foreground">请先在用户列表中勾选需要调整的用户。</div>
+                  ) : (
+                    <div className="mt-2 max-h-44 space-y-2 overflow-y-auto pr-1">
+                      {selectedUsers.map((user) => {
+                        const billing = billingSummary(user);
+                        return (
+                          <div key={user.id} className="rounded-lg border border-border/70 bg-background px-3 py-2">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-medium text-foreground">{user.name || "普通用户"}</div>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                                  <span>{user.username || userSourceLabel(user)}</span>
+                                  <span>·</span>
+                                  <span>{roleLabel(user, roles)}</span>
+                                </div>
+                              </div>
+                              <div className="shrink-0 text-right text-xs text-muted-foreground">
+                                <div className="font-medium text-foreground">{billing.title}</div>
+                                <div>{billing.detail}</div>
+                              </div>
+                            </div>
+                            <code className="mt-1 block truncate font-mono text-[11px] text-muted-foreground">{user.id}</code>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700 dark:text-foreground">操作类型</label>
+                <Select value={bulkBillingForm.operation} onValueChange={(value) => updateBulkBillingForm("operation", value as BulkBillingForm["operation"])}>
+                  <SelectTrigger className="h-11 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="adjust">调整余额/配额</SelectItem>
+                    <SelectItem value="switch_type">切换计费类型</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700 dark:text-foreground">
+                  {bulkBillingForm.operation === "switch_type" ? "目标计费类型" : "计费类型"}
+                </label>
+                <Select value={bulkBillingForm.billingType} onValueChange={(value) => updateBulkBillingForm("billingType", value as BillingType)}>
+                  <SelectTrigger className="h-11 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="standard">标准余额制</SelectItem>
+                    <SelectItem value="subscription">订阅配额制</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {bulkBillingForm.operation === "adjust" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">调整方式</label>
+                  <Select
+                    value={normalizeBillingAdjustmentType(bulkBillingForm.billingType, bulkBillingForm.adjustmentType)}
+                    onValueChange={(value) => updateBulkBillingForm("adjustmentType", value as BillingAdjustmentType)}
+                  >
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {billingAdjustmentOptions(bulkBillingForm.billingType).map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+              {(bulkBillingForm.operation === "switch_type" || !isBulkAdjustmentNoAmount(normalizeBillingAdjustmentType(bulkBillingForm.billingType, bulkBillingForm.adjustmentType))) ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">
+                    {bulkBillingForm.billingType === "subscription" ? "配额上限" : "标准余额"}
+                  </label>
+                  <Input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    value={bulkBillingForm.amount}
+                    onChange={(event) => updateBulkBillingForm("amount", event.target.value)}
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+              ) : null}
+              {bulkBillingForm.operation === "switch_type" && bulkBillingForm.billingType === "subscription" ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">订阅周期</label>
+                  <Select value={bulkBillingForm.subscriptionPeriod} onValueChange={(value) => updateBulkBillingForm("subscriptionPeriod", value as BillingPeriod)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="daily">每日</SelectItem>
+                      <SelectItem value="weekly">每周</SelectItem>
+                      <SelectItem value="monthly">每月</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700 dark:text-foreground">调整原因</label>
+              <Input
+                value={bulkBillingForm.reason}
+                onChange={(event) => updateBulkBillingForm("reason", event.target.value)}
+                placeholder="可选"
+                className="h-11 rounded-xl"
+              />
+            </div>
+
+            {bulkBillingSummary ? (
+              <div className="rounded-2xl border border-border p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span className="font-semibold text-foreground">执行结果</span>
+                  <span className="text-muted-foreground">
+                    共 {bulkBillingSummary.total} 个，成功 {bulkBillingSummary.succeeded} 个，失败 {bulkBillingSummary.failed} 个
+                  </span>
+                </div>
+                {bulkBillingResults.some((result) => result.error) ? (
+                  <div className="mt-3 max-h-40 space-y-2 overflow-y-auto pr-1">
+                    {bulkBillingResults.filter((result) => result.error).map((result) => (
+                      <div key={result.user_id} className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
+                        <code className="font-mono">{result.user_id}</code>
+                        <span className="mx-1">·</span>
+                        {result.error}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-10 rounded-xl px-5"
+              onClick={() => setIsBulkBillingDialogOpen(false)}
+              disabled={isApplyingBulkBilling}
+            >
+              关闭
+            </Button>
+            <Button
+              type="button"
+              className="h-10 rounded-xl px-5"
+              onClick={() => void handleApplyBulkBilling()}
+              disabled={
+                isApplyingBulkBilling
+                || (bulkBillingForm.scope === "users" && selectedCount === 0)
+                || (bulkBillingForm.scope === "role" && !bulkBillingForm.roleId)
+              }
+            >
+              {isApplyingBulkBilling ? <LoaderCircle className="size-4 animate-spin" /> : <UsersRound className="size-4" />}
+              执行批量调整
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={Boolean(roleUser)} onOpenChange={(open) => (!open ? setRoleUser(null) : null)}>
         <DialogContent className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
@@ -936,6 +1707,181 @@ function UsersContent() {
             >
               {isSavingRole ? <LoaderCircle className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
               保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(billingUser)} onOpenChange={(open) => (!open ? setBillingUser(null) : null)}>
+        <DialogContent className="max-h-[88dvh] overflow-y-auto rounded-2xl p-6 sm:max-w-3xl">
+          <DialogHeader className="gap-2">
+            <DialogTitle className="flex items-center gap-2">
+              <Gauge className="size-5 text-[#1456f0]" />
+              用户计费
+            </DialogTitle>
+            <DialogDescription className="truncate text-sm">
+              {billingUser?.name || "普通用户"} · {billingUser?.id}
+            </DialogDescription>
+          </DialogHeader>
+          {billingForm ? (
+            <div className="grid gap-5">
+              {(() => {
+                const persistedBillingType = billingUser?.billing?.type || billingForm.billingType;
+                const adjustmentOptions = billingAdjustmentOptions(billingForm.billingType);
+                const adjustmentType = normalizeBillingAdjustmentType(billingForm.billingType, billingForm.adjustmentType);
+                const needsAmount = !["reset_quota", "clear_quota_used"].includes(adjustmentType);
+                const hasUnsavedBillingType = billingForm.billingType !== persistedBillingType;
+                return (
+                  <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">计费类型</label>
+                  <Select value={billingForm.billingType} onValueChange={(value) => updateBillingForm("billingType", value as BillingType)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="standard">标准余额制</SelectItem>
+                      <SelectItem value="subscription">订阅配额制</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">无限额度</label>
+                  <Select value={billingForm.unlimited ? "true" : "false"} onValueChange={(value) => updateBillingForm("unlimited", value === "true")}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="false">按余额/配额限制</SelectItem>
+                      <SelectItem value="true">无限额度</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {billingForm.billingType === "standard" ? (
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-stone-700 dark:text-foreground">当前余额</label>
+                    <Input
+                      type="number"
+                      min="0"
+                      inputMode="numeric"
+                      value={billingForm.standardBalance}
+                      onChange={(event) => updateBillingForm("standardBalance", event.target.value)}
+                      className="h-11 rounded-xl"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700 dark:text-foreground">配额上限</label>
+                      <Input
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={billingForm.subscriptionQuotaLimit}
+                        onChange={(event) => updateBillingForm("subscriptionQuotaLimit", event.target.value)}
+                        className="h-11 rounded-xl"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700 dark:text-foreground">订阅周期</label>
+                      <Select value={billingForm.subscriptionPeriod} onValueChange={(value) => updateBillingForm("subscriptionPeriod", value as BillingPeriod)}>
+                        <SelectTrigger className="h-11 rounded-xl">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="daily">每日</SelectItem>
+                          <SelectItem value="weekly">每周</SelectItem>
+                          <SelectItem value="monthly">每月</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                )}
+                <div className="space-y-2 sm:col-span-2">
+                  <label className="text-sm font-medium text-stone-700 dark:text-foreground">调整原因</label>
+                  <Input
+                    value={billingForm.reason}
+                    onChange={(event) => updateBillingForm("reason", event.target.value)}
+                    placeholder="可选"
+                    className="h-11 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <Button type="button" className="h-10 rounded-xl px-5" onClick={() => void handleApplyBillingBase()} disabled={isSavingBilling}>
+                  {isSavingBilling ? <LoaderCircle className="size-4 animate-spin" /> : <Gauge className="size-4" />}
+                  保存计费配置
+                </Button>
+              </div>
+
+              <div className="rounded-2xl border border-border p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-foreground">手动调整</div>
+                  {hasUnsavedBillingType ? <div className="text-xs text-amber-700">请先保存计费配置</div> : null}
+                </div>
+                <div className="grid gap-3 sm:grid-cols-[1fr_140px]">
+                  <Select value={adjustmentType} onValueChange={(value) => updateBillingForm("adjustmentType", value as BillingAdjustmentType)}>
+                    <SelectTrigger className="h-11 rounded-xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {adjustmentOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {needsAmount ? (
+                    <Input
+                      type="number"
+                      min="0"
+                      inputMode="numeric"
+                      value={billingForm.adjustmentAmount}
+                      onChange={(event) => updateBillingForm("adjustmentAmount", event.target.value)}
+                      placeholder={billingForm.billingType === "subscription" ? "配额" : "余额"}
+                      className="h-11 rounded-xl"
+                    />
+                  ) : null}
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <Button type="button" variant="outline" className="h-10 rounded-xl px-5" onClick={() => void handleApplyBillingOperation()} disabled={isSavingBilling || hasUnsavedBillingType}>
+                    执行调整
+                  </Button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-border p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-foreground">最近调整记录</div>
+                  {isLoadingBilling ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" /> : null}
+                </div>
+                <div className="max-h-56 space-y-2 overflow-y-auto overscroll-contain pr-1 [scrollbar-color:rgba(142,142,147,.45)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#8e8e93]/45 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {billingAdjustments.length === 0 ? (
+                    <div className="rounded-xl bg-muted/40 px-3 py-4 text-center text-sm text-muted-foreground">暂无调整记录</div>
+                  ) : billingAdjustments.map((item) => (
+                    <div key={item.id} className="rounded-xl border border-border/70 px-3 py-2 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium text-foreground">{item.type}</span>
+                        <span className="text-xs text-muted-foreground">{formatDateTime(item.created_at)}</span>
+                      </div>
+                      <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {item.operator_name || item.operator_id || "管理员"}
+                        {item.reason ? ` · ${item.reason}` : ""}
+                        {typeof item.amount === "number" ? ` · ${item.amount}` : ""}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+                  </>
+                );
+              })()}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button type="button" variant="secondary" className="h-10 rounded-xl px-5" onClick={() => setBillingUser(null)} disabled={isSavingBilling}>
+              关闭
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -27,6 +27,8 @@ const (
 	thumbnailQuality      = 72
 	thumbnailCacheVersion = 3
 	thumbnailExtension    = ".jpg"
+	imageReferencePrefix  = "references"
+	imageReferenceMarker  = ".refs/"
 
 	ImageVisibilityPrivate = "private"
 	ImageVisibilityPublic  = "public"
@@ -36,7 +38,8 @@ type ImageConfig interface {
 	ImagesDir() string
 	ImageThumbnailsDir() string
 	ImageMetadataDir() string
-	CleanupOldImages() int
+	ImageRetentionDays() int
+	ImageStorageLimitBytes() int64
 }
 
 type ImageAccessScope struct {
@@ -46,19 +49,96 @@ type ImageAccessScope struct {
 }
 
 type imageMetadata struct {
-	OwnerID          string
-	OwnerName        string
-	Visibility       string
-	PublishedAt      string
-	ResolutionPreset string
-	RequestedSize    string
-	OutputFormat     string
+	OwnerID           string
+	OwnerName         string
+	Visibility        string
+	PublishedAt       string
+	Prompt            string
+	Model             string
+	Quality           string
+	ResolutionPreset  string
+	RequestedSize     string
+	OutputFormat      string
+	OutputCompression *int
+	Background        string
+	Moderation        string
+	Style             string
+	PartialImages     *int
+	InputImageMask    string
+	ReferenceImages   []imageReferenceMetadata
+	SharePromptParams bool
+	ShareReferences   bool
 }
 
 type GeneratedImageMetadata struct {
-	ResolutionPreset string
-	RequestedSize    string
-	OutputFormat     string
+	Prompt            string
+	Model             string
+	Quality           string
+	ResolutionPreset  string
+	RequestedSize     string
+	OutputFormat      string
+	OutputCompression *int
+	Background        string
+	Moderation        string
+	Style             string
+	PartialImages     *int
+	InputImageMask    string
+	ReferenceImages   []GeneratedImageReference
+	SharePromptParams bool
+	ShareReferences   bool
+}
+
+type GeneratedImageReference struct {
+	Filename    string
+	ContentType string
+	Data        []byte
+}
+
+type ImageStorageCleanupOptions struct {
+	RetentionDays   int
+	MaxBytes        int64
+	ClearThumbnails bool
+	IncludePublic   bool
+}
+
+type ImageStorageGovernanceSummary struct {
+	TotalBytes         int64  `json:"total_bytes"`
+	ImagesBytes        int64  `json:"images_bytes"`
+	ThumbnailsBytes    int64  `json:"thumbnails_bytes"`
+	MetadataBytes      int64  `json:"metadata_bytes"`
+	ReferenceBytes     int64  `json:"reference_bytes"`
+	ImagesCount        int    `json:"images_count"`
+	PublicImagesCount  int    `json:"public_images_count"`
+	PrivateImagesCount int    `json:"private_images_count"`
+	ThumbnailFiles     int    `json:"thumbnail_files"`
+	MetadataFiles      int    `json:"metadata_files"`
+	ReferenceFiles     int    `json:"reference_files"`
+	LimitBytes         int64  `json:"limit_bytes"`
+	OverLimitBytes     int64  `json:"over_limit_bytes"`
+	OldestImageAt      string `json:"oldest_image_at,omitempty"`
+	LatestImageAt      string `json:"latest_image_at,omitempty"`
+}
+
+type ImageStorageCleanupResult struct {
+	RetentionDays         int    `json:"retention_days,omitempty"`
+	MaxBytes              int64  `json:"max_bytes,omitempty"`
+	IncludePublic         bool   `json:"include_public,omitempty"`
+	DeletedImages         int    `json:"deleted_images"`
+	DeletedThumbnails     int    `json:"deleted_thumbnails"`
+	DeletedMetadataFiles  int    `json:"deleted_metadata_files"`
+	DeletedReferenceFiles int    `json:"deleted_reference_files"`
+	DeletedBytes          int64  `json:"deleted_bytes"`
+	RemainingBytes        int64  `json:"remaining_bytes"`
+	OverLimitBytes        int64  `json:"over_limit_bytes"`
+	PreservedPublicImages int    `json:"preserved_public_images,omitempty"`
+	Action                string `json:"action,omitempty"`
+}
+
+type imageReferenceMetadata struct {
+	Path        string
+	Filename    string
+	ContentType string
+	Size        int64
 }
 
 type ImageFileAccess struct {
@@ -67,6 +147,21 @@ type ImageFileAccess struct {
 	Info       os.FileInfo
 	Visibility string
 	OwnerID    string
+}
+
+type ImageReferenceFileAccess struct {
+	Rel         string
+	SourceRel   string
+	Path        string
+	ContentType string
+	Visibility  string
+	OwnerID     string
+	Shared      bool
+}
+
+type ImageVisibilityUpdateOptions struct {
+	SharePromptParams bool
+	ShareReferences   bool
 }
 
 type ImageService struct {
@@ -87,12 +182,112 @@ type thumbnailJob struct {
 	result map[string]any
 }
 
+type imageCleanupCandidate struct {
+	rel       string
+	path      string
+	info      os.FileInfo
+	meta      imageMetadata
+	groupSize int64
+}
+
+type imageStorageRemovalStats struct {
+	bytes          int64
+	images         int
+	thumbnails     int
+	metadataFiles  int
+	referenceFiles int
+}
+
 func NewImageService(config ImageConfig, backend ...storage.Backend) *ImageService {
 	return &ImageService{config: config, store: firstJSONDocumentStore(backend)}
 }
 
+func (s *ImageService) StorageGovernance() ImageStorageGovernanceSummary {
+	summary := ImageStorageGovernanceSummary{LimitBytes: s.config.ImageStorageLimitBytes()}
+	candidates := s.imageCleanupCandidates()
+	for _, candidate := range candidates {
+		summary.ImagesCount++
+		summary.ImagesBytes += candidate.info.Size()
+		if candidate.meta.Visibility == ImageVisibilityPublic {
+			summary.PublicImagesCount++
+		} else {
+			summary.PrivateImagesCount++
+		}
+		created := candidate.info.ModTime().Format("2006-01-02 15:04:05")
+		if summary.OldestImageAt == "" || created < summary.OldestImageAt {
+			summary.OldestImageAt = created
+		}
+		if summary.LatestImageAt == "" || created > summary.LatestImageAt {
+			summary.LatestImageAt = created
+		}
+	}
+	summary.ThumbnailsBytes, summary.ThumbnailFiles, _ = thumbnailCacheStats(s.config.ImageThumbnailsDir())
+	summary.MetadataBytes, summary.MetadataFiles = directorySize(s.config.ImageMetadataDir(), "")
+	summary.ReferenceBytes, summary.ReferenceFiles = directorySize(s.imageReferencesDir(), "")
+	summary.TotalBytes = summary.ImagesBytes + summary.ThumbnailsBytes + summary.MetadataBytes
+	if summary.LimitBytes > 0 && summary.TotalBytes > summary.LimitBytes {
+		summary.OverLimitBytes = summary.TotalBytes - summary.LimitBytes
+	}
+	return summary
+}
+
+func (s *ImageService) CleanupStorage(options ImageStorageCleanupOptions) (ImageStorageCleanupResult, error) {
+	result := ImageStorageCleanupResult{
+		RetentionDays: options.RetentionDays,
+		MaxBytes:      options.MaxBytes,
+		IncludePublic: options.IncludePublic,
+	}
+	if options.ClearThumbnails {
+		stats, err := s.clearThumbnailCache()
+		if err != nil {
+			return result, err
+		}
+		result.Action = "thumbnails"
+		result.DeletedThumbnails += stats.thumbnails
+		result.DeletedMetadataFiles += stats.metadataFiles
+		result.DeletedBytes += stats.bytes
+	}
+	if options.RetentionDays > 0 {
+		stats, preserved, err := s.cleanupByRetention(options.RetentionDays, options.IncludePublic)
+		if err != nil {
+			return result, err
+		}
+		if result.Action == "" {
+			result.Action = "retention"
+		}
+		result.addRemovalStats(stats)
+		result.PreservedPublicImages += preserved
+	}
+	if options.MaxBytes > 0 {
+		stats, preserved, err := s.cleanupByStorageLimit(options.MaxBytes, options.IncludePublic)
+		if err != nil {
+			return result, err
+		}
+		if result.Action == "" {
+			result.Action = "quota"
+		}
+		result.addRemovalStats(stats)
+		result.PreservedPublicImages += preserved
+	}
+	summary := s.StorageGovernance()
+	result.RemainingBytes = summary.TotalBytes
+	result.OverLimitBytes = summary.OverLimitBytes
+	return result, nil
+}
+
+func (r *ImageStorageCleanupResult) addRemovalStats(stats imageStorageRemovalStats) {
+	r.DeletedBytes += stats.bytes
+	r.DeletedImages += stats.images
+	r.DeletedThumbnails += stats.thumbnails
+	r.DeletedMetadataFiles += stats.metadataFiles
+	r.DeletedReferenceFiles += stats.referenceFiles
+}
+
 func (s *ImageService) ListImages(baseURL, startDate, endDate string, scope ImageAccessScope) map[string]any {
-	s.config.CleanupOldImages()
+	_, _ = s.CleanupStorage(ImageStorageCleanupOptions{
+		RetentionDays: s.config.ImageRetentionDays(),
+		MaxBytes:      s.config.ImageStorageLimitBytes(),
+	})
 	root := s.config.ImagesDir()
 	items := make([]map[string]any, 0)
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -138,24 +333,11 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string, scope Imag
 			"created_at": info.ModTime().Format("2006-01-02 15:04:05"),
 			"visibility": meta.Visibility,
 		}
-		if ownerID != "" {
-			item["owner_id"] = ownerID
-		}
-		if meta.OwnerName != "" {
-			item["owner_name"] = meta.OwnerName
-		}
-		if meta.PublishedAt != "" {
-			item["published_at"] = meta.PublishedAt
-		}
-		if meta.ResolutionPreset != "" {
-			item["resolution_preset"] = meta.ResolutionPreset
-		}
-		if meta.RequestedSize != "" {
-			item["requested_size"] = meta.RequestedSize
-		}
-		if meta.OutputFormat != "" {
-			item["output_format"] = meta.OutputFormat
-		}
+		addImageMetadataFields(item, meta, imageMetadataFieldOptions{
+			BaseURL:                baseURL,
+			IncludeReusableFields:  !scope.Public || meta.SharePromptParams,
+			IncludeReferenceImages: !scope.Public || meta.ShareReferences,
+		})
 		if thumbRel, ok := thumb["thumbnail_rel"].(string); ok && thumbRel != "" {
 			item["thumbnail_url"] = thumbnailURL(baseURL, thumbRel, info.ModTime())
 		} else {
@@ -194,10 +376,17 @@ func (s *ImageService) ListImages(baseURL, startDate, endDate string, scope Imag
 	return map[string]any{"items": items, "groups": groups}
 }
 
-func (s *ImageService) UpdateImageVisibility(value, visibility string, scope ImageAccessScope) (map[string]any, error) {
+func (s *ImageService) UpdateImageVisibility(value, visibility string, scope ImageAccessScope, optionValues ...ImageVisibilityUpdateOptions) (map[string]any, error) {
 	visibility, err := NormalizeImageVisibility(visibility)
 	if err != nil {
 		return nil, err
+	}
+	options := ImageVisibilityUpdateOptions{}
+	if len(optionValues) > 0 {
+		options = optionValues[0]
+	}
+	if visibility != ImageVisibilityPublic {
+		options = ImageVisibilityUpdateOptions{}
 	}
 	rel, err := imageRelativePathFromValue(value)
 	if err != nil {
@@ -218,7 +407,10 @@ func (s *ImageService) UpdateImageVisibility(value, visibility string, scope Ima
 	if !scope.All && (scope.OwnerID == "" || meta.OwnerID != scope.OwnerID) {
 		return nil, errors.New("image not found")
 	}
-	if err := s.writeImageMetadataForRef(ref, "", "", visibility); err != nil {
+	if err := s.writeImageMetadataForRef(ref, "", "", visibility, GeneratedImageMetadata{
+		SharePromptParams: options.SharePromptParams,
+		ShareReferences:   options.ShareReferences,
+	}); err != nil {
 		return nil, err
 	}
 	nextMeta := s.imageMetadata(ref.rel)
@@ -230,21 +422,7 @@ func (s *ImageService) UpdateImageVisibility(value, visibility string, scope Ima
 		"visibility": nextMeta.Visibility,
 		"created_at": ref.info.ModTime().Format("2006-01-02 15:04:05"),
 	}
-	if nextMeta.OwnerID != "" {
-		item["owner_id"] = nextMeta.OwnerID
-	}
-	if nextMeta.OwnerName != "" {
-		item["owner_name"] = nextMeta.OwnerName
-	}
-	if nextMeta.PublishedAt != "" {
-		item["published_at"] = nextMeta.PublishedAt
-	}
-	if nextMeta.ResolutionPreset != "" {
-		item["resolution_preset"] = nextMeta.ResolutionPreset
-	}
-	if nextMeta.RequestedSize != "" {
-		item["requested_size"] = nextMeta.RequestedSize
-	}
+	addImageMetadataFields(item, nextMeta)
 	if width, height, ok := imageFileDimensions(ref.path); ok {
 		setImageItemDimensions(item, width, height)
 	}
@@ -280,15 +458,60 @@ func (s *ImageService) ImageFileAccess(value string, scope ImageAccessScope) (Im
 	}, nil
 }
 
+func (s *ImageService) ImageReferenceFileAccess(value string) (ImageReferenceFileAccess, error) {
+	rel, err := imageReferenceRelativePathFromValue(value)
+	if err != nil {
+		return ImageReferenceFileAccess{}, err
+	}
+	sourceRel, err := sourceImageRelativePathFromReference(rel)
+	if err != nil {
+		return ImageReferenceFileAccess{}, err
+	}
+	meta := s.imageMetadata(sourceRel)
+	var metadata imageReferenceMetadata
+	for _, ref := range meta.ReferenceImages {
+		if ref.Path == rel {
+			metadata = ref
+			break
+		}
+	}
+	if metadata.Path == "" {
+		return ImageReferenceFileAccess{}, errors.New("image not found")
+	}
+	root, err := filepath.Abs(s.imageReferencesDir())
+	if err != nil {
+		return ImageReferenceFileAccess{}, err
+	}
+	refPath := filepath.Join(root, filepath.FromSlash(rel))
+	if !pathInsideRoot(root, refPath) {
+		return ImageReferenceFileAccess{}, errors.New("invalid image path")
+	}
+	info, err := os.Stat(refPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ImageReferenceFileAccess{}, errors.New("image not found")
+		}
+		return ImageReferenceFileAccess{}, err
+	}
+	if info.IsDir() {
+		return ImageReferenceFileAccess{}, errors.New("image not found")
+	}
+	return ImageReferenceFileAccess{
+		Rel:         rel,
+		SourceRel:   sourceRel,
+		Path:        refPath,
+		ContentType: metadata.ContentType,
+		Visibility:  meta.Visibility,
+		OwnerID:     meta.OwnerID,
+		Shared:      meta.ShareReferences,
+	}, nil
+}
+
 func (s *ImageService) DeleteImages(paths []string, scope ImageAccessScope) (map[string]any, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("paths is required")
 	}
 	imageRoot, err := filepath.Abs(s.config.ImagesDir())
-	if err != nil {
-		return nil, err
-	}
-	thumbnailRoot, err := filepath.Abs(s.config.ImageThumbnailsDir())
 	if err != nil {
 		return nil, err
 	}
@@ -307,38 +530,29 @@ func (s *ImageService) DeleteImages(paths []string, scope ImageAccessScope) (map
 		}
 		seen[rel] = struct{}{}
 
-		imagePath := filepath.Join(imageRoot, filepath.FromSlash(rel))
-		if !pathInsideRoot(imageRoot, imagePath) {
+		if _, err := s.imageFileRef(imageRoot, rel); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				missing++
+				continue
+			}
+			return nil, err
+		}
+		if !pathInsideRoot(imageRoot, filepath.Join(imageRoot, filepath.FromSlash(rel))) {
 			return nil, errors.New("invalid image path")
 		}
 		if !scope.All && (scope.OwnerID == "" || s.imageOwner(rel) != scope.OwnerID) {
 			missing++
 			continue
 		}
-		if err := s.removeImageThumbnail(thumbnailRoot, rel); err != nil {
-			return nil, err
-		}
-		if err := s.removeImageOwner(rel); err != nil {
-			return nil, err
-		}
-		info, err := os.Stat(imagePath)
+		stats, err := s.removeImageGroup(rel)
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
-			missing++
-		} else if info.IsDir() {
-			return nil, errors.New("image path is not a file")
-		} else if err := os.Remove(imagePath); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
+			return nil, err
+		}
+		if stats.images == 0 {
 			missing++
 		} else {
 			deleted++
 		}
-
-		removeEmptyParentDirs(imageRoot, filepath.Dir(imagePath))
 		removedPaths = append(removedPaths, rel)
 	}
 	return map[string]any{"deleted": deleted, "missing": missing, "paths": removedPaths}, nil
@@ -589,13 +803,25 @@ func normalizeImageMetadata(raw map[string]any) imageMetadata {
 		visibility = ImageVisibilityPrivate
 	}
 	return imageMetadata{
-		OwnerID:          strings.TrimSpace(toString(raw["owner_id"])),
-		OwnerName:        strings.TrimSpace(toString(raw["owner_name"])),
-		Visibility:       visibility,
-		PublishedAt:      strings.TrimSpace(toString(raw["published_at"])),
-		ResolutionPreset: NormalizeImageResolutionPreset(toString(raw["resolution_preset"])),
-		RequestedSize:    strings.TrimSpace(toString(raw["requested_size"])),
-		OutputFormat:     NormalizeImageOutputFormat(strings.TrimSpace(toString(raw["output_format"]))),
+		OwnerID:           strings.TrimSpace(toString(raw["owner_id"])),
+		OwnerName:         strings.TrimSpace(toString(raw["owner_name"])),
+		Visibility:        visibility,
+		PublishedAt:       strings.TrimSpace(toString(raw["published_at"])),
+		Prompt:            strings.TrimSpace(toString(raw["prompt"])),
+		Model:             strings.TrimSpace(toString(raw["model"])),
+		Quality:           strings.TrimSpace(toString(raw["quality"])),
+		ResolutionPreset:  NormalizeImageResolutionPreset(toString(raw["resolution_preset"])),
+		RequestedSize:     strings.TrimSpace(toString(raw["requested_size"])),
+		OutputFormat:      NormalizeImageOutputFormat(strings.TrimSpace(toString(raw["output_format"]))),
+		OutputCompression: imageOutputCompressionMetadata(raw["output_compression"]),
+		Background:        strings.TrimSpace(toString(raw["background"])),
+		Moderation:        strings.TrimSpace(toString(raw["moderation"])),
+		Style:             strings.TrimSpace(toString(raw["style"])),
+		PartialImages:     positiveImageMetadataInt(raw["partial_images"]),
+		InputImageMask:    strings.TrimSpace(toString(raw["input_image_mask"])),
+		ReferenceImages:   normalizeImageReferenceMetadata(raw["reference_images"]),
+		SharePromptParams: boolMetadataValue(raw["share_prompt_parameters"]),
+		ShareReferences:   boolMetadataValue(raw["share_reference_images"]),
 	}
 }
 
@@ -623,6 +849,15 @@ func (s *ImageService) writeImageMetadataForRef(ref imageFileRef, ownerID, owner
 	}
 	if len(metadataValues) > 0 {
 		metadata := metadataValues[0]
+		if prompt := strings.TrimSpace(metadata.Prompt); prompt != "" {
+			meta.Prompt = prompt
+		}
+		if model := strings.TrimSpace(metadata.Model); model != "" {
+			meta.Model = model
+		}
+		if quality := strings.TrimSpace(metadata.Quality); quality != "" {
+			meta.Quality = quality
+		}
 		if preset := NormalizeImageResolutionPreset(metadata.ResolutionPreset); preset != "" {
 			meta.ResolutionPreset = preset
 		}
@@ -632,6 +867,36 @@ func (s *ImageService) writeImageMetadataForRef(ref imageFileRef, ownerID, owner
 		if outputFormat := NormalizeImageOutputFormat(metadata.OutputFormat); outputFormat != "" {
 			meta.OutputFormat = outputFormat
 		}
+		if metadata.OutputCompression != nil {
+			compression := *metadata.OutputCompression
+			if compression < 0 {
+				compression = 0
+			} else if compression > 100 {
+				compression = 100
+			}
+			meta.OutputCompression = &compression
+		}
+		if background := strings.TrimSpace(metadata.Background); background != "" {
+			meta.Background = background
+		}
+		if moderation := strings.TrimSpace(metadata.Moderation); moderation != "" {
+			meta.Moderation = moderation
+		}
+		if style := strings.TrimSpace(metadata.Style); style != "" {
+			meta.Style = style
+		}
+		if metadata.PartialImages != nil && *metadata.PartialImages > 0 {
+			partialImages := *metadata.PartialImages
+			meta.PartialImages = &partialImages
+		}
+		if inputImageMask := strings.TrimSpace(metadata.InputImageMask); inputImageMask != "" {
+			meta.InputImageMask = inputImageMask
+		}
+		if len(metadata.ReferenceImages) > 0 {
+			meta.ReferenceImages = s.writeImageReferencesForRef(ref, metadata.ReferenceImages)
+		}
+		meta.SharePromptParams = metadata.SharePromptParams
+		meta.ShareReferences = metadata.ShareReferences
 	}
 	if meta.Visibility == "" {
 		meta.Visibility = ImageVisibilityPrivate
@@ -657,6 +922,15 @@ func (s *ImageService) writeImageMetadata(rel string, meta imageMetadata) error 
 	if meta.PublishedAt != "" {
 		value["published_at"] = meta.PublishedAt
 	}
+	if meta.Prompt != "" {
+		value["prompt"] = meta.Prompt
+	}
+	if meta.Model != "" {
+		value["model"] = meta.Model
+	}
+	if meta.Quality != "" {
+		value["quality"] = meta.Quality
+	}
 	if meta.ResolutionPreset != "" {
 		value["resolution_preset"] = meta.ResolutionPreset
 	}
@@ -665,6 +939,52 @@ func (s *ImageService) writeImageMetadata(rel string, meta imageMetadata) error 
 	}
 	if meta.OutputFormat != "" {
 		value["output_format"] = meta.OutputFormat
+	}
+	if meta.OutputCompression != nil {
+		value["output_compression"] = *meta.OutputCompression
+	}
+	if meta.Background != "" {
+		value["background"] = meta.Background
+	}
+	if meta.Moderation != "" {
+		value["moderation"] = meta.Moderation
+	}
+	if meta.Style != "" {
+		value["style"] = meta.Style
+	}
+	if meta.PartialImages != nil {
+		value["partial_images"] = *meta.PartialImages
+	}
+	if meta.InputImageMask != "" {
+		value["input_image_mask"] = meta.InputImageMask
+	}
+	if meta.SharePromptParams {
+		value["share_prompt_parameters"] = true
+	}
+	if meta.ShareReferences {
+		value["share_reference_images"] = true
+	}
+	if len(meta.ReferenceImages) > 0 {
+		refs := make([]map[string]any, 0, len(meta.ReferenceImages))
+		for _, ref := range meta.ReferenceImages {
+			if ref.Path == "" {
+				continue
+			}
+			item := map[string]any{"path": ref.Path}
+			if ref.Filename != "" {
+				item["filename"] = ref.Filename
+			}
+			if ref.ContentType != "" {
+				item["content_type"] = ref.ContentType
+			}
+			if ref.Size > 0 {
+				item["size"] = ref.Size
+			}
+			refs = append(refs, item)
+		}
+		if len(refs) > 0 {
+			value["reference_images"] = refs
+		}
 	}
 	if s.store != nil {
 		return s.store.SaveJSONDocument(imageOwnerDocumentName(rel), value)
@@ -689,6 +1009,334 @@ func (s *ImageService) removeImageOwner(rel string) error {
 	}
 	removeEmptyParentDirs(s.config.ImageMetadataDir(), filepath.Dir(metaPath))
 	return nil
+}
+
+func (s *ImageService) imageReferencesDir() string {
+	return filepath.Join(s.config.ImageMetadataDir(), imageReferencePrefix)
+}
+
+func (s *ImageService) writeImageReferencesForRef(ref imageFileRef, refs []GeneratedImageReference) []imageReferenceMetadata {
+	if len(refs) == 0 {
+		return nil
+	}
+	if err := s.removeImageReferences(ref.rel); err != nil {
+		return nil
+	}
+	root, err := filepath.Abs(s.imageReferencesDir())
+	if err != nil {
+		return nil
+	}
+	dir := filepath.Join(root, filepath.FromSlash(ref.rel+".refs"))
+	if !pathInsideRoot(root, dir) {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil
+	}
+	result := make([]imageReferenceMetadata, 0, len(refs))
+	for index, source := range refs {
+		if len(source.Data) == 0 {
+			continue
+		}
+		filename := safeImageReferenceFilename(source.Filename, index)
+		rel := filepath.ToSlash(filepath.Join(ref.rel+".refs", strconv.Itoa(index+1)+"-"+filename))
+		if _, err := cleanImageReferenceRelativePath(rel); err != nil {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if !pathInsideRoot(root, path) {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			continue
+		}
+		if err := os.WriteFile(path, source.Data, 0o644); err != nil {
+			continue
+		}
+		result = append(result, imageReferenceMetadata{
+			Path:        rel,
+			Filename:    strings.TrimSpace(source.Filename),
+			ContentType: strings.TrimSpace(source.ContentType),
+			Size:        int64(len(source.Data)),
+		})
+	}
+	if len(result) == 0 {
+		_ = os.Remove(dir)
+		removeEmptyParentDirs(root, filepath.Dir(dir))
+	}
+	return result
+}
+
+func (s *ImageService) removeImageReferences(sourceRel string) error {
+	sourceRel, err := cleanImageRelativePath(sourceRel)
+	if err != nil {
+		return err
+	}
+	root, err := filepath.Abs(s.imageReferencesDir())
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(root, filepath.FromSlash(sourceRel+".refs"))
+	if !pathInsideRoot(root, dir) {
+		return errors.New("invalid image path")
+	}
+	removeErr := os.RemoveAll(dir)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return removeErr
+	}
+	removeEmptyParentDirs(root, filepath.Dir(dir))
+	return nil
+}
+
+func (s *ImageService) imageCleanupCandidates() []imageCleanupCandidate {
+	root, err := filepath.Abs(s.config.ImagesDir())
+	if err != nil {
+		return nil
+	}
+	candidates := make([]imageCleanupCandidate, 0)
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		meta := s.imageMetadata(rel)
+		candidates = append(candidates, imageCleanupCandidate{
+			rel:       rel,
+			path:      path,
+			info:      info,
+			meta:      meta,
+			groupSize: s.imageGroupSize(rel, info.Size()),
+		})
+		return nil
+	})
+	return candidates
+}
+
+func (s *ImageService) cleanupByRetention(retentionDays int, includePublic bool) (imageStorageRemovalStats, int, error) {
+	if retentionDays < 1 {
+		retentionDays = 1
+	}
+	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	var total imageStorageRemovalStats
+	preservedPublic := 0
+	for _, candidate := range s.imageCleanupCandidates() {
+		if !candidate.info.ModTime().Before(cutoff) {
+			continue
+		}
+		if candidate.meta.Visibility == ImageVisibilityPublic && !includePublic {
+			preservedPublic++
+			continue
+		}
+		stats, err := s.removeImageGroup(candidate.rel)
+		if err != nil {
+			return total, preservedPublic, err
+		}
+		total.add(stats)
+	}
+	return total, preservedPublic, nil
+}
+
+func (s *ImageService) cleanupByStorageLimit(maxBytes int64, includePublic bool) (imageStorageRemovalStats, int, error) {
+	if maxBytes <= 0 {
+		return imageStorageRemovalStats{}, 0, nil
+	}
+	summary := s.StorageGovernance()
+	if summary.TotalBytes <= maxBytes {
+		return imageStorageRemovalStats{}, 0, nil
+	}
+	candidates := s.imageCleanupCandidates()
+	sort.Slice(candidates, func(i, j int) bool {
+		leftPublic := candidates[i].meta.Visibility == ImageVisibilityPublic
+		rightPublic := candidates[j].meta.Visibility == ImageVisibilityPublic
+		if leftPublic != rightPublic {
+			return !leftPublic
+		}
+		return candidates[i].info.ModTime().Before(candidates[j].info.ModTime())
+	})
+	current := summary.TotalBytes
+	var total imageStorageRemovalStats
+	preservedPublic := 0
+	for _, candidate := range candidates {
+		if current <= maxBytes {
+			break
+		}
+		if candidate.meta.Visibility == ImageVisibilityPublic && !includePublic {
+			preservedPublic++
+			continue
+		}
+		stats, err := s.removeImageGroup(candidate.rel)
+		if err != nil {
+			return total, preservedPublic, err
+		}
+		total.add(stats)
+		if stats.bytes > 0 {
+			current -= stats.bytes
+		} else {
+			current -= candidate.groupSize
+		}
+	}
+	return total, preservedPublic, nil
+}
+
+func (s *ImageService) removeImageGroup(rel string) (imageStorageRemovalStats, error) {
+	rel, err := cleanImageRelativePath(rel)
+	if err != nil {
+		return imageStorageRemovalStats{}, err
+	}
+	var stats imageStorageRemovalStats
+	thumbnailRoot, err := filepath.Abs(s.config.ImageThumbnailsDir())
+	if err != nil {
+		return stats, err
+	}
+	if removed, bytes, err := s.removeImageThumbnailWithStats(thumbnailRoot, rel); err != nil {
+		return stats, err
+	} else if removed > 0 {
+		stats.thumbnails++
+		if removed > 1 {
+			stats.metadataFiles += removed - 1
+		}
+		stats.bytes += bytes
+	}
+	if removed, bytes, err := s.removeImageReferencesWithStats(rel); err != nil {
+		return stats, err
+	} else {
+		stats.referenceFiles += removed
+		stats.bytes += bytes
+	}
+	if removed, bytes, err := s.removeImageOwnerWithStats(rel); err != nil {
+		return stats, err
+	} else {
+		stats.metadataFiles += removed
+		stats.bytes += bytes
+	}
+	imageRoot, err := filepath.Abs(s.config.ImagesDir())
+	if err != nil {
+		return stats, err
+	}
+	imagePath := filepath.Join(imageRoot, filepath.FromSlash(rel))
+	if !pathInsideRoot(imageRoot, imagePath) {
+		return stats, errors.New("invalid image path")
+	}
+	if removed, bytes, err := removeFileWithStats(imagePath); err != nil {
+		return stats, err
+	} else if removed {
+		stats.images++
+		stats.bytes += bytes
+	}
+	removeEmptyParentDirs(imageRoot, filepath.Dir(imagePath))
+	return stats, nil
+}
+
+func (s *ImageService) removeImageOwnerWithStats(rel string) (int, int64, error) {
+	if s.store != nil {
+		if err := s.store.DeleteJSONDocument(imageOwnerDocumentName(rel)); err != nil {
+			return 0, 0, err
+		}
+		return 1, 0, nil
+	}
+	metaPath, err := s.imageOwnerMetadataPath(rel)
+	if err != nil {
+		return 0, 0, err
+	}
+	removed, bytes, err := removeFileWithStats(metaPath)
+	if err != nil {
+		return 0, 0, err
+	}
+	if removed {
+		removeEmptyParentDirs(s.config.ImageMetadataDir(), filepath.Dir(metaPath))
+		return 1, bytes, nil
+	}
+	return 0, 0, nil
+}
+
+func (s *ImageService) removeImageReferencesWithStats(sourceRel string) (int, int64, error) {
+	sourceRel, err := cleanImageRelativePath(sourceRel)
+	if err != nil {
+		return 0, 0, err
+	}
+	root, err := filepath.Abs(s.imageReferencesDir())
+	if err != nil {
+		return 0, 0, err
+	}
+	dir := filepath.Join(root, filepath.FromSlash(sourceRel+".refs"))
+	if !pathInsideRoot(root, dir) {
+		return 0, 0, errors.New("invalid image path")
+	}
+	bytes, files := directorySize(dir, "")
+	removeErr := os.RemoveAll(dir)
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return 0, 0, removeErr
+	}
+	removeEmptyParentDirs(root, filepath.Dir(dir))
+	return files, bytes, nil
+}
+
+func (s *ImageService) removeImageThumbnailWithStats(root, rel string) (int, int64, error) {
+	thumbPath := filepath.Join(root, filepath.FromSlash(rel)+thumbnailExtension)
+	if !pathInsideRoot(root, thumbPath) {
+		return 0, 0, errors.New("invalid image path")
+	}
+	removed := 0
+	var bytes int64
+	if didRemove, size, err := removeFileWithStats(thumbPath); err != nil {
+		return 0, 0, err
+	} else if didRemove {
+		removed++
+		bytes += size
+	}
+	if didRemove, size, err := removeFileWithStats(thumbPath + ".json"); err != nil {
+		return 0, 0, err
+	} else if didRemove {
+		removed++
+		bytes += size
+	}
+	if s.store != nil {
+		if err := s.store.DeleteJSONDocument(thumbnailMetadataDocumentName(rel)); err != nil {
+			return 0, 0, err
+		}
+	}
+	removeEmptyParentDirs(root, filepath.Dir(thumbPath))
+	return removed, bytes, nil
+}
+
+func (s *ImageService) clearThumbnailCache() (imageStorageRemovalStats, error) {
+	root := s.config.ImageThumbnailsDir()
+	bytes, thumbnails, metadataFiles := thumbnailCacheStats(root)
+	if err := os.RemoveAll(root); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return imageStorageRemovalStats{}, err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return imageStorageRemovalStats{}, err
+	}
+	return imageStorageRemovalStats{bytes: bytes, thumbnails: thumbnails, metadataFiles: metadataFiles}, nil
+}
+
+func (s *ImageService) imageGroupSize(rel string, imageSize int64) int64 {
+	total := imageSize
+	thumbPath := s.thumbnailPath(rel)
+	for _, path := range []string{thumbPath, thumbPath + ".json"} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			total += info.Size()
+		}
+	}
+	metaPath, err := s.imageOwnerMetadataPath(rel)
+	if err == nil {
+		if info, statErr := os.Stat(metaPath); statErr == nil && !info.IsDir() {
+			total += info.Size()
+		}
+	}
+	refDir := filepath.Join(s.imageReferencesDir(), filepath.FromSlash(rel+".refs"))
+	refBytes, _ := directorySize(refDir, "")
+	total += refBytes
+	return total
 }
 
 func (s *ImageService) imageOwnerMetadataPath(rel string) (string, error) {
@@ -737,6 +1385,100 @@ func (s *ImageService) removeImageThumbnail(root, rel string) error {
 
 func imageOwnerDocumentName(rel string) string {
 	return "image_metadata/" + filepath.ToSlash(rel) + ".json"
+}
+
+type imageMetadataFieldOptions struct {
+	BaseURL                string
+	IncludeReusableFields  bool
+	IncludeReferenceImages bool
+}
+
+func addImageMetadataFields(item map[string]any, meta imageMetadata, optionsValues ...imageMetadataFieldOptions) {
+	options := imageMetadataFieldOptions{IncludeReusableFields: true, IncludeReferenceImages: true}
+	if len(optionsValues) > 0 {
+		options = optionsValues[0]
+	}
+	if meta.OwnerID != "" {
+		item["owner_id"] = meta.OwnerID
+	}
+	if meta.OwnerName != "" {
+		item["owner_name"] = meta.OwnerName
+	}
+	if meta.PublishedAt != "" {
+		item["published_at"] = meta.PublishedAt
+	}
+	item["share_prompt_parameters"] = meta.SharePromptParams
+	item["share_reference_images"] = meta.ShareReferences
+	if options.IncludeReusableFields {
+		if meta.Prompt != "" {
+			item["prompt"] = meta.Prompt
+		}
+		if meta.Model != "" {
+			item["model"] = meta.Model
+		}
+		if meta.Quality != "" {
+			item["quality"] = meta.Quality
+		}
+		if meta.ResolutionPreset != "" {
+			item["resolution_preset"] = meta.ResolutionPreset
+		}
+		if meta.RequestedSize != "" {
+			item["requested_size"] = meta.RequestedSize
+		}
+		if meta.OutputFormat != "" {
+			item["output_format"] = meta.OutputFormat
+		}
+		if meta.OutputCompression != nil {
+			item["output_compression"] = *meta.OutputCompression
+		}
+		if meta.Background != "" {
+			item["background"] = meta.Background
+		}
+		if meta.Moderation != "" {
+			item["moderation"] = meta.Moderation
+		}
+		if meta.Style != "" {
+			item["style"] = meta.Style
+		}
+		if meta.PartialImages != nil {
+			item["partial_images"] = *meta.PartialImages
+		}
+		if meta.InputImageMask != "" {
+			item["input_image_mask"] = meta.InputImageMask
+		}
+	}
+	if options.IncludeReferenceImages && len(meta.ReferenceImages) > 0 {
+		baseURL := strings.TrimSpace(options.BaseURL)
+		referenceItems := make([]map[string]any, 0, len(meta.ReferenceImages))
+		referenceURLs := make([]string, 0, len(meta.ReferenceImages))
+		for _, ref := range meta.ReferenceImages {
+			if ref.Path == "" {
+				continue
+			}
+			refItem := map[string]any{"path": ref.Path}
+			if ref.Filename != "" {
+				refItem["filename"] = ref.Filename
+			}
+			if ref.ContentType != "" {
+				refItem["content_type"] = ref.ContentType
+			}
+			if ref.Size > 0 {
+				refItem["size"] = ref.Size
+			}
+			if baseURL != "" {
+				url := publicAssetURL(baseURL, "image-references", ref.Path)
+				refItem["url"] = url
+				referenceURLs = append(referenceURLs, url)
+			}
+			referenceItems = append(referenceItems, refItem)
+		}
+		if len(referenceItems) > 0 {
+			item["reference_images"] = referenceItems
+		}
+		if len(referenceURLs) > 0 {
+			item["reference_image_urls"] = referenceURLs
+		}
+	}
 }
 
 func NormalizeImageVisibility(value string) (string, error) {
@@ -916,6 +1658,135 @@ func imageRelativePathFromValue(value string) (string, error) {
 	return cleanImageRelativePath(text)
 }
 
+func cleanImageReferenceRelativePath(value string) (string, error) {
+	rel, err := cleanImageRelativePath(value)
+	if err != nil {
+		return "", err
+	}
+	if _, err := sourceImageRelativePathFromReference(rel); err != nil {
+		return "", err
+	}
+	return rel, nil
+}
+
+func imageReferenceRelativePathFromValue(value string) (string, error) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return "", errors.New("invalid image path")
+	}
+	if parsed, err := url.Parse(text); err == nil {
+		pathValue := parsed.EscapedPath()
+		if pathValue == "" {
+			pathValue = parsed.Path
+		}
+		if parsed.Scheme != "" || strings.HasPrefix(pathValue, "/") {
+			const imageReferencePrefix = "/image-references/"
+			index := strings.Index(pathValue, imageReferencePrefix)
+			if index < 0 {
+				return "", errors.New("invalid image path")
+			}
+			rel, err := url.PathUnescape(pathValue[index+len(imageReferencePrefix):])
+			if err != nil {
+				return "", errors.New("invalid image path")
+			}
+			return cleanImageReferenceRelativePath(rel)
+		}
+	}
+	return cleanImageReferenceRelativePath(text)
+}
+
+func sourceImageRelativePathFromReference(value string) (string, error) {
+	rel, err := cleanImageRelativePath(value)
+	if err != nil {
+		return "", err
+	}
+	index := strings.LastIndex(rel, imageReferenceMarker)
+	if index <= 0 || index+len(imageReferenceMarker) >= len(rel) {
+		return "", errors.New("invalid image path")
+	}
+	return cleanImageRelativePath(rel[:index])
+}
+
+func normalizeImageReferenceMetadata(value any) []imageReferenceMetadata {
+	items := imageReferenceMetadataItems(value)
+	if len(items) == 0 {
+		return nil
+	}
+	refs := make([]imageReferenceMetadata, 0, len(items))
+	for _, item := range items {
+		rel, err := cleanImageReferenceRelativePath(toString(item["path"]))
+		if err != nil {
+			continue
+		}
+		refs = append(refs, imageReferenceMetadata{
+			Path:        rel,
+			Filename:    strings.TrimSpace(toString(item["filename"])),
+			ContentType: strings.TrimSpace(toString(item["content_type"])),
+			Size:        int64(numericMetaValue(item["size"])),
+		})
+	}
+	return refs
+}
+
+func safeImageReferenceFilename(value string, index int) string {
+	name := filepath.Base(filepath.ToSlash(strings.TrimSpace(value)))
+	if name == "." || name == "/" || name == "" {
+		name = "reference-" + strconv.Itoa(index+1) + ".png"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	clean := strings.Trim(b.String(), ".- _")
+	if clean == "" {
+		clean = "reference-" + strconv.Itoa(index+1) + ".png"
+	}
+	if !strings.Contains(filepath.Base(clean), ".") {
+		clean += ".png"
+	}
+	if len(clean) > 96 {
+		ext := filepath.Ext(clean)
+		stem := strings.TrimSuffix(clean, ext)
+		limit := 96 - len(ext)
+		if limit < 1 {
+			return clean[:96]
+		}
+		if len(stem) > limit {
+			stem = stem[:limit]
+		}
+		clean = stem + ext
+	}
+	return clean
+}
+
+func imageReferenceMetadataItems(value any) []map[string]any {
+	switch v := value.(type) {
+	case []map[string]any:
+		return v
+	case []any:
+		items := make([]map[string]any, 0, len(v))
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				items = append(items, m)
+			}
+		}
+		return items
+	default:
+		return nil
+	}
+}
+
 func removeImageThumbnail(root, rel string) error {
 	thumbPath := filepath.Join(root, filepath.FromSlash(rel)+thumbnailExtension)
 	if !pathInsideRoot(root, thumbPath) {
@@ -931,6 +1802,96 @@ func removeImageThumbnail(root, rel string) error {
 	}
 	removeEmptyParentDirs(root, filepath.Dir(thumbPath))
 	return nil
+}
+
+func (s *imageStorageRemovalStats) add(next imageStorageRemovalStats) {
+	s.bytes += next.bytes
+	s.images += next.images
+	s.thumbnails += next.thumbnails
+	s.metadataFiles += next.metadataFiles
+	s.referenceFiles += next.referenceFiles
+}
+
+func removeFileWithStats(path string) (bool, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+	if info.IsDir() {
+		return false, 0, nil
+	}
+	size := info.Size()
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+	return true, size, nil
+}
+
+func directorySize(root, skipPrefix string) (int64, int) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return 0, 0
+	}
+	if skipPrefix != "" {
+		if abs, err := filepath.Abs(skipPrefix); err == nil {
+			skipPrefix = abs
+		}
+	}
+	var total int64
+	files := 0
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if skipPrefix != "" {
+			if abs, absErr := filepath.Abs(path); absErr == nil && (abs == skipPrefix || strings.HasPrefix(abs, skipPrefix+string(os.PathSeparator))) {
+				if d.IsDir() && abs != root {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		total += info.Size()
+		files++
+		return nil
+	})
+	return total, files
+}
+
+func thumbnailCacheStats(root string) (int64, int, int) {
+	var bytes int64
+	thumbnails := 0
+	metadataFiles := 0
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		bytes += info.Size()
+		if strings.HasSuffix(path, ".json") {
+			metadataFiles++
+		} else {
+			thumbnails++
+		}
+		return nil
+	})
+	return bytes, thumbnails, metadataFiles
 }
 
 func writeJPEGThumbnail(path string, img image.Image) error {
@@ -1017,15 +1978,82 @@ func isCurrentThumbnailMetadata(meta map[string]any) bool {
 }
 
 func numericMetaValue(value any) int {
+	n, _ := imageMetadataIntValue(value)
+	return n
+}
+
+func imageMetadataIntValue(value any) (int, bool) {
 	switch v := value.(type) {
 	case int:
-		return v
+		return v, true
 	case int64:
-		return int(v)
+		return int(v), true
 	case float64:
-		return int(v)
+		return int(v), true
+	case json.Number:
+		n, err := v.Int64()
+		if err == nil {
+			return int(n), true
+		}
+	case string:
+		text := strings.TrimSpace(v)
+		if text == "" {
+			return 0, false
+		}
+		n, err := strconv.Atoi(text)
+		if err == nil {
+			return n, true
+		}
 	default:
-		return 0
+		return 0, false
+	}
+	return 0, false
+}
+
+func imageOutputCompressionMetadata(value any) *int {
+	compression, ok := imageMetadataIntValue(value)
+	if !ok {
+		return nil
+	}
+	if compression < 0 {
+		compression = 0
+	} else if compression > 100 {
+		compression = 100
+	}
+	return &compression
+}
+
+func positiveImageMetadataInt(value any) *int {
+	count, ok := imageMetadataIntValue(value)
+	if !ok {
+		return nil
+	}
+	if count <= 0 {
+		return nil
+	}
+	return &count
+}
+
+func boolMetadataValue(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	case json.Number:
+		n, err := v.Int64()
+		return err == nil && n != 0
+	default:
+		return false
 	}
 }
 

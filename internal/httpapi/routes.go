@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 )
@@ -367,7 +369,8 @@ func (a *App) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireIdentity(w, r, ""); !ok {
+	operator, ok := a.requireIdentity(w, r, "")
+	if !ok {
 		return
 	}
 	base := "/api/admin/users"
@@ -420,6 +423,40 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	parts := splitPath(r.URL.Path)
 	if len(parts) < 4 || parts[0] != "api" || parts[1] != "admin" || parts[2] != "users" {
 		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 5 && parts[3] == "billing-adjustments" && parts[4] == "bulk" {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		targets, err := a.bulkBillingTargetUserIDs(body)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		billingBody := util.StringMap(body["billing"])
+		if len(billingBody) == 0 {
+			billingBody = body
+		}
+		results, err := a.billing.ApplyBulkAdjustment(targets, operator, billingBody)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		response, err := a.managedUsersResponse(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		response["results"] = publicBulkBillingAdjustmentResults(results)
+		response["summary"] = bulkBillingAdjustmentSummary(results)
+		util.WriteJSON(w, http.StatusOK, response)
 		return
 	}
 	userID := parts[3]
@@ -483,11 +520,58 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		util.WriteJSON(w, http.StatusOK, response)
 		return
 	}
+	if len(parts) == 5 && parts[4] == "billing-adjustments" {
+		switch r.Method {
+		case http.MethodGet:
+			if findManagedUser(a.auth.ListUsers(), userID) == nil {
+				util.WriteError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.billing.ListAdjustments(userID, util.ToInt(r.URL.Query().Get("limit"), 20))})
+		case http.MethodPost:
+			body, err := readJSONMap(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, "invalid json body")
+				return
+			}
+			if findManagedUser(a.auth.ListUsers(), userID) == nil {
+				util.WriteError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			result, err := a.billing.ApplyAdjustment(userID, operator, body)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			response, err := a.managedUsersResponse(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if current := a.managedUser(userID); current != nil {
+				response["item"] = current
+			}
+			response["billing"] = result["billing"]
+			response["adjustment"] = result["adjustment"]
+			util.WriteJSON(w, http.StatusOK, response)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+		return
+	}
 	if len(parts) != 4 {
 		http.NotFound(w, r)
 		return
 	}
 	switch r.Method {
+	case http.MethodGet:
+		item := a.managedUser(userID)
+		if item == nil {
+			util.WriteError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		item["billing_adjustments"] = a.billing.ListAdjustments(userID, 10)
+		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item})
 	case http.MethodPost:
 		body, _ := readJSONMap(r)
 		updates := map[string]any{}
@@ -504,23 +588,32 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			}
 			updates["role_id"] = value
 		}
-		if len(updates) == 0 {
+		billingBody := util.StringMap(body["billing"])
+		if len(updates) == 0 && len(billingBody) == 0 {
 			util.WriteError(w, http.StatusBadRequest, "no updates provided")
 			return
 		}
-		item := a.auth.UpdateUser(userID, updates)
-		if item == nil {
+		if len(updates) > 0 {
+			if item := a.auth.UpdateUser(userID, updates); item == nil {
+				util.WriteError(w, http.StatusNotFound, "user not found")
+				return
+			}
+		} else if findManagedUser(a.auth.ListUsers(), userID) == nil {
 			util.WriteError(w, http.StatusNotFound, "user not found")
 			return
+		}
+		if len(billingBody) > 0 {
+			if _, err := a.billing.ApplyAdjustment(userID, operator, billingBody); err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		response, err := a.managedUsersResponse(r)
 		if err != nil {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if current := a.managedUser(userID); current != nil {
-			item = current
-		}
+		item := a.managedUser(userID)
 		response["item"] = item
 		util.WriteJSON(w, http.StatusOK, response)
 	case http.MethodDelete:
@@ -545,6 +638,8 @@ type managedUsersQuery struct {
 	Search     string
 	Provider   string
 	Status     string
+	SortBy     string
+	SortOrder  string
 	Total      int
 	TotalPages int
 }
@@ -555,6 +650,8 @@ func (a *App) managedUsersResponse(r *http.Request) (map[string]any, error) {
 		return nil, err
 	}
 	items := filterManagedUsers(a.auth.ListUsers(), query)
+	a.prepareManagedUsersSortValues(items, query.SortBy)
+	sortManagedUsers(items, query)
 	query.Total = len(items)
 	query.TotalPages = managedUsersTotalPages(query.Total, query.PageSize)
 	if query.Page > query.TotalPages {
@@ -575,6 +672,8 @@ func (a *App) managedUsersResponse(r *http.Request) (map[string]any, error) {
 		"total":       query.Total,
 		"page":        query.Page,
 		"page_size":   query.PageSize,
+		"sort_by":     query.SortBy,
+		"sort_order":  query.SortOrder,
 		"total_pages": query.TotalPages,
 	}, nil
 }
@@ -589,7 +688,26 @@ func (a *App) managedUser(id string) map[string]any {
 }
 
 func (a *App) attachManagedUserUsage(items []map[string]any) {
-	stats := a.logs.UserUsageStats(14)
+	userIDs := managedUserIDs(items)
+	if len(userIDs) == 0 {
+		return
+	}
+	a.attachManagedUserUsageStats(items, userIDs)
+	a.attachManagedUserBillingStates(items, userIDs)
+}
+
+func managedUserIDs(items []map[string]any) []string {
+	userIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if userID := util.Clean(item["id"]); userID != "" {
+			userIDs = append(userIDs, userID)
+		}
+	}
+	return userIDs
+}
+
+func (a *App) attachManagedUserUsageStats(items []map[string]any, userIDs []string) {
+	stats := a.logs.UserUsageStatsForUsers(14, userIDs)
 	for _, item := range items {
 		userID := util.Clean(item["id"])
 		usage := stats[userID]
@@ -599,6 +717,133 @@ func (a *App) attachManagedUserUsage(items []map[string]any) {
 		for key, value := range usage {
 			item[key] = value
 		}
+	}
+}
+
+func (a *App) attachManagedUserBillingStates(items []map[string]any, userIDs []string) {
+	billingStates := a.billing.GetMany(userIDs)
+	for _, item := range items {
+		userID := util.Clean(item["id"])
+		item["billing"] = billingStates[userID]
+	}
+}
+
+func (a *App) prepareManagedUsersSortValues(items []map[string]any, sortBy string) {
+	if len(items) == 0 {
+		return
+	}
+	switch sortBy {
+	case "call_count", "quota_used", "failure_count":
+		a.attachManagedUserUsageStats(items, managedUserIDs(items))
+	case "billing_available":
+		a.attachManagedUserBillingStates(items, managedUserIDs(items))
+	}
+}
+
+func (a *App) bulkBillingTargetUserIDs(body map[string]any) ([]string, error) {
+	scope := strings.ToLower(strings.TrimSpace(util.Clean(body["scope"])))
+	if scope == "" {
+		scope = "users"
+	}
+	users := a.auth.ListUsers()
+	switch scope {
+	case "users":
+		rawIDs := util.AsStringSlice(body["user_ids"])
+		if len(rawIDs) == 0 {
+			rawIDs = util.AsStringSlice(body["ids"])
+		}
+		return existingManagedUserIDs(users, rawIDs)
+	case "role":
+		roleID := util.Clean(body["role_id"])
+		if roleID == "" {
+			return nil, fmt.Errorf("role id is required")
+		}
+		if !a.auth.RoleExists(roleID) {
+			return nil, fmt.Errorf("role not found")
+		}
+		return managedUserIDsByRole(users, roleID)
+	default:
+		return nil, fmt.Errorf("unsupported billing target scope: %s", scope)
+	}
+}
+
+func existingManagedUserIDs(items []map[string]any, requested []string) ([]string, error) {
+	available := map[string]struct{}{}
+	for _, item := range items {
+		if id := util.Clean(item["id"]); id != "" {
+			available[id] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(requested))
+	for _, id := range requested {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if _, ok := available[id]; !ok {
+			return nil, fmt.Errorf("user not found: %s", id)
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("user ids are required")
+	}
+	return out, nil
+}
+
+func managedUserIDsByRole(items []map[string]any, roleID string) ([]string, error) {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if util.Clean(item["role_id"]) != roleID {
+			continue
+		}
+		if id := util.Clean(item["id"]); id != "" {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("role has no users")
+	}
+	return out, nil
+}
+
+func publicBulkBillingAdjustmentResults(results []service.BillingBulkAdjustmentResult) []map[string]any {
+	out := make([]map[string]any, 0, len(results))
+	for _, result := range results {
+		item := map[string]any{
+			"user_id": result.UserID,
+			"billing": result.Billing,
+		}
+		if result.Adjustment != nil {
+			item["adjustment"] = result.Adjustment
+		}
+		if result.Error != "" {
+			item["error"] = result.Error
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func bulkBillingAdjustmentSummary(results []service.BillingBulkAdjustmentResult) map[string]any {
+	succeeded := 0
+	failed := 0
+	for _, result := range results {
+		if result.Error != "" {
+			failed++
+			continue
+		}
+		succeeded++
+	}
+	return map[string]any{
+		"total":     len(results),
+		"succeeded": succeeded,
+		"failed":    failed,
 	}
 }
 
@@ -612,12 +857,22 @@ func parseManagedUsersQuery(r *http.Request) (managedUsersQuery, error) {
 	if err != nil {
 		return managedUsersQuery{}, err
 	}
+	sortBy, err := parseManagedUsersSortBy(values.Get("sort_by"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
+	sortOrder, err := parseManagedUsersSortOrder(values.Get("sort_order"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
 	return managedUsersQuery{
-		Page:     page,
-		PageSize: pageSize,
-		Search:   strings.TrimSpace(values.Get("search")),
-		Provider: strings.TrimSpace(values.Get("provider")),
-		Status:   strings.TrimSpace(values.Get("status")),
+		Page:      page,
+		PageSize:  pageSize,
+		Search:    strings.TrimSpace(values.Get("search")),
+		Provider:  strings.TrimSpace(values.Get("provider")),
+		Status:    strings.TrimSpace(values.Get("status")),
+		SortBy:    sortBy,
+		SortOrder: sortOrder,
 	}, nil
 }
 
@@ -665,6 +920,32 @@ func managedUsersTotalPages(total, pageSize int) int {
 	return (total + pageSize - 1) / pageSize
 }
 
+func parseManagedUsersSortBy(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "id", nil
+	}
+	switch value {
+	case "id", "name", "username", "provider", "enabled", "role_id", "role_name", "billing_available", "call_count", "quota_used", "failure_count", "created_at", "last_used_at", "updated_at":
+		return value, nil
+	default:
+		return "", fmt.Errorf("sort_by 参数无效")
+	}
+}
+
+func parseManagedUsersSortOrder(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "desc", nil
+	}
+	switch value {
+	case "asc", "desc":
+		return value, nil
+	default:
+		return "", fmt.Errorf("sort_order 参数无效")
+	}
+}
+
 func filterManagedUsers(items []map[string]any, query managedUsersQuery) []map[string]any {
 	out := make([]map[string]any, 0, len(items))
 	search := strings.ToLower(strings.TrimSpace(query.Search))
@@ -686,6 +967,79 @@ func filterManagedUsers(items []map[string]any, query managedUsersQuery) []map[s
 		out = append(out, item)
 	}
 	return out
+}
+
+func sortManagedUsers(items []map[string]any, query managedUsersQuery) {
+	desc := query.SortOrder == "desc"
+	sort.SliceStable(items, func(i, j int) bool {
+		cmp := compareManagedUsers(items[i], items[j], query.SortBy)
+		if cmp == 0 {
+			cmp = strings.Compare(util.Clean(items[i]["id"]), util.Clean(items[j]["id"]))
+		}
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func compareManagedUsers(left, right map[string]any, sortBy string) int {
+	switch sortBy {
+	case "enabled":
+		return compareManagedUserInts(managedUserSortBool(left, sortBy), managedUserSortBool(right, sortBy))
+	case "billing_available", "call_count", "quota_used", "failure_count":
+		return compareManagedUserInts(managedUserSortInt(left, sortBy), managedUserSortInt(right, sortBy))
+	default:
+		return strings.Compare(strings.ToLower(managedUserSortString(left, sortBy)), strings.ToLower(managedUserSortString(right, sortBy)))
+	}
+}
+
+func managedUserSortString(item map[string]any, sortBy string) string {
+	switch sortBy {
+	case "name":
+		return util.Clean(item["name"])
+	case "username":
+		return util.Clean(item["username"])
+	case "provider":
+		return util.Clean(item["provider"])
+	case "role_id":
+		return util.Clean(item["role_id"])
+	case "role_name":
+		return util.Clean(item["role_name"])
+	case "created_at":
+		return util.Clean(item["created_at"])
+	case "last_used_at":
+		return util.Clean(item["last_used_at"])
+	case "updated_at":
+		return util.Clean(item["updated_at"])
+	default:
+		return util.Clean(item["id"])
+	}
+}
+
+func managedUserSortBool(item map[string]any, sortBy string) int {
+	if sortBy == "enabled" && util.ToBool(item["enabled"]) {
+		return 1
+	}
+	return 0
+}
+
+func managedUserSortInt(item map[string]any, sortBy string) int {
+	if sortBy == "billing_available" {
+		return util.ToInt(util.StringMap(item["billing"])["available"], 0)
+	}
+	return util.ToInt(item[sortBy], 0)
+}
+
+func compareManagedUserInts(left, right int) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func managedUserSearchText(item map[string]any) string {
@@ -1162,7 +1516,7 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/creation-tasks/chat-completions" && r.Method == http.MethodPost {
 		body, _ := readJSONMap(r)
-		task, err := a.tasks.SubmitChat(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), body["messages"])
+		task, err := a.tasks.SubmitChat(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), body["messages"], protocol.IsImageChatRequest(body), util.ToInt(body["n"], 1))
 		if err != nil {
 			writeCreationTaskSubmitError(w, err)
 			return
@@ -1195,6 +1549,12 @@ func imageTaskRequestMetadata(body map[string]any) map[string]any {
 	}
 	if size != "" {
 		metadata["requested_size"] = size
+	}
+	if util.ToBool(body["share_prompt_parameters"]) {
+		metadata["share_prompt_parameters"] = true
+		if util.ToBool(body["share_reference_images"]) {
+			metadata["share_reference_images"] = true
+		}
 	}
 	return metadata
 }
@@ -1238,6 +1598,11 @@ func imageOutputCompressionFromBody(value any) (int, bool) {
 }
 
 func writeCreationTaskSubmitError(w http.ResponseWriter, err error) {
+	var billingErr service.BillingLimitError
+	if errors.As(err, &billingErr) {
+		util.WriteJSON(w, http.StatusTooManyRequests, billingErr.OpenAIError())
+		return
+	}
 	var limitErr service.ImageTaskLimitError
 	if errors.As(err, &limitErr) {
 		util.WriteError(w, http.StatusTooManyRequests, limitErr.Error())

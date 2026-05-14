@@ -43,16 +43,12 @@ type LogMaintenanceBackend interface {
 	DeleteLogsBefore(day string) (int, error)
 }
 
-const LogEventsDocumentName = "logs/events.jsonl"
-
 func NewBackendFromEnv(dataDir string) (Backend, error) {
 	backendType := strings.ToLower(strings.TrimSpace(os.Getenv("STORAGE_BACKEND")))
 	if backendType == "" {
 		backendType = "sqlite"
 	}
 	switch backendType {
-	case "json":
-		return NewJSONBackend(filepath.Join(dataDir, "accounts.json"), filepath.Join(dataDir, "auth_keys.json")), nil
 	case "sqlite", "postgres", "postgresql", "mysql", "database":
 		dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 		if dsn == "" {
@@ -62,223 +58,6 @@ func NewBackendFromEnv(dataDir string) (Backend, error) {
 	default:
 		return nil, fmt.Errorf("unknown storage backend: %s", backendType)
 	}
-}
-
-type JSONBackend struct {
-	dataDir      string
-	filePath     string
-	authKeysPath string
-}
-
-func NewJSONBackend(filePath, authKeysPath string) *JSONBackend {
-	_ = os.MkdirAll(filepath.Dir(filePath), 0o755)
-	_ = os.MkdirAll(filepath.Dir(authKeysPath), 0o755)
-	return &JSONBackend{dataDir: filepath.Dir(filePath), filePath: filePath, authKeysPath: authKeysPath}
-}
-
-func (b *JSONBackend) LoadAccounts() ([]map[string]any, error) {
-	return loadJSONList(b.filePath), nil
-}
-
-func (b *JSONBackend) SaveAccounts(accounts []map[string]any) error {
-	return saveJSONValue(b.filePath, accounts)
-}
-
-func (b *JSONBackend) LoadAuthKeys() ([]map[string]any, error) {
-	raw := loadJSONValue(b.authKeysPath)
-	if obj, ok := raw.(map[string]any); ok {
-		raw = obj["items"]
-	}
-	return anyListToMaps(raw), nil
-}
-
-func (b *JSONBackend) SaveAuthKeys(keys []map[string]any) error {
-	return saveJSONValue(b.authKeysPath, map[string]any{"items": keys})
-}
-
-func (b *JSONBackend) HealthCheck() map[string]any {
-	if _, err := os.Stat(b.filePath); err != nil && !os.IsNotExist(err) {
-		return map[string]any{"status": "unhealthy", "backend": "json", "error": err.Error()}
-	}
-	return map[string]any{
-		"status":                "healthy",
-		"backend":               "json",
-		"file_exists":           exists(b.filePath),
-		"file_path":             b.filePath,
-		"auth_keys_file_exists": exists(b.authKeysPath),
-		"auth_keys_file_path":   b.authKeysPath,
-	}
-}
-
-func (b *JSONBackend) Info() map[string]any {
-	return map[string]any{
-		"type":                  "json",
-		"description":           "本地 JSON 文件存储",
-		"file_path":             b.filePath,
-		"file_exists":           exists(b.filePath),
-		"auth_keys_file_path":   b.authKeysPath,
-		"auth_keys_file_exists": exists(b.authKeysPath),
-	}
-}
-
-func (b *JSONBackend) LoadJSONDocument(name string) (any, error) {
-	full, err := b.documentPath(name)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(full)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return decodeJSONBytes(data)
-}
-
-func (b *JSONBackend) SaveJSONDocument(name string, value any) error {
-	full, err := b.documentPath(name)
-	if err != nil {
-		return err
-	}
-	return saveJSONValue(full, value)
-}
-
-func (b *JSONBackend) DeleteJSONDocument(name string) error {
-	full, err := b.documentPath(name)
-	if err != nil {
-		return err
-	}
-	removeErr := os.Remove(full)
-	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		return removeErr
-	}
-	removeEmptyParentDirs(b.dataDir, filepath.Dir(full))
-	return nil
-}
-
-func (b *JSONBackend) AppendLog(item map[string]any) error {
-	if item == nil {
-		item = map[string]any{}
-	}
-	item["type"] = "event"
-	full, err := b.documentPath(LogEventsDocumentName)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return err
-	}
-	data, err := json.Marshal(item)
-	if err != nil {
-		return err
-	}
-	file, err := os.OpenFile(full, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	_, err = file.Write(append(data, '\n'))
-	return err
-}
-
-func (b *JSONBackend) QueryLogs(startDate, endDate string, limit int) ([]map[string]any, error) {
-	full, err := b.documentPath(LogEventsDocumentName)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(full)
-	if errors.Is(err, os.ErrNotExist) {
-		return []map[string]any{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
-		return []map[string]any{}, nil
-	}
-	out := make([]map[string]any, 0)
-	for i := len(lines) - 1; i >= 0; i-- {
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-		item, ok := decodeLogLine(lines[i])
-		if !ok || !matchLogFilter(item, startDate, endDate) {
-			continue
-		}
-		out = append(out, item)
-	}
-	return out, nil
-}
-
-func (b *JSONBackend) DeleteLogsBefore(day string) (int, error) {
-	day = strings.TrimSpace(day)
-	if day == "" {
-		return 0, nil
-	}
-	full, err := b.documentPath(LogEventsDocumentName)
-	if err != nil {
-		return 0, err
-	}
-	data, err := os.ReadFile(full)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
-	kept := make([]string, 0, len(lines))
-	removed := 0
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		item, ok := decodeLogLine(line)
-		if ok {
-			itemDay := logDay(strings.TrimSpace(fmt.Sprint(item["time"])))
-			if itemDay != "" && itemDay < day {
-				removed++
-				continue
-			}
-		}
-		kept = append(kept, line)
-	}
-	if removed == 0 {
-		return 0, nil
-	}
-	next := []byte{}
-	if len(kept) > 0 {
-		next = []byte(strings.Join(kept, "\n") + "\n")
-	}
-	if err := os.WriteFile(full, next, 0o644); err != nil {
-		return 0, err
-	}
-	return removed, nil
-}
-
-func (b *JSONBackend) documentPath(name string) (string, error) {
-	rel, err := cleanDocumentName(name)
-	if err != nil {
-		return "", err
-	}
-	full := filepath.Join(b.dataDir, filepath.FromSlash(rel))
-	root, err := filepath.Abs(b.dataDir)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.Abs(full)
-	if err != nil {
-		return "", err
-	}
-	if resolved != root {
-		relToRoot, err := filepath.Rel(root, resolved)
-		if err != nil || relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) || filepath.IsAbs(relToRoot) {
-			return "", fmt.Errorf("invalid document name: %s", name)
-		}
-	}
-	return full, nil
 }
 
 type DatabaseBackend struct {
@@ -319,6 +98,13 @@ func (b *DatabaseBackend) configurePool() {
 	}
 	b.db.SetMaxOpenConns(10)
 	b.db.SetMaxIdleConns(5)
+}
+
+func (b *DatabaseBackend) Close() error {
+	if b == nil || b.db == nil {
+		return nil
+	}
+	return b.db.Close()
 }
 
 func (b *DatabaseBackend) configureSQLite() error {
@@ -622,52 +408,6 @@ func (b *DatabaseBackend) placeholder(index int) string {
 	return "?"
 }
 
-func loadJSONList(path string) []map[string]any {
-	return anyListToMaps(loadJSONValue(path))
-}
-
-func loadJSONValue(path string) any {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	out, err := decodeJSONBytes(data)
-	if err != nil {
-		return nil
-	}
-	return out
-}
-
-func saveJSONValue(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
-}
-
-func anyListToMaps(raw any) []map[string]any {
-	items, ok := raw.([]any)
-	if !ok {
-		return []map[string]any{}
-	}
-	out := make([]map[string]any, 0, len(items))
-	for _, item := range items {
-		if m, ok := item.(map[string]any); ok {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 func cleanDocumentName(name string) (string, error) {
 	raw := strings.TrimSpace(filepath.ToSlash(name))
 	rel := path.Clean(raw)
@@ -699,56 +439,11 @@ func decodeJSONBytes(data []byte) (any, error) {
 	return out, nil
 }
 
-func decodeLogLine(line string) (map[string]any, bool) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return nil, false
-	}
-	raw, err := decodeJSONString(line)
-	if err != nil {
-		return nil, false
-	}
-	item, ok := raw.(map[string]any)
-	return item, ok
-}
-
-func matchLogFilter(item map[string]any, startDate, endDate string) bool {
-	day := logDay(strings.TrimSpace(fmt.Sprint(item["time"])))
-	if strings.TrimSpace(startDate) != "" && day < strings.TrimSpace(startDate) {
-		return false
-	}
-	if strings.TrimSpace(endDate) != "" && day > strings.TrimSpace(endDate) {
-		return false
-	}
-	return true
-}
-
 func logDay(value string) string {
 	if len(value) < 10 {
 		return ""
 	}
 	return value[:10]
-}
-
-func removeEmptyParentDirs(root, start string) {
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return
-	}
-	current, err := filepath.Abs(start)
-	if err != nil {
-		return
-	}
-	for current != rootAbs {
-		rel, err := filepath.Rel(rootAbs, current)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-			return
-		}
-		if err := os.Remove(current); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		current = filepath.Dir(current)
-	}
 }
 
 func parseDatabaseURL(databaseURL string) (driver, dsn string, err error) {

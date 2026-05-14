@@ -15,6 +15,13 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -153,8 +160,23 @@ export function ConfigCard() {
   const setUserDefaultRpmLimit = useSettingsStore(
     (state) => state.setUserDefaultRpmLimit,
   );
+  const setDefaultBillingType = useSettingsStore(
+    (state) => state.setDefaultBillingType,
+  );
+  const setDefaultStandardBalance = useSettingsStore(
+    (state) => state.setDefaultStandardBalance,
+  );
+  const setDefaultSubscriptionQuota = useSettingsStore(
+    (state) => state.setDefaultSubscriptionQuota,
+  );
+  const setDefaultSubscriptionPeriod = useSettingsStore(
+    (state) => state.setDefaultSubscriptionPeriod,
+  );
   const setImageRetentionDays = useSettingsStore(
     (state) => state.setImageRetentionDays,
+  );
+  const setImageStorageLimitMb = useSettingsStore(
+    (state) => state.setImageStorageLimitMb,
   );
   const setAutoRemoveInvalidAccounts = useSettingsStore(
     (state) => state.setAutoRemoveInvalidAccounts,
@@ -168,6 +190,7 @@ export function ConfigCard() {
     (state) => state.setRegistrationEnabled,
   );
   const saveConfig = useSettingsStore((state) => state.saveConfig);
+  const defaultBillingType = config?.default_billing_type || "standard";
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -274,6 +297,19 @@ export function ConfigCard() {
               />
             </Field>
             <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-storage-limit-mb">
+                图片容量上限
+              </ConfigFieldLabel>
+              <NumberInputWithUnit
+                id="settings-image-storage-limit-mb"
+                min={0}
+                value={config?.image_storage_limit_mb ?? ""}
+                onChange={setImageStorageLimitMb}
+                placeholder="0"
+                unit="MB"
+              />
+            </Field>
+            <Field className={configFieldClassName}>
               <ConfigFieldLabel htmlFor="settings-image-task-timeout-seconds">
                 任务超时时间
               </ConfigFieldLabel>
@@ -322,6 +358,99 @@ export function ConfigCard() {
                 unit="次/分"
               />
             </Field>
+          </div>
+        </section>
+
+        <section className={configSectionClassName}>
+          <SectionHeading
+            title="默认计费"
+            tip="创建或注册新普通用户时使用这些默认值；管理员不受本地计费限制。"
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-default-billing-type">
+                默认计费类型
+              </ConfigFieldLabel>
+              <Select
+                value={config?.default_billing_type || "standard"}
+                onValueChange={(value) =>
+                  setDefaultBillingType(
+                    value === "subscription" ? "subscription" : "standard",
+                  )
+                }
+              >
+                <SelectTrigger
+                  id="settings-default-billing-type"
+                  className={settingsInputClassName}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="standard">标准余额制</SelectItem>
+                  <SelectItem value="subscription">订阅配额制</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            {defaultBillingType === "standard" ? (
+              <Field className={configFieldClassName}>
+                <ConfigFieldLabel htmlFor="settings-default-standard-balance">
+                  默认标准余额
+                </ConfigFieldLabel>
+                <NumberInputWithUnit
+                  id="settings-default-standard-balance"
+                  min={0}
+                  value={config?.default_standard_balance ?? ""}
+                  onChange={setDefaultStandardBalance}
+                  placeholder="0"
+                  unit="点"
+                />
+              </Field>
+            ) : (
+              <>
+                <Field className={configFieldClassName}>
+                  <ConfigFieldLabel htmlFor="settings-default-subscription-quota">
+                    默认订阅配额
+                  </ConfigFieldLabel>
+                  <NumberInputWithUnit
+                    id="settings-default-subscription-quota"
+                    min={0}
+                    value={config?.default_subscription_quota ?? ""}
+                    onChange={setDefaultSubscriptionQuota}
+                    placeholder="0"
+                    unit="点"
+                  />
+                </Field>
+                <Field className={configFieldClassName}>
+                  <ConfigFieldLabel htmlFor="settings-default-subscription-period">
+                    默认订阅周期
+                  </ConfigFieldLabel>
+                  <Select
+                    value={config?.default_subscription_period || "monthly"}
+                    onValueChange={(value) => {
+                      if (
+                        value === "daily" ||
+                        value === "weekly" ||
+                        value === "monthly"
+                      ) {
+                        setDefaultSubscriptionPeriod(value);
+                      }
+                    }}
+                  >
+                    <SelectTrigger
+                      id="settings-default-subscription-period"
+                      className={settingsInputClassName}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="daily">每日</SelectItem>
+                      <SelectItem value="weekly">每周</SelectItem>
+                      <SelectItem value="monthly">每月</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </>
+            )}
           </div>
         </section>
 

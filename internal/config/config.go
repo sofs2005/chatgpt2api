@@ -25,7 +25,12 @@ var settingEnvKeys = map[string]string{
 	"image_task_timeout_seconds":        "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS",
 	"user_default_concurrent_limit":     "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT",
 	"user_default_rpm_limit":            "CHATGPT2API_USER_DEFAULT_RPM_LIMIT",
+	"default_billing_type":              "CHATGPT2API_DEFAULT_BILLING_TYPE",
+	"default_standard_balance":          "CHATGPT2API_DEFAULT_STANDARD_BALANCE",
+	"default_subscription_quota":        "CHATGPT2API_DEFAULT_SUBSCRIPTION_QUOTA",
+	"default_subscription_period":       "CHATGPT2API_DEFAULT_SUBSCRIPTION_PERIOD",
 	"image_retention_days":              "CHATGPT2API_IMAGE_RETENTION_DAYS",
+	"image_storage_limit_mb":            "CHATGPT2API_IMAGE_STORAGE_LIMIT_MB",
 	"auto_remove_invalid_accounts":      "CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS",
 	"auto_remove_rate_limited_accounts": "CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS",
 	"log_retention_days":                "CHATGPT2API_LOG_RETENTION_DAYS",
@@ -54,13 +59,12 @@ const (
 )
 
 type Store struct {
-	mu              sync.RWMutex
-	RootDir         string
-	DataDir         string
-	EnvFile         string
-	data            map[string]any
-	externalEnvKeys map[string]struct{}
-	storageBackend  storage.Backend
+	mu             sync.RWMutex
+	RootDir        string
+	DataDir        string
+	EnvFile        string
+	data           map[string]any
+	storageBackend storage.Backend
 }
 
 type LinuxDoOAuthConfig struct {
@@ -89,18 +93,10 @@ func NewStore() (*Store, error) {
 	envFile := filepath.Join(root, ".env")
 	envFileValues := readEnvObject(envFile)
 	s := &Store{
-		RootDir:         root,
-		DataDir:         filepath.Join(root, "data"),
-		EnvFile:         envFile,
-		data:            map[string]any{},
-		externalEnvKeys: map[string]struct{}{},
-	}
-	for _, item := range os.Environ() {
-		key, value, _ := strings.Cut(item, "=")
-		if fileValue, ok := envFileValues[key]; ok && value == fileValue {
-			continue
-		}
-		s.externalEnvKeys[key] = struct{}{}
+		RootDir: root,
+		DataDir: filepath.Join(root, "data"),
+		EnvFile: envFile,
+		data:    map[string]any{},
 	}
 	if err := os.MkdirAll(s.DataDir, 0o755); err != nil {
 		return nil, err
@@ -191,6 +187,22 @@ func (s *Store) ImageRetentionDays() int {
 	return value
 }
 
+func (s *Store) ImageStorageLimitMB() int {
+	value := intSetting(s.settingValue("image_storage_limit_mb", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) ImageStorageLimitBytes() int64 {
+	mb := s.ImageStorageLimitMB()
+	if mb <= 0 {
+		return 0
+	}
+	return int64(mb) * 1024 * 1024
+}
+
 func (s *Store) LogRetentionDays() int {
 	value := intSetting(s.settingValue("log_retention_days", 7), 7)
 	if value < 1 {
@@ -220,6 +232,40 @@ func (s *Store) UserDefaultRPMLimit() int {
 		return 0
 	}
 	return value
+}
+
+func (s *Store) DefaultBillingType() string {
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(s.settingValue("default_billing_type", "standard")))) {
+	case "subscription":
+		return "subscription"
+	default:
+		return "standard"
+	}
+}
+
+func (s *Store) DefaultStandardBalance() int {
+	value := intSetting(s.settingValue("default_standard_balance", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) DefaultSubscriptionQuota() int {
+	value := intSetting(s.settingValue("default_subscription_quota", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) DefaultSubscriptionPeriod() string {
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(s.settingValue("default_subscription_period", "monthly")))) {
+	case "daily", "weekly", "monthly":
+		return strings.ToLower(strings.TrimSpace(fmt.Sprint(s.settingValue("default_subscription_period", "monthly"))))
+	default:
+		return "monthly"
+	}
 }
 
 func (s *Store) AutoRemoveInvalidAccounts() bool {
@@ -378,7 +424,12 @@ func (s *Store) Get() map[string]any {
 	data["image_task_timeout_seconds"] = s.ImageTaskTimeoutSeconds()
 	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
 	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
+	data["default_billing_type"] = s.DefaultBillingType()
+	data["default_standard_balance"] = s.DefaultStandardBalance()
+	data["default_subscription_quota"] = s.DefaultSubscriptionQuota()
+	data["default_subscription_period"] = s.DefaultSubscriptionPeriod()
 	data["image_retention_days"] = s.ImageRetentionDays()
+	data["image_storage_limit_mb"] = s.ImageStorageLimitMB()
 	data["log_retention_days"] = s.LogRetentionDays()
 	data["auto_remove_invalid_accounts"] = s.AutoRemoveInvalidAccounts()
 	data["auto_remove_rate_limited_accounts"] = s.AutoRemoveRateLimitedAccounts()
@@ -428,6 +479,15 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 	}
 	if value, ok := next["image_task_timeout_seconds"]; ok {
 		next["image_task_timeout_seconds"] = normalizeImageTaskTimeoutSeconds(value)
+	}
+	if value, ok := next["image_storage_limit_mb"]; ok {
+		next["image_storage_limit_mb"] = normalizeNonNegativeInt(value)
+	}
+	if value, ok := next["default_billing_type"]; ok {
+		next["default_billing_type"] = normalizeDefaultBillingType(value)
+	}
+	if value, ok := next["default_subscription_period"]; ok {
+		next["default_subscription_period"] = normalizeDefaultSubscriptionPeriod(value)
 	}
 	next["update_repo"] = normalizeUpdateRepo(util.ValueOr(next["update_repo"], "ZyphrZero/chatgpt2api"))
 	if err := s.validateSettingsUpdateLocked(next); err != nil {
@@ -480,32 +540,27 @@ func (s *Store) StorageBackend() (storage.Backend, error) {
 
 func (s *Store) settingValue(key string, fallback any) any {
 	envKey := settingEnvKeys[key]
-	if value, ok := os.LookupEnv(envKey); ok {
+	s.mu.RLock()
+	if value, ok := s.data[key]; ok {
+		s.mu.RUnlock()
 		return value
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if value, ok := s.data[key]; ok {
-		return value
+	s.mu.RUnlock()
+	if envKey != "" {
+		if value, ok := os.LookupEnv(envKey); ok {
+			return value
+		}
 	}
 	return fallback
 }
 
 func (s *Store) settingValueFromData(data map[string]any, key string, fallback any) any {
-	envKey := settingEnvKeys[key]
-	if envKey != "" {
-		if value, ok := os.LookupEnv(envKey); ok {
-			if _, external := s.externalEnvKeys[envKey]; external {
-				return value
-			}
-		}
-	}
 	if data != nil {
 		if value, ok := data[key]; ok {
 			return value
 		}
 	}
-	if envKey != "" {
+	if envKey := settingEnvKeys[key]; envKey != "" {
 		if value, ok := os.LookupEnv(envKey); ok {
 			return value
 		}
@@ -620,9 +675,7 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	for key, value := range updates {
-		if _, external := s.externalEnvKeys[key]; !external {
-			_ = os.Setenv(key, value)
-		}
+		_ = os.Setenv(key, value)
 	}
 	return nil
 }
@@ -725,6 +778,32 @@ func normalizeImageTaskTimeoutSeconds(value any) int {
 		return maxImageTaskTimeoutSeconds
 	}
 	return seconds
+}
+
+func normalizeNonNegativeInt(value any) int {
+	n := intSetting(value, 0)
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func normalizeDefaultBillingType(value any) string {
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(value))) {
+	case "subscription":
+		return "subscription"
+	default:
+		return "standard"
+	}
+}
+
+func normalizeDefaultSubscriptionPeriod(value any) string {
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(value))) {
+	case "daily", "weekly", "monthly":
+		return strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	default:
+		return "monthly"
+	}
 }
 
 func clampFloat(value, min, max float64) float64 {

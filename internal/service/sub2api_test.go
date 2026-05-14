@@ -20,7 +20,7 @@ func TestSub2APIListRemoteGroupsUsesActiveOpenAIGroupsEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service := NewSub2APIService(NewSub2APIConfig(t.TempDir()), nil)
+	service := NewSub2APIService(NewSub2APIConfig(newTestStorageBackend(t)), nil)
 	groups, err := service.ListRemoteGroups(context.Background(), map[string]any{
 		"base_url": server.URL,
 		"api_key":  "test-key",
@@ -46,7 +46,7 @@ func TestSub2APIListRemoteGroupsReturnsEmptyArrayForNullItems(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service := NewSub2APIService(NewSub2APIConfig(t.TempDir()), nil)
+	service := NewSub2APIService(NewSub2APIConfig(newTestStorageBackend(t)), nil)
 	groups, err := service.ListRemoteGroups(context.Background(), map[string]any{
 		"base_url": server.URL,
 		"api_key":  "test-key",

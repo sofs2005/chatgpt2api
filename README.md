@@ -195,15 +195,6 @@ PY
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-如果使用 `STORAGE_BACKEND=json`，本地登录账号保存在 `data/auth_users.json`，可在备份后删除该文件再重启：
-
-```bash
-docker compose -f deploy/docker-compose.yml down
-cp -a data "data.bak.$(date +%Y%m%d-%H%M%S)"
-rm -f data/auth_users.json
-docker compose -f deploy/docker-compose.yml up -d
-```
-
 </details>
 
 ### 3. 服务器源码构建（可选）
@@ -324,8 +315,8 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `STORAGE_BACKEND` | `sqlite` | 存储后端，可选 `sqlite`、`json`、`postgres` |
-| `DATABASE_URL` | 自动 | SQLite 或 PostgreSQL 连接串 |
+| `STORAGE_BACKEND` | `sqlite` | 存储后端，可选 `sqlite`、`postgres`、`mysql` |
+| `DATABASE_URL` | 自动 | SQLite、PostgreSQL 或 MySQL 连接串 |
 
 SQLite 示例：
 
@@ -341,7 +332,14 @@ STORAGE_BACKEND=postgres
 DATABASE_URL=postgresql://user:password@host:5432/chatgpt2api
 ```
 
-新部署默认使用 SQLite，并自动创建 `data/chatgpt2api.db`。如果已有历史 JSON 部署，切换存储后端前请先备份 `data/`，再通过管理端导出号池 Token、切换 `STORAGE_BACKEND=sqlite`、重启服务并重新导入；本仓库当前不提供独立的 JSON 到 SQLite 离线迁移脚本。本地登录用户、角色、API 令牌和设置类 JSON 文档不会自动迁移，切换后需要重新初始化或手动重建。历史 `logs/events.jsonl` 不会自动写入 SQLite，新日志会在数据库后端启用后写入数据库。
+MySQL 示例：
+
+```env
+STORAGE_BACKEND=mysql
+DATABASE_URL=mysql://user:password@host:3306/chatgpt2api
+```
+
+新部署默认使用 SQLite，并自动创建 `data/chatgpt2api.db`。本地 JSON 文件存储后端已移除，`STORAGE_BACKEND=json` 不再支持。
 
 ### Linuxdo 登录
 

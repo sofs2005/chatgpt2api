@@ -1556,6 +1556,12 @@ func imageTaskRequestMetadata(body map[string]any) map[string]any {
 			metadata["share_reference_images"] = true
 		}
 	}
+	if conversationID := util.Clean(body["frontend_conversation_id"]); conversationID != "" {
+		metadata["frontend_conversation_id"] = conversationID
+	}
+	if fallback := util.StringMap(body["fallback_reference_image"]); len(fallback) > 0 {
+		metadata["fallback_reference_image"] = fallback
+	}
 	return metadata
 }
 

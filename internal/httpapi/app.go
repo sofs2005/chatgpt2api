@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,7 +94,8 @@ func NewApp() (*App, error) {
 		logger.Warning("bootstrap admin password generated", "username", bootstrap.Username)
 	}
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
-	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger}
+	imageSessions := service.NewImageConversationSessionService(filepath.Join(cfg.DataDir, "image_conversation_sessions.json"), storageBackend)
+	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger, ImageConversationSessions: imageSessions}
 	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), cancel: cancel}
 	app.cpaImport = service.NewCPAImportService(app.cpa, accounts, proxy)
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
@@ -184,6 +186,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
+	a.attachFallbackReferenceImage(identity, body)
 	a.attachCreationTaskLimiter(body, identity)
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
@@ -222,6 +225,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
+	a.attachFallbackReferenceImage(identity, body)
 	a.attachCreationTaskLimiter(body, identity)
 	body["images"] = images
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
@@ -1275,25 +1279,26 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 		return nil, nil, err
 	}
 	body := map[string]any{
-		"client_task_id":          firstForm(r.MultipartForm, "client_task_id"),
-		"prompt":                  firstForm(r.MultipartForm, "prompt"),
-		"model":                   firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
-		"n":                       util.ToInt(firstForm(r.MultipartForm, "n"), 1),
-		"size":                    firstForm(r.MultipartForm, "size"),
-		"image_resolution":        firstForm(r.MultipartForm, "image_resolution"),
-		"quality":                 firstForm(r.MultipartForm, "quality"),
-		"background":              firstForm(r.MultipartForm, "background"),
-		"moderation":              firstForm(r.MultipartForm, "moderation"),
-		"style":                   firstForm(r.MultipartForm, "style"),
-		"partial_images":          firstForm(r.MultipartForm, "partial_images"),
-		"input_image_mask":        firstForm(r.MultipartForm, "input_image_mask"),
-		"output_format":           firstForm(r.MultipartForm, "output_format"),
-		"output_compression":      firstForm(r.MultipartForm, "output_compression"),
-		"share_prompt_parameters": firstForm(r.MultipartForm, "share_prompt_parameters"),
-		"share_reference_images":  firstForm(r.MultipartForm, "share_reference_images"),
-		"visibility":              firstForm(r.MultipartForm, "visibility"),
-		"response_format":         firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
-		"stream":                  util.ToBool(firstForm(r.MultipartForm, "stream")),
+		"client_task_id":           firstForm(r.MultipartForm, "client_task_id"),
+		"prompt":                   firstForm(r.MultipartForm, "prompt"),
+		"model":                    firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
+		"n":                        util.ToInt(firstForm(r.MultipartForm, "n"), 1),
+		"size":                     firstForm(r.MultipartForm, "size"),
+		"image_resolution":         firstForm(r.MultipartForm, "image_resolution"),
+		"quality":                  firstForm(r.MultipartForm, "quality"),
+		"background":               firstForm(r.MultipartForm, "background"),
+		"moderation":               firstForm(r.MultipartForm, "moderation"),
+		"style":                    firstForm(r.MultipartForm, "style"),
+		"partial_images":           firstForm(r.MultipartForm, "partial_images"),
+		"input_image_mask":         firstForm(r.MultipartForm, "input_image_mask"),
+		"output_format":            firstForm(r.MultipartForm, "output_format"),
+		"output_compression":       firstForm(r.MultipartForm, "output_compression"),
+		"share_prompt_parameters":  firstForm(r.MultipartForm, "share_prompt_parameters"),
+		"share_reference_images":   firstForm(r.MultipartForm, "share_reference_images"),
+		"frontend_conversation_id": firstForm(r.MultipartForm, "frontend_conversation_id"),
+		"visibility":               firstForm(r.MultipartForm, "visibility"),
+		"response_format":          firstNonEmpty(firstForm(r.MultipartForm, "response_format"), "b64_json"),
+		"stream":                   util.ToBool(firstForm(r.MultipartForm, "stream")),
 	}
 	if rawMessages := strings.TrimSpace(firstForm(r.MultipartForm, "messages")); rawMessages != "" {
 		var messages any
@@ -1301,6 +1306,13 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 			return nil, nil, fmt.Errorf("invalid messages")
 		}
 		body["messages"] = messages
+	}
+	if rawFallback := strings.TrimSpace(firstForm(r.MultipartForm, "fallback_reference_image")); rawFallback != "" {
+		var fallback any
+		if err := json.Unmarshal([]byte(rawFallback), &fallback); err != nil {
+			return nil, nil, fmt.Errorf("invalid fallback_reference_image")
+		}
+		body["fallback_reference_image"] = fallback
 	}
 	var images []protocol.UploadedImage
 	for _, field := range []string{"image", "image[]"} {
@@ -1508,6 +1520,61 @@ func imageAccessScope(identity service.Identity) service.ImageAccessScope {
 		return service.ImageAccessScope{All: true}
 	}
 	return service.ImageAccessScope{OwnerID: identityScope(identity)}
+}
+
+func (a *App) attachFallbackReferenceImage(identity service.Identity, payload map[string]any) {
+	if a == nil || a.images == nil || payload == nil || util.Clean(payload["fallback_reference_image_b64"]) != "" {
+		return
+	}
+	fallback := util.StringMap(payload["fallback_reference_image"])
+	if len(fallback) == 0 {
+		return
+	}
+	if dataURL := fallbackReferenceDataURL(util.Clean(fallback["b64_json"])); dataURL != "" {
+		payload["fallback_reference_image_b64"] = dataURL
+		return
+	}
+	for _, key := range []string{"path", "url"} {
+		value := util.Clean(fallback[key])
+		if value == "" {
+			continue
+		}
+		data, mimeType, err := a.images.ImageBytes(value, imageAccessScope(identity))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		payload["fallback_reference_image_b64"] = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+		return
+	}
+}
+
+func fallbackReferenceDataURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	contentType := ""
+	dataPart := value
+	if strings.HasPrefix(value, "data:") {
+		header, data, ok := strings.Cut(value, ",")
+		if !ok {
+			return ""
+		}
+		dataPart = data
+		contentType = strings.TrimPrefix(strings.Split(header, ";")[0], "data:")
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(dataPart))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	detected := http.DetectContentType(data)
+	if !strings.HasPrefix(contentType, "image/") {
+		contentType = detected
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		return ""
+	}
+	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
 func imageListAccessScope(identity service.Identity, value string) (service.ImageAccessScope, int, string) {
@@ -1730,6 +1797,7 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	requestCapture := payloadAuditCapture(payload)
 	payload["owner_id"] = identityScope(identity)
 	payload["owner_name"] = identityDisplayName(identity)
+	a.attachFallbackReferenceImage(identity, payload)
 	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
 	result, err := run(ctx, payload)
 	urls := collectURLs(result)

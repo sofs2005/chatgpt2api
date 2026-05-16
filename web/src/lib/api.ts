@@ -443,6 +443,13 @@ export type CreationTaskMessage = {
   content: string;
 };
 
+export type FallbackReferenceImage = {
+  path?: string;
+  url?: string;
+  b64_json?: string;
+  outputFormat?: ImageOutputFormat;
+};
+
 export type ChatCompletionResponse = {
   choices?: Array<{
     message?: {
@@ -902,6 +909,8 @@ export async function createImageGenerationTask(
     style?: string;
     partialImages?: number;
   },
+  frontendConversationId?: string,
+  fallbackReferenceImage?: FallbackReferenceImage,
 ) {
   return httpRequest<CreationTask>("/api/creation-tasks/image-generations", {
     method: "POST",
@@ -919,6 +928,8 @@ export async function createImageGenerationTask(
       ...(toolOptions?.style ? { style: toolOptions.style } : {}),
       ...(typeof toolOptions?.partialImages === "number" ? { partial_images: toolOptions.partialImages } : {}),
       ...(messages?.length ? { messages } : {}),
+      ...(frontendConversationId ? { frontend_conversation_id: frontendConversationId } : {}),
+      ...(fallbackReferenceImage ? { fallback_reference_image: fallbackReferenceImage } : {}),
       visibility,
       n: count,
     },
@@ -945,6 +956,8 @@ export async function createImageEditTask(
     partialImages?: number;
     inputImageMask?: string;
   },
+  frontendConversationId?: string,
+  fallbackReferenceImage?: FallbackReferenceImage,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -989,6 +1002,12 @@ export async function createImageEditTask(
   }
   if (messages?.length) {
     formData.append("messages", JSON.stringify(messages));
+  }
+  if (frontendConversationId) {
+    formData.append("frontend_conversation_id", frontendConversationId);
+  }
+  if (fallbackReferenceImage) {
+    formData.append("fallback_reference_image", JSON.stringify(fallbackReferenceImage));
   }
   formData.append("visibility", visibility);
   formData.append("n", String(count));

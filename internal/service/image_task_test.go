@@ -189,7 +189,13 @@ func TestImageTaskServicePassesImageRequestMetadataToHandler(t *testing.T) {
 	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
 	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
 
-	if _, err := svc.SubmitGenerationWithMetadata(context.Background(), identity, "task-1", "draw", "gpt-image-2", "2048x2048", "high", "https://base.test", 1, nil, map[string]any{"image_resolution": "2k", "requested_size": "2048x2048"}); err != nil {
+	metadata := map[string]any{
+		"image_resolution":         "2k",
+		"requested_size":           "2048x2048",
+		"frontend_conversation_id": "front-1",
+		"fallback_reference_image": map[string]any{"path": "images/owner/result.png", "url": "", "b64_json": "abc", "outputFormat": "png"},
+	}
+	if _, err := svc.SubmitGenerationWithMetadata(context.Background(), identity, "task-1", "draw", "gpt-image-2", "2048x2048", "high", "https://base.test", 1, nil, metadata); err != nil {
 		t.Fatalf("SubmitGenerationWithMetadata() error = %v", err)
 	}
 
@@ -200,6 +206,13 @@ func TestImageTaskServicePassesImageRequestMetadataToHandler(t *testing.T) {
 		}
 		if got := payload["requested_size"]; got != "2048x2048" {
 			t.Fatalf("payload requested_size = %#v, want 2048x2048 in %#v", got, payload)
+		}
+		if got := payload["frontend_conversation_id"]; got != "front-1" {
+			t.Fatalf("payload frontend_conversation_id = %#v, want front-1 in %#v", got, payload)
+		}
+		fallback := util.StringMap(payload["fallback_reference_image"])
+		if fallback["path"] != "images/owner/result.png" || fallback["b64_json"] != "abc" || fallback["outputFormat"] != "png" {
+			t.Fatalf("payload fallback_reference_image = %#v", payload["fallback_reference_image"])
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for handler payload")

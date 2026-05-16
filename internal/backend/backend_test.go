@@ -307,6 +307,114 @@ func TestStreamResponsesImageUsesOfficialPrepareAndConversationRoutes(t *testing
 	}
 }
 
+func TestStreamResponsesImageUsesOfficialContinuationPointers(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	var prepareBody map[string]any
+	var streamBody map[string]any
+	var streamHeaders http.Header
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialPreparePath:
+			if err := json.NewDecoder(r.Body).Decode(&prepareBody); err != nil {
+				t.Fatalf("decode prepare body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialStreamPath:
+			streamHeaders = r.Header.Clone()
+			if err := json.NewDecoder(r.Body).Decode(&streamBody); err != nil {
+				t.Fatalf("decode stream body: %v", err)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"v\":{\"message\":{\"id\":\"msg-assist-new\",\"author\":{\"role\":\"assistant\"},\"content\":{\"content_type\":\"text\",\"parts\":[\"好的\"]}}},\"conversation_id\":\"conv-old\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"p\":\"\",\"o\":\"add\",\"v\":{\"message\":{\"author\":{\"role\":\"tool\",\"metadata\":{}},\"content\":{\"content_type\":\"multimodal_text\",\"parts\":[{\"content_type\":\"image_asset_pointer\",\"asset_pointer\":\"sediment://file_follow\"}]}},\"conversation_id\":\"conv-old\"}}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-old\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_follow":
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-old" {
+				t.Fatalf("conversation_id = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_follow.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/file_follow.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt:          "改成工笔画风格",
+		Model:           "gpt-image-2",
+		ConversationID:  "conv-old",
+		ParentMessageID: "msg-assist-old",
+	})
+	var results []ResponsesImageEvent
+	for event := range events {
+		if event.Result != "" {
+			results = append(results, event)
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamResponsesImage() error = %v", err)
+	}
+	if len(results) != 1 || results[0].ConversationID != "conv-old" || results[0].MessageID != "msg-assist-new" {
+		t.Fatalf("results = %#v", results)
+	}
+	if got := prepareBody["conversation_id"]; got != "conv-old" {
+		t.Fatalf("prepare conversation_id = %#v, want conv-old", got)
+	}
+	if got := prepareBody["parent_message_id"]; got != "msg-assist-old" {
+		t.Fatalf("prepare parent_message_id = %#v, want msg-assist-old", got)
+	}
+	if got := streamBody["conversation_id"]; got != "conv-old" {
+		t.Fatalf("stream conversation_id = %#v, want conv-old", got)
+	}
+	if got := streamBody["parent_message_id"]; got != "msg-assist-old" {
+		t.Fatalf("stream parent_message_id = %#v, want msg-assist-old", got)
+	}
+	messages := streamBody["messages"].([]any)
+	message := messages[0].(map[string]any)
+	if got := streamHeaders.Get("OpenAI-Conversation-Id"); got != "conv-old" {
+		t.Fatalf("OpenAI-Conversation-Id = %q, want conv-old", got)
+	}
+	if got := streamHeaders.Get("OpenAI-Message-Id"); got == "" || got != message["id"] {
+		t.Fatalf("OpenAI-Message-Id = %q, message id = %#v", got, message["id"])
+	}
+}
+
+func TestOfficialImageAssistantMessageIDExtraction(t *testing.T) {
+	for name, payload := range map[string]string{
+		"message id":   `{"message":{"id":"msg-1","author":{"role":"assistant"}}}`,
+		"message_id":   `{"message_id":"msg-2"}`,
+		"v message id": `{"v":{"message":{"id":"msg-3","author":{"role":"assistant"}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := &imageConversationState{}
+			event, ok, err := parseOfficialImagePayload(payload, state)
+			if err != nil || !ok {
+				t.Fatalf("parseOfficialImagePayload() event=%#v ok=%v err=%v", event, ok, err)
+			}
+			if event.MessageID == "" {
+				t.Fatalf("MessageID missing for %s", payload)
+			}
+		})
+	}
+}
+
 func TestStreamResponsesImageUsesDirectSSEImageAssetPointer(t *testing.T) {
 	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
 	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)

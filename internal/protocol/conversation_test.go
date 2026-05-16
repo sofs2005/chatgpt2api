@@ -400,6 +400,68 @@ func TestHandleImageGenerationsReturnsArbitraryUpstreamImageText(t *testing.T) {
 	}
 }
 
+func TestImageConversationFallbackReferenceUsedOnlyForNewUpstreamSession(t *testing.T) {
+	fallback := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("fallback"))
+	sessions := service.NewImageConversationSessionService(filepath.Join(t.TempDir(), "sessions.json"))
+	sessions.Bind(service.ImageConversationSession{
+		OwnerID:                 "owner-1",
+		FrontendConversationID:  "front-1",
+		AccessToken:             "bound-token",
+		UpstreamConversationID:  "conv-1",
+		UpstreamParentMessageID: "msg-1",
+	})
+	engine := &Engine{
+		ImageConversationSessions: sessions,
+		ImageTokenProvider:        func(context.Context) (string, error) { return "bound-token", nil },
+		ImageClientFactory:        func(string) *backend.Client { return nil },
+	}
+	var continuedRequest ConversationRequest
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		continuedRequest = request
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), ConversationID: "conv-1", MessageID: "msg-2", Data: []map[string]any{{"b64_json": "image"}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Prompt: "continue", Model: "gpt-image-2", N: 1, OwnerID: "owner-1", FrontendConversationID: "front-1", Images: []string{"current"}, FallbackReferenceImage: fallback})
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err != nil {
+		t.Fatalf("CollectImageOutputs() error = %v", err)
+	}
+	if continuedRequest.UpstreamConversationID != "conv-1" || continuedRequest.UpstreamParentMessageID != "msg-1" {
+		t.Fatalf("continuation pointers = %q/%q", continuedRequest.UpstreamConversationID, continuedRequest.UpstreamParentMessageID)
+	}
+	if got := strings.Join(continuedRequest.Images, ","); got != "current" {
+		t.Fatalf("continued request images = %q, want current only", got)
+	}
+
+	engine.ImageConversationSessions = service.NewImageConversationSessionService(filepath.Join(t.TempDir(), "sessions.json"))
+	engine.ImageTokenProvider = func(context.Context) (string, error) { return "new-token", nil }
+	var newRequest ConversationRequest
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		newRequest = request
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), ConversationID: "conv-new", MessageID: "msg-new", Data: []map[string]any{{"b64_json": "image"}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+	outputs, errCh = engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Prompt: "new", Model: "gpt-image-2", N: 1, OwnerID: "owner-1", FrontendConversationID: "front-2", Images: []string{"current"}, FallbackReferenceImage: fallback})
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err != nil {
+		t.Fatalf("CollectImageOutputs() new session error = %v", err)
+	}
+	if newRequest.UpstreamConversationID != "" || newRequest.UpstreamParentMessageID != "" {
+		t.Fatalf("new request continuation pointers = %q/%q, want empty", newRequest.UpstreamConversationID, newRequest.UpstreamParentMessageID)
+	}
+	if len(newRequest.Images) != 2 || newRequest.Images[0] != "current" || newRequest.Images[1] != fallback {
+		t.Fatalf("new request images = %#v, want current plus fallback", newRequest.Images)
+	}
+}
+
 func TestStreamResponsesImageOutputsCompletesWithUpstreamRefusalText(t *testing.T) {
 	const upstreamText = "非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。如果你认为此判断有误，请重试或修改提示语。"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

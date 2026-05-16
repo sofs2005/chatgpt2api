@@ -48,7 +48,7 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	outputCompression, hasOutputCompression := normalizedImageOutputCompression(body["output_compression"])
 	responseFormat := firstNonEmpty(util.Clean(body["response_format"]), "b64_json")
 	baseURL := util.Clean(body["base_url"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), MessageAsError: true, AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), FrontendConversationID: util.Clean(body["frontend_conversation_id"]), FallbackReferenceImage: util.Clean(body["fallback_reference_image_b64"]), MessageAsError: true, AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
@@ -85,6 +85,8 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		BaseURL:                util.Clean(body["base_url"]),
 		OwnerID:                util.Clean(body["owner_id"]),
 		OwnerName:              util.Clean(body["owner_name"]),
+		FrontendConversationID: util.Clean(body["frontend_conversation_id"]),
+		FallbackReferenceImage: util.Clean(body["fallback_reference_image_b64"]),
 		Messages:               NormalizeMessages(util.AsMapSlice(body["messages"]), nil),
 		Images:                 encoded,
 		InputImageMask:         responseImageMask(body["input_image_mask"]),

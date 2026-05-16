@@ -9,6 +9,7 @@ import (
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -505,6 +506,22 @@ func (s *ImageService) ImageReferenceFileAccess(value string) (ImageReferenceFil
 		OwnerID:     meta.OwnerID,
 		Shared:      meta.ShareReferences,
 	}, nil
+}
+
+func (s *ImageService) ImageBytes(value string, scope ImageAccessScope) ([]byte, string, error) {
+	access, err := s.ImageFileAccess(value, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	data, err := os.ReadFile(access.Path)
+	if err != nil {
+		return nil, "", err
+	}
+	mimeType := http.DetectContentType(data)
+	if !strings.HasPrefix(mimeType, "image/") {
+		return nil, "", errors.New("unsupported image file")
+	}
+	return data, mimeType, nil
 }
 
 func (s *ImageService) DeleteImages(paths []string, scope ImageAccessScope) (map[string]any, error) {

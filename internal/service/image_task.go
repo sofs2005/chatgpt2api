@@ -1092,6 +1092,26 @@ func mergeImageTaskMetadata(payload map[string]any, metadata map[string]any) {
 			payload["share_reference_images"] = true
 		}
 	}
+	if conversationID := util.Clean(metadata["frontend_conversation_id"]); conversationID != "" {
+		payload["frontend_conversation_id"] = conversationID
+	}
+	if fallback := normalizedFallbackReferenceImage(metadata["fallback_reference_image"]); len(fallback) > 0 {
+		payload["fallback_reference_image"] = fallback
+	}
+}
+
+func normalizedFallbackReferenceImage(value any) map[string]any {
+	raw := util.StringMap(value)
+	if len(raw) == 0 {
+		return nil
+	}
+	fallback := map[string]any{}
+	for _, key := range []string{"path", "url", "b64_json", "outputFormat"} {
+		if text := strings.TrimSpace(util.Clean(raw[key])); text != "" {
+			fallback[key] = text
+		}
+	}
+	return fallback
 }
 
 func mergeImageOutputOptions(payload map[string]any, options ImageOutputOptions) {

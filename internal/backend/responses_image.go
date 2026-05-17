@@ -1323,16 +1323,18 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 	sedimentIDs := filterOfficialImageIDs(event.SedimentIDs)
 	text := ""
 	messageID := strings.TrimSpace(event.MessageID)
-	if conversationID != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 {
+	if conversationID != "" && (messageID != "" || len(fileIDs) == 0 && len(sedimentIDs) == 0) {
 		polled, err := c.pollOfficialImageResults(ctx, conversationID, messageID)
 		if err != nil {
 			return nil, err
 		}
-		fileIDs = appendUniqueString(fileIDs, polled.FileIDs...)
-		sedimentIDs = appendUniqueString(sedimentIDs, polled.SedimentIDs...)
-		text = polled.Text
-		if messageID == "" {
-			messageID = polled.MessageID
+		if len(polled.FileIDs) > 0 || len(polled.SedimentIDs) > 0 || strings.TrimSpace(polled.Text) != "" {
+			fileIDs = append([]string(nil), polled.FileIDs...)
+			sedimentIDs = append([]string(nil), polled.SedimentIDs...)
+			text = polled.Text
+			if polled.MessageID != "" {
+				messageID = polled.MessageID
+			}
 		}
 	}
 	imageFileIDs := officialImageFileIDs(fileIDs, sedimentIDs)
@@ -1481,6 +1483,9 @@ func officialConversationPollResultFromData(data map[string]any, targetMessageID
 func latestOfficialConversationImageToolMessages(data map[string]any, targetMessageID string) []map[string]any {
 	if messages := officialConversationImageToolMessagesForAssistant(data, targetMessageID); len(messages) > 0 {
 		return messages
+	}
+	if strings.TrimSpace(targetMessageID) != "" {
+		return nil
 	}
 	return latestOfficialConversationImageToolMessagesByTime(data)
 }
@@ -1659,8 +1664,11 @@ func officialConversationAssistantNode(data map[string]any, targetMessageID stri
 		if !isOfficialVisibleAssistantMessage(message) {
 			continue
 		}
-		if targetMessageID != "" && util.Clean(message["id"]) == targetMessageID {
-			return node
+		if targetMessageID != "" {
+			if util.Clean(message["id"]) == targetMessageID {
+				return node
+			}
+			continue
 		}
 		messageTime := officialImageMessageTimestamp(message)
 		if bestNode == nil || messageTime >= bestTime {

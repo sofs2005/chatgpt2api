@@ -1157,7 +1157,7 @@ func updateOfficialImageConversationState(state *imageConversationState, payload
 		state.MessageID = messageID
 	}
 	if assets := officialInterpreterAssetsFromEvent(event, state.ConversationID); len(assets) > 0 {
-		state.InterpreterAssets = appendUniqueOfficialInterpreterAssets(state.InterpreterAssets, assets...)
+		state.InterpreterAssets = assets
 	}
 	if event["type"] == "moderation" {
 		moderation := util.StringMap(event["moderation_response"])
@@ -1199,32 +1199,30 @@ func assistantMessageIDFromOfficialImagePayload(event map[string]any) string {
 }
 
 func officialInterpreterAssetsFromEvent(event map[string]any, fallbackConversationID string) []officialInterpreterAsset {
+	message := util.StringMap(event["message"])
+	if !isOfficialCodeInterpreterAssistantMessage(message) {
+		return nil
+	}
+	messageID := util.Clean(message["id"])
+	conversationID := firstNonEmpty(util.Clean(event["conversation_id"]), fallbackConversationID)
+	content := util.StringMap(message["content"])
 	var assets []officialInterpreterAsset
-	for _, candidate := range []map[string]any{event, util.StringMap(event["v"])} {
-		message := util.StringMap(candidate["message"])
-		if !isOfficialCodeInterpreterAssistantMessage(message) {
+	for _, rawAsset := range anySlice(content["assets"]) {
+		asset := util.StringMap(rawAsset)
+		assetID := util.Clean(asset["asset_id"])
+		mimeType := strings.TrimSpace(util.Clean(asset["mime_type"]))
+		if assetID == "" || !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
 			continue
 		}
-		messageID := util.Clean(message["id"])
-		conversationID := firstNonEmpty(util.Clean(candidate["conversation_id"]), fallbackConversationID)
-		content := util.StringMap(message["content"])
-		for _, rawAsset := range anySlice(content["assets"]) {
-			asset := util.StringMap(rawAsset)
-			assetID := util.Clean(asset["asset_id"])
-			mimeType := strings.TrimSpace(util.Clean(asset["mime_type"]))
-			if assetID == "" || !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-				continue
-			}
-			assets = append(assets, officialInterpreterAsset{
-				AssetID:        assetID,
-				MessageID:      messageID,
-				ConversationID: conversationID,
-				FileName:       util.Clean(asset["file_name"]),
-				MIMEType:       mimeType,
-				Width:          util.ToInt(asset["width"], 0),
-				Height:         util.ToInt(asset["height"], 0),
-			})
-		}
+		assets = append(assets, officialInterpreterAsset{
+			AssetID:        assetID,
+			MessageID:      messageID,
+			ConversationID: conversationID,
+			FileName:       util.Clean(asset["file_name"]),
+			MIMEType:       mimeType,
+			Width:          util.ToInt(asset["width"], 0),
+			Height:         util.ToInt(asset["height"], 0),
+		})
 	}
 	return assets
 }
@@ -1239,28 +1237,6 @@ func isOfficialCodeInterpreterAssistantMessage(message map[string]any) bool {
 	}
 	metadata := util.StringMap(message["metadata"])
 	return util.Clean(metadata["async_task_type"]) == "code_interpreter" || util.Clean(metadata["tool"]) == "code_interpreter"
-}
-
-func appendUniqueOfficialInterpreterAssets(base []officialInterpreterAsset, values ...officialInterpreterAsset) []officialInterpreterAsset {
-	seen := map[string]struct{}{}
-	for _, item := range base {
-		key := item.ConversationID + "\x00" + item.MessageID + "\x00" + item.AssetID
-		if strings.TrimSpace(item.AssetID) != "" {
-			seen[key] = struct{}{}
-		}
-	}
-	for _, value := range values {
-		if strings.TrimSpace(value.AssetID) == "" {
-			continue
-		}
-		key := value.ConversationID + "\x00" + value.MessageID + "\x00" + value.AssetID
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		base = append(base, value)
-	}
-	return base
 }
 
 func assistantMessageIDFromOfficialMessage(message map[string]any) string {

@@ -3633,7 +3633,7 @@ func TestLogGovernanceEndpointCleansOldLogs(t *testing.T) {
 		t.Fatalf("storage backend %T does not implement LogBackend", backend)
 	}
 	for _, item := range []map[string]any{
-		{"time": "2000-01-01 00:00:00", "type": "event", "summary": "旧日志", "detail": map[string]any{"status": "success"}},
+		{"time": time.Now().AddDate(0, 0, -2).Format("2006-01-02 15:04:05"), "type": "event", "summary": "旧日志", "detail": map[string]any{"status": "success"}},
 		{"time": time.Now().Format("2006-01-02 15:04:05"), "type": "event", "summary": "新日志", "detail": map[string]any{"status": 200}},
 	} {
 		if err := logStore.AppendLog(item); err != nil {

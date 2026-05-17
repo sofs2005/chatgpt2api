@@ -415,6 +415,58 @@ func TestOfficialImageAssistantMessageIDExtraction(t *testing.T) {
 	}
 }
 
+func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) {
+	data := map[string]any{
+		"mapping": map[string]any{
+			"old-tool": map[string]any{"message": map[string]any{
+				"author":      map[string]any{"role": "tool"},
+				"create_time": float64(1),
+				"metadata":    map[string]any{"async_task_type": "image_gen"},
+				"content": map[string]any{
+					"content_type": "multimodal_text",
+					"parts": []any{map[string]any{
+						"content_type":  "image_asset_pointer",
+						"asset_pointer": "file-service://file_old",
+					}},
+				},
+			}},
+			"new-tool": map[string]any{"message": map[string]any{
+				"author":      map[string]any{"role": "tool"},
+				"create_time": float64(2),
+				"metadata":    map[string]any{"async_task_type": "image_gen"},
+				"content": map[string]any{
+					"content_type": "multimodal_text",
+					"parts": []any{map[string]any{
+						"content_type":  "image_asset_pointer",
+						"asset_pointer": "file-service://file_new sediment://sediment_new",
+					}},
+				},
+			}},
+			"assistant": map[string]any{"message": map[string]any{
+				"id":          "msg-new",
+				"author":      map[string]any{"role": "assistant"},
+				"create_time": float64(3),
+				"recipient":   "all",
+				"content":     map[string]any{"content_type": "text", "parts": []any{"完成"}},
+			}},
+		},
+	}
+
+	result := officialConversationPollResultFromData(data)
+	if got := strings.Join(result.FileIDs, ","); got != "file_new" {
+		t.Fatalf("FileIDs = %q, want file_new", got)
+	}
+	if got := strings.Join(result.SedimentIDs, ","); got != "sediment_new" {
+		t.Fatalf("SedimentIDs = %q, want sediment_new", got)
+	}
+	if result.MessageID != "msg-new" {
+		t.Fatalf("MessageID = %q, want msg-new", result.MessageID)
+	}
+	if result.Text != "" {
+		t.Fatalf("Text = %q, want empty when image asset exists", result.Text)
+	}
+}
+
 func TestStreamResponsesImageUsesDirectSSEImageAssetPointer(t *testing.T) {
 	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
 	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)

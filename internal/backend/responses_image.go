@@ -1446,54 +1446,96 @@ func (c *Client) fetchOfficialConversationImageResult(ctx context.Context, conve
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return officialConversationPollResult{}, err
 	}
+	return officialConversationPollResultFromData(data), nil
+}
+
+func officialConversationPollResultFromData(data map[string]any) officialConversationPollResult {
 	text := officialConversationAssistantText(data)
 	messageID := officialConversationAssistantMessageID(data)
-	mapping := util.StringMap(data["mapping"])
 	var fileIDs []string
 	var sedimentIDs []string
+	for _, message := range latestOfficialConversationImageToolMessages(data) {
+		messageFileIDs, messageSedimentIDs := officialImageAssetPointersFromMessage(message)
+		fileIDs = appendUniqueString(fileIDs, messageFileIDs...)
+		sedimentIDs = appendUniqueString(sedimentIDs, messageSedimentIDs...)
+	}
+	if len(fileIDs) > 0 || len(sedimentIDs) > 0 || isPendingOfficialImageText(text) {
+		text = ""
+	}
+	return officialConversationPollResult{FileIDs: fileIDs, SedimentIDs: sedimentIDs, Text: text, MessageID: messageID}
+}
+
+func latestOfficialConversationImageToolMessages(data map[string]any) []map[string]any {
+	mapping := util.StringMap(data["mapping"])
+	var messages []map[string]any
+	bestTime := -1.0
 	for _, raw := range mapping {
 		node, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
 		message := util.StringMap(node["message"])
-		author := util.StringMap(message["author"])
-		metadata := util.StringMap(message["metadata"])
-		content := util.StringMap(message["content"])
-		if !strings.EqualFold(util.Clean(author["role"]), "tool") {
+		if !isOfficialConversationImageToolMessage(message) {
 			continue
 		}
-		if util.Clean(metadata["async_task_type"]) != "image_gen" && !officialImageMessageHasAssetPointer(message) {
+		fileIDs, sedimentIDs := officialImageAssetPointersFromMessage(message)
+		if len(fileIDs) == 0 && len(sedimentIDs) == 0 {
 			continue
 		}
-		if util.Clean(content["content_type"]) != "multimodal_text" {
+		messageTime := officialImageMessageTimestamp(message)
+		if messageTime > bestTime {
+			messages = []map[string]any{message}
+			bestTime = messageTime
 			continue
 		}
-		if parts, ok := content["parts"].([]any); ok {
-			for _, rawPart := range parts {
-				text := ""
-				if item, ok := rawPart.(map[string]any); ok {
-					text = util.Clean(item["asset_pointer"])
-				} else if value, ok := rawPart.(string); ok {
-					text = value
-				}
-				for _, match := range regexp.MustCompile(`file-service://([A-Za-z0-9_-]+)`).FindAllStringSubmatch(text, -1) {
-					if len(match) > 1 {
-						fileIDs = appendUniqueString(fileIDs, match[1])
-					}
-				}
-				for _, match := range regexp.MustCompile(`sediment://([A-Za-z0-9_-]+)`).FindAllStringSubmatch(text, -1) {
-					if len(match) > 1 {
-						sedimentIDs = appendUniqueString(sedimentIDs, match[1])
-					}
-				}
+		if messageTime == bestTime {
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
+func isOfficialConversationImageToolMessage(message map[string]any) bool {
+	if len(message) == 0 {
+		return false
+	}
+	author := util.StringMap(message["author"])
+	if !strings.EqualFold(util.Clean(author["role"]), "tool") {
+		return false
+	}
+	content := util.StringMap(message["content"])
+	if util.Clean(content["content_type"]) != "multimodal_text" {
+		return false
+	}
+	metadata := util.StringMap(message["metadata"])
+	return util.Clean(metadata["async_task_type"]) == "image_gen" || officialImageMessageHasAssetPointer(message)
+}
+
+func officialImageAssetPointersFromMessage(message map[string]any) ([]string, []string) {
+	content := util.StringMap(message["content"])
+	parts, _ := content["parts"].([]any)
+	var fileIDs []string
+	var sedimentIDs []string
+	for _, rawPart := range parts {
+		text := ""
+		switch part := rawPart.(type) {
+		case map[string]any:
+			text = util.Clean(part["asset_pointer"])
+		case string:
+			text = part
+		}
+		for _, match := range regexp.MustCompile(`file-service://([A-Za-z0-9_-]+)`).FindAllStringSubmatch(text, -1) {
+			if len(match) > 1 {
+				fileIDs = appendUniqueString(fileIDs, match[1])
+			}
+		}
+		for _, match := range regexp.MustCompile(`sediment://([A-Za-z0-9_-]+)`).FindAllStringSubmatch(text, -1) {
+			if len(match) > 1 {
+				sedimentIDs = appendUniqueString(sedimentIDs, match[1])
 			}
 		}
 	}
-	if len(fileIDs) > 0 || len(sedimentIDs) > 0 || isPendingOfficialImageText(text) {
-		text = ""
-	}
-	return officialConversationPollResult{FileIDs: fileIDs, SedimentIDs: sedimentIDs, Text: text, MessageID: messageID}, nil
+	return fileIDs, sedimentIDs
 }
 
 func officialConversationPollRetryDelay(value string) time.Duration {

@@ -502,6 +502,43 @@ func TestOfficialConversationPollResultWaitsForTargetAssistantMessage(t *testing
 	}
 }
 
+func TestResolveOfficialImageResultsUsesSSEPointerForNewTurnWithoutPolling(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-new":
+			t.Fatalf("new image turn should not block on conversation polling when SSE has a pointer")
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_sse":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_sse.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/file_sse.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{Prompt: "生成图片"}, ResponsesImageEvent{
+		ConversationID: "conv-new",
+		MessageID:      "msg-new",
+		FileIDs:        []string{"file_sse"},
+	})
+	if err != nil {
+		t.Fatalf("resolveOfficialImageResults() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Result != png1x1 {
+		t.Fatalf("results = %#v, want SSE image", results)
+	}
+}
+
 func TestResolveOfficialImageResultsPollsTargetAssistantOverStaleSSEPointer(t *testing.T) {
 	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
 	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
@@ -533,7 +570,7 @@ func TestResolveOfficialImageResultsPollsTargetAssistantOverStaleSSEPointer(t *t
 	defer server.Close()
 
 	client := newTestBackendClient(server)
-	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{Prompt: "修改图片"}, ResponsesImageEvent{
+	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{Prompt: "修改图片", ConversationID: "conv-1"}, ResponsesImageEvent{
 		ConversationID: "conv-1",
 		MessageID:      "msg-new",
 		FileIDs:        []string{"file_old"},

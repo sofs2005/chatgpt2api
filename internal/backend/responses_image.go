@@ -1323,17 +1323,27 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 	sedimentIDs := filterOfficialImageIDs(event.SedimentIDs)
 	text := ""
 	messageID := strings.TrimSpace(event.MessageID)
-	if conversationID != "" && (messageID != "" || len(fileIDs) == 0 && len(sedimentIDs) == 0) {
+	hasPointers := len(fileIDs) > 0 || len(sedimentIDs) > 0
+	if conversationID != "" && !hasPointers {
 		polled, err := c.pollOfficialImageResults(ctx, conversationID, messageID)
 		if err != nil {
 			return nil, err
 		}
-		if len(polled.FileIDs) > 0 || len(polled.SedimentIDs) > 0 || strings.TrimSpace(polled.Text) != "" {
-			fileIDs = append([]string(nil), polled.FileIDs...)
-			sedimentIDs = append([]string(nil), polled.SedimentIDs...)
-			text = polled.Text
-			if polled.MessageID != "" {
-				messageID = polled.MessageID
+		fileIDs = append([]string(nil), polled.FileIDs...)
+		sedimentIDs = append([]string(nil), polled.SedimentIDs...)
+		text = polled.Text
+		if polled.MessageID != "" {
+			messageID = polled.MessageID
+		}
+	} else if conversationID != "" && messageID != "" && strings.TrimSpace(request.ConversationID) != "" {
+		if polled, err := c.fetchOfficialConversationImageResult(ctx, conversationID, messageID); err == nil {
+			if len(polled.FileIDs) > 0 || len(polled.SedimentIDs) > 0 || strings.TrimSpace(polled.Text) != "" {
+				fileIDs = append([]string(nil), polled.FileIDs...)
+				sedimentIDs = append([]string(nil), polled.SedimentIDs...)
+				text = polled.Text
+				if polled.MessageID != "" {
+					messageID = polled.MessageID
+				}
 			}
 		}
 	}

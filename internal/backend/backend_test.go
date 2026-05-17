@@ -340,12 +340,6 @@ func TestStreamResponsesImageUsesOfficialContinuationPointers(t *testing.T) {
 			_, _ = w.Write([]byte("data: {\"v\":{\"message\":{\"id\":\"msg-assist-new\",\"author\":{\"role\":\"assistant\"},\"content\":{\"content_type\":\"text\",\"parts\":[\"好的\"]}}},\"conversation_id\":\"conv-old\"}\n\n"))
 			_, _ = w.Write([]byte("data: {\"p\":\"\",\"o\":\"add\",\"v\":{\"message\":{\"author\":{\"role\":\"tool\",\"metadata\":{}},\"content\":{\"content_type\":\"multimodal_text\",\"parts\":[{\"content_type\":\"image_asset_pointer\",\"asset_pointer\":\"sediment://file_follow\"}]}},\"conversation_id\":\"conv-old\"}}\n\n"))
 			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-old\"}\n\n"))
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-old":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"mapping":{
-				"tool-follow":{"parent":"user-follow","message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"sediment://file_follow"}]}}},
-				"assistant-follow":{"parent":"tool-follow","message":{"id":"msg-assist-new","author":{"role":"assistant"},"recipient":"all","content":{"content_type":"text","parts":["好的"]}}}
-			}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_follow":
 			if got := r.URL.Query().Get("conversation_id"); got != "conv-old" {
 				t.Fatalf("conversation_id = %q", got)
@@ -424,10 +418,9 @@ func TestOfficialImageAssistantMessageIDExtraction(t *testing.T) {
 func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) {
 	data := map[string]any{
 		"mapping": map[string]any{
-			"old-tool": map[string]any{"parent": "old-user", "message": map[string]any{
+			"old-tool": map[string]any{"message": map[string]any{
 				"author":      map[string]any{"role": "tool"},
 				"create_time": float64(1),
-				"update_time": float64(99),
 				"metadata":    map[string]any{"async_task_type": "image_gen"},
 				"content": map[string]any{
 					"content_type": "multimodal_text",
@@ -437,7 +430,7 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 					}},
 				},
 			}},
-			"new-tool": map[string]any{"parent": "new-user", "message": map[string]any{
+			"new-tool": map[string]any{"message": map[string]any{
 				"author":      map[string]any{"role": "tool"},
 				"create_time": float64(2),
 				"metadata":    map[string]any{"async_task_type": "image_gen"},
@@ -449,7 +442,7 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 					}},
 				},
 			}},
-			"assistant": map[string]any{"parent": "new-tool", "message": map[string]any{
+			"assistant": map[string]any{"message": map[string]any{
 				"id":          "msg-new",
 				"author":      map[string]any{"role": "assistant"},
 				"create_time": float64(3),
@@ -459,7 +452,7 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 		},
 	}
 
-	result := officialConversationPollResultFromData(data, "msg-new")
+	result := officialConversationPollResultFromData(data)
 	if got := strings.Join(result.FileIDs, ","); got != "file_new" {
 		t.Fatalf("FileIDs = %q, want file_new", got)
 	}
@@ -471,154 +464,6 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 	}
 	if result.Text != "" {
 		t.Fatalf("Text = %q, want empty when image asset exists", result.Text)
-	}
-}
-
-func TestOfficialConversationPollResultWaitsForTargetAssistantMessage(t *testing.T) {
-	data := map[string]any{
-		"mapping": map[string]any{
-			"old-tool": map[string]any{"message": map[string]any{
-				"author":      map[string]any{"role": "tool"},
-				"create_time": float64(9),
-				"metadata":    map[string]any{"async_task_type": "image_gen"},
-				"content": map[string]any{
-					"content_type": "multimodal_text",
-					"parts":        []any{map[string]any{"asset_pointer": "file-service://file_old"}},
-				},
-			}},
-			"old-assistant": map[string]any{"parent": "old-tool", "message": map[string]any{
-				"id":          "msg-old",
-				"author":      map[string]any{"role": "assistant"},
-				"create_time": float64(10),
-				"recipient":   "all",
-				"content":     map[string]any{"content_type": "text", "parts": []any{"旧图"}},
-			}},
-		},
-	}
-
-	result := officialConversationPollResultFromData(data, "msg-new")
-	if len(result.FileIDs) != 0 || len(result.SedimentIDs) != 0 || result.MessageID != "" || result.Text != "" {
-		t.Fatalf("result = %#v, want empty until target assistant exists", result)
-	}
-}
-
-func TestResolveOfficialImageResultsUsesSSEPointerForNewTurnWithoutPolling(t *testing.T) {
-	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
-	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
-	if err != nil {
-		t.Fatalf("decode png: %v", err)
-	}
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-new":
-			t.Fatalf("new image turn should not block on conversation polling when SSE has a pointer")
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_sse":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_sse.png"}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/download/file_sse.png":
-			w.Header().Set("Content-Type", "image/png")
-			_, _ = w.Write(imageBytes)
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	client := newTestBackendClient(server)
-	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{Prompt: "生成图片"}, ResponsesImageEvent{
-		ConversationID: "conv-new",
-		MessageID:      "msg-new",
-		FileIDs:        []string{"file_sse"},
-	})
-	if err != nil {
-		t.Fatalf("resolveOfficialImageResults() error = %v", err)
-	}
-	if len(results) != 1 || results[0].Result != png1x1 {
-		t.Fatalf("results = %#v, want SSE image", results)
-	}
-}
-
-func TestResolveOfficialImageResultsPollsTargetAssistantOverStaleSSEPointer(t *testing.T) {
-	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
-	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
-	if err != nil {
-		t.Fatalf("decode png: %v", err)
-	}
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"mapping":{
-				"old-tool":{"message":{"author":{"role":"tool"},"create_time":99,"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_old"}]}}},
-				"new-tool":{"parent":"new-user","message":{"author":{"role":"tool"},"create_time":2,"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_new"}]}}},
-				"assistant":{"parent":"new-tool","message":{"id":"msg-new","author":{"role":"assistant"},"create_time":3,"recipient":"all","content":{"content_type":"text","parts":["完成"]}}}
-			}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_new":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_new.png"}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_old":
-			t.Fatalf("stale SSE file pointer was downloaded")
-		case r.Method == http.MethodGet && r.URL.Path == "/download/file_new.png":
-			w.Header().Set("Content-Type", "image/png")
-			_, _ = w.Write(imageBytes)
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	client := newTestBackendClient(server)
-	results, err := client.resolveOfficialImageResults(context.Background(), ResponsesImageRequest{Prompt: "修改图片", ConversationID: "conv-1"}, ResponsesImageEvent{
-		ConversationID: "conv-1",
-		MessageID:      "msg-new",
-		FileIDs:        []string{"file_old"},
-	})
-	if err != nil {
-		t.Fatalf("resolveOfficialImageResults() error = %v", err)
-	}
-	if len(results) != 1 || results[0].Result != png1x1 {
-		t.Fatalf("results = %#v, want current polled image", results)
-	}
-	if got := strings.Join(results[0].FileIDs, ","); got != "file_new" {
-		t.Fatalf("FileIDs = %q, want file_new", got)
-	}
-}
-
-func TestOfficialImageToolEventReplacesHistoricalAssetPointers(t *testing.T) {
-	state := &imageConversationState{}
-	updateOfficialImageConversationState(state, `{"conversation_id":"conv","message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"file-service://file_old"}]}}}`, map[string]any{
-		"conversation_id": "conv",
-		"message": map[string]any{
-			"author":   map[string]any{"role": "tool"},
-			"metadata": map[string]any{"async_task_type": "image_gen"},
-			"content": map[string]any{
-				"content_type": "multimodal_text",
-				"parts": []any{map[string]any{
-					"content_type":  "image_asset_pointer",
-					"asset_pointer": "file-service://file_old",
-				}},
-			},
-		},
-	})
-	updateOfficialImageConversationState(state, `{"conversation_id":"conv","message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"file-service://file_new"}]}}}`, map[string]any{
-		"conversation_id": "conv",
-		"message": map[string]any{
-			"author":   map[string]any{"role": "tool"},
-			"metadata": map[string]any{"async_task_type": "image_gen"},
-			"content": map[string]any{
-				"content_type": "multimodal_text",
-				"parts": []any{map[string]any{
-					"content_type":  "image_asset_pointer",
-					"asset_pointer": "file-service://file_new",
-				}},
-			},
-		},
-	})
-
-	if got := strings.Join(state.FileIDs, ","); got != "file_new" {
-		t.Fatalf("FileIDs = %q, want file_new", got)
 	}
 }
 

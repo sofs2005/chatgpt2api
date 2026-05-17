@@ -1159,15 +1159,8 @@ func updateOfficialImageConversationState(state *imageConversationState, payload
 		}
 	}
 	if isOfficialImageToolEvent(event) {
-		message := officialImageToolMessageFromEvent(event)
-		messageFileIDs, messageSedimentIDs := officialImageAssetPointersFromMessage(message)
-		if len(messageFileIDs) > 0 || len(messageSedimentIDs) > 0 {
-			state.FileIDs = messageFileIDs
-			state.SedimentIDs = messageSedimentIDs
-		} else {
-			state.FileIDs = fileIDs
-			state.SedimentIDs = sedimentIDs
-		}
+		state.FileIDs = appendUniqueString(state.FileIDs, fileIDs...)
+		state.SedimentIDs = appendUniqueString(state.SedimentIDs, sedimentIDs...)
 		if text := officialImageTextMessage(event); text != "" {
 			state.Text = text
 		}
@@ -1225,22 +1218,17 @@ func extractOfficialConversationIDs(payload string) (string, []string, []string)
 }
 
 func isOfficialImageToolEvent(event map[string]any) bool {
-	message := officialImageToolMessageFromEvent(event)
-	metadata := util.StringMap(message["metadata"])
-	return util.Clean(metadata["async_task_type"]) == "image_gen" || officialImageMessageHasAssetPointer(message)
-}
-
-func officialImageToolMessageFromEvent(event map[string]any) map[string]any {
 	value := util.StringMap(event["v"])
 	message := util.StringMap(event["message"])
 	if len(message) == 0 {
 		message = util.StringMap(value["message"])
 	}
+	metadata := util.StringMap(message["metadata"])
 	author := util.StringMap(message["author"])
 	if !strings.EqualFold(util.Clean(author["role"]), "tool") {
-		return nil
+		return false
 	}
-	return message
+	return util.Clean(metadata["async_task_type"]) == "image_gen" || officialImageMessageHasAssetPointer(message)
 }
 
 func officialImageMessageHasAssetPointer(message map[string]any) bool {
@@ -1323,28 +1311,16 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 	sedimentIDs := filterOfficialImageIDs(event.SedimentIDs)
 	text := ""
 	messageID := strings.TrimSpace(event.MessageID)
-	hasPointers := len(fileIDs) > 0 || len(sedimentIDs) > 0
-	if conversationID != "" && !hasPointers {
-		polled, err := c.pollOfficialImageResults(ctx, conversationID, messageID)
+	if conversationID != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 {
+		polled, err := c.pollOfficialImageResults(ctx, conversationID)
 		if err != nil {
 			return nil, err
 		}
-		fileIDs = append([]string(nil), polled.FileIDs...)
-		sedimentIDs = append([]string(nil), polled.SedimentIDs...)
+		fileIDs = appendUniqueString(fileIDs, polled.FileIDs...)
+		sedimentIDs = appendUniqueString(sedimentIDs, polled.SedimentIDs...)
 		text = polled.Text
-		if polled.MessageID != "" {
+		if messageID == "" {
 			messageID = polled.MessageID
-		}
-	} else if conversationID != "" && messageID != "" && strings.TrimSpace(request.ConversationID) != "" {
-		if polled, err := c.fetchOfficialConversationImageResult(ctx, conversationID, messageID); err == nil {
-			if len(polled.FileIDs) > 0 || len(polled.SedimentIDs) > 0 || strings.TrimSpace(polled.Text) != "" {
-				fileIDs = append([]string(nil), polled.FileIDs...)
-				sedimentIDs = append([]string(nil), polled.SedimentIDs...)
-				text = polled.Text
-				if polled.MessageID != "" {
-					messageID = polled.MessageID
-				}
-			}
 		}
 	}
 	imageFileIDs := officialImageFileIDs(fileIDs, sedimentIDs)
@@ -1409,7 +1385,7 @@ type officialConversationPollResult struct {
 	MessageID   string
 }
 
-func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID, targetMessageID string) (officialConversationPollResult, error) {
+func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID string) (officialConversationPollResult, error) {
 	if strings.TrimSpace(conversationID) == "" {
 		return officialConversationPollResult{}, nil
 	}
@@ -1420,7 +1396,7 @@ func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID, t
 			return officialConversationPollResult{}, ctx.Err()
 		default:
 		}
-		result, err := c.fetchOfficialConversationImageResult(ctx, conversationID, targetMessageID)
+		result, err := c.fetchOfficialConversationImageResult(ctx, conversationID)
 		if err != nil {
 			if retry, ok := err.(officialConversationPollRetryError); ok {
 				delay = retry.Delay
@@ -1448,7 +1424,7 @@ func (e officialConversationPollRetryError) Error() string {
 	return "official conversation poll rate limited"
 }
 
-func (c *Client) fetchOfficialConversationImageResult(ctx context.Context, conversationID, targetMessageID string) (officialConversationPollResult, error) {
+func (c *Client) fetchOfficialConversationImageResult(ctx context.Context, conversationID string) (officialConversationPollResult, error) {
 	path := "/backend-api/conversation/" + conversationID
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	for key, value := range c.headers(path, map[string]string{"Accept": "application/json"}) {
@@ -1470,16 +1446,15 @@ func (c *Client) fetchOfficialConversationImageResult(ctx context.Context, conve
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return officialConversationPollResult{}, err
 	}
-	return officialConversationPollResultFromData(data, targetMessageID), nil
+	return officialConversationPollResultFromData(data), nil
 }
 
-func officialConversationPollResultFromData(data map[string]any, targetMessageID string) officialConversationPollResult {
-	assistantMessage := officialConversationAssistantMessage(data, targetMessageID)
-	text := strings.TrimSpace(officialImageMessageText(assistantMessage))
-	messageID := util.Clean(assistantMessage["id"])
+func officialConversationPollResultFromData(data map[string]any) officialConversationPollResult {
+	text := officialConversationAssistantText(data)
+	messageID := officialConversationAssistantMessageID(data)
 	var fileIDs []string
 	var sedimentIDs []string
-	for _, message := range latestOfficialConversationImageToolMessages(data, targetMessageID) {
+	for _, message := range latestOfficialConversationImageToolMessages(data) {
 		messageFileIDs, messageSedimentIDs := officialImageAssetPointersFromMessage(message)
 		fileIDs = appendUniqueString(fileIDs, messageFileIDs...)
 		sedimentIDs = appendUniqueString(sedimentIDs, messageSedimentIDs...)
@@ -1490,43 +1465,7 @@ func officialConversationPollResultFromData(data map[string]any, targetMessageID
 	return officialConversationPollResult{FileIDs: fileIDs, SedimentIDs: sedimentIDs, Text: text, MessageID: messageID}
 }
 
-func latestOfficialConversationImageToolMessages(data map[string]any, targetMessageID string) []map[string]any {
-	if messages := officialConversationImageToolMessagesForAssistant(data, targetMessageID); len(messages) > 0 {
-		return messages
-	}
-	if strings.TrimSpace(targetMessageID) != "" {
-		return nil
-	}
-	return latestOfficialConversationImageToolMessagesByTime(data)
-}
-
-func officialConversationImageToolMessagesForAssistant(data map[string]any, targetMessageID string) []map[string]any {
-	mapping := util.StringMap(data["mapping"])
-	node := officialConversationAssistantNode(data, targetMessageID)
-	seen := map[string]struct{}{}
-	for len(node) > 0 {
-		parentID := util.Clean(node["parent"])
-		if parentID == "" {
-			return nil
-		}
-		if _, ok := seen[parentID]; ok {
-			return nil
-		}
-		seen[parentID] = struct{}{}
-		parentNode := util.StringMap(mapping[parentID])
-		message := util.StringMap(parentNode["message"])
-		if isOfficialConversationImageToolMessage(message) {
-			fileIDs, sedimentIDs := officialImageAssetPointersFromMessage(message)
-			if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
-				return []map[string]any{message}
-			}
-		}
-		node = parentNode
-	}
-	return nil
-}
-
-func latestOfficialConversationImageToolMessagesByTime(data map[string]any) []map[string]any {
+func latestOfficialConversationImageToolMessages(data map[string]any) []map[string]any {
 	mapping := util.StringMap(data["mapping"])
 	var messages []map[string]any
 	bestTime := -1.0
@@ -1653,18 +1592,9 @@ func officialConversationAssistantMessageID(data map[string]any) string {
 }
 
 func latestOfficialConversationAssistantMessage(data map[string]any) map[string]any {
-	return officialConversationAssistantMessage(data, "")
-}
-
-func officialConversationAssistantMessage(data map[string]any, targetMessageID string) map[string]any {
-	return util.StringMap(officialConversationAssistantNode(data, targetMessageID)["message"])
-}
-
-func officialConversationAssistantNode(data map[string]any, targetMessageID string) map[string]any {
 	mapping := util.StringMap(data["mapping"])
-	var bestNode map[string]any
+	var bestMessage map[string]any
 	bestTime := -1.0
-	targetMessageID = strings.TrimSpace(targetMessageID)
 	for _, raw := range mapping {
 		node, ok := raw.(map[string]any)
 		if !ok {
@@ -1674,19 +1604,13 @@ func officialConversationAssistantNode(data map[string]any, targetMessageID stri
 		if !isOfficialVisibleAssistantMessage(message) {
 			continue
 		}
-		if targetMessageID != "" {
-			if util.Clean(message["id"]) == targetMessageID {
-				return node
-			}
-			continue
-		}
 		messageTime := officialImageMessageTimestamp(message)
-		if bestNode == nil || messageTime >= bestTime {
-			bestNode = node
+		if bestMessage == nil || messageTime >= bestTime {
+			bestMessage = message
 			bestTime = messageTime
 		}
 	}
-	return bestNode
+	return bestMessage
 }
 
 func isOfficialVisibleAssistantMessage(message map[string]any) bool {

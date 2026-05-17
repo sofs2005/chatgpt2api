@@ -415,6 +415,73 @@ func TestOfficialImageAssistantMessageIDExtraction(t *testing.T) {
 	}
 }
 
+func TestStreamResponsesImageUsesCodeInterpreterAssetDownload(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	interpreterDownloadCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialPreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"p\":\"\",\"o\":\"add\",\"v\":{\"message\":{\"author\":{\"role\":\"tool\",\"metadata\":{}},\"content\":{\"content_type\":\"multimodal_text\",\"parts\":[{\"content_type\":\"image_asset_pointer\",\"asset_pointer\":\"file-service://file_old\"}]}},\"conversation_id\":\"conv-ci\"}}\n\n"))
+			_, _ = w.Write([]byte(`data: {"message":{"id":"msg-current","author":{"role":"assistant"},"content":{"content_type":"multimodal_text","parts":[null],"assets":[{"asset_id":"file_current","file_name":"output.png","file_size":245832,"mime_type":"image/png","width":1024,"height":1024,"metadata":{"generation_type":"interpreter"}}]},"status":"in_progress","metadata":{"async_task_type":"code_interpreter","tool":"code_interpreter","attachments":[]}},"conversation_id":"conv-ci"}` + "\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-ci\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-ci/interpreter/download":
+			interpreterDownloadCount++
+			if got := r.URL.Query().Get("asset_id"); got != "file_current" {
+				t.Fatalf("asset_id = %q, want file_current", got)
+			}
+			if got := r.URL.Query().Get("message_id"); got != "msg-current" {
+				t.Fatalf("message_id = %q, want msg-current", got)
+			}
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-ci":
+			t.Fatalf("unexpected conversation poll for direct interpreter asset")
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/backend-api/files/download/"):
+			t.Fatalf("unexpected file download for interpreter asset: %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, errCh := client.StreamResponsesImage(context.Background(), ResponsesImageRequest{
+		Prompt:          "改成彩色漫画",
+		Model:           "gpt-image-2",
+		ConversationID:  "conv-ci",
+		ParentMessageID: "msg-previous",
+	})
+	var results []ResponsesImageEvent
+	for event := range events {
+		if event.Result != "" {
+			results = append(results, event)
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamResponsesImage() error = %v", err)
+	}
+	if interpreterDownloadCount != 1 {
+		t.Fatalf("interpreter download count = %d, want 1", interpreterDownloadCount)
+	}
+	if len(results) != 1 || results[0].Result != png1x1 || results[0].MessageID != "msg-current" || results[0].ConversationID != "conv-ci" {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
 func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) {
 	data := map[string]any{
 		"mapping": map[string]any{

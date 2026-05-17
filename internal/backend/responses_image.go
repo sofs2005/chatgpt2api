@@ -91,6 +91,7 @@ type ResponsesImageEvent struct {
 	ToolInvoked       *bool
 	TurnUseCase       string
 	Raw               map[string]any
+	interpreterAssets []officialInterpreterAsset
 }
 
 type uploadedImageRef struct {
@@ -104,14 +105,25 @@ type uploadedImageRef struct {
 }
 
 type imageConversationState struct {
-	Text           string
-	ConversationID string
+	Text              string
+	ConversationID    string
+	MessageID         string
+	FileIDs           []string
+	SedimentIDs       []string
+	InterpreterAssets []officialInterpreterAsset
+	Blocked           bool
+	ToolInvoked       *bool
+	TurnUseCase       string
+}
+
+type officialInterpreterAsset struct {
+	AssetID        string
 	MessageID      string
-	FileIDs        []string
-	SedimentIDs    []string
-	Blocked        bool
-	ToolInvoked    *bool
-	TurnUseCase    string
+	ConversationID string
+	FileName       string
+	MIMEType       string
+	Width          int
+	Height         int
 }
 
 func (c *Client) StreamResponsesImage(ctx context.Context, request ResponsesImageRequest) (<-chan ResponsesImageEvent, <-chan error) {
@@ -1069,7 +1081,7 @@ func shouldResolveOfficialImageResults(event ResponsesImageEvent) bool {
 }
 
 func officialImageEventHasResultPointers(event ResponsesImageEvent) bool {
-	return len(filterOfficialImageIDs(event.FileIDs)) > 0 || len(filterOfficialImageIDs(event.SedimentIDs)) > 0
+	return len(event.interpreterAssets) > 0 || len(filterOfficialImageIDs(event.FileIDs)) > 0 || len(filterOfficialImageIDs(event.SedimentIDs)) > 0
 }
 
 func isOfficialImageGenerationUseCase(value string) bool {
@@ -1093,17 +1105,18 @@ func parseOfficialImagePayload(payload string, state *imageConversationState) (R
 	updateOfficialImageConversationState(state, payload, data)
 	eventType := util.Clean(data["type"])
 	event := ResponsesImageEvent{
-		Type:           eventType,
-		Created:        time.Now().Unix(),
-		ConversationID: state.ConversationID,
-		MessageID:      state.MessageID,
-		FileIDs:        append([]string(nil), state.FileIDs...),
-		SedimentIDs:    append([]string(nil), state.SedimentIDs...),
-		Text:           state.Text,
-		Blocked:        state.Blocked,
-		ToolInvoked:    state.ToolInvoked,
-		TurnUseCase:    state.TurnUseCase,
-		Raw:            data,
+		Type:              eventType,
+		Created:           time.Now().Unix(),
+		ConversationID:    state.ConversationID,
+		MessageID:         state.MessageID,
+		FileIDs:           append([]string(nil), state.FileIDs...),
+		SedimentIDs:       append([]string(nil), state.SedimentIDs...),
+		Text:              state.Text,
+		Blocked:           state.Blocked,
+		ToolInvoked:       state.ToolInvoked,
+		TurnUseCase:       state.TurnUseCase,
+		Raw:               data,
+		interpreterAssets: append([]officialInterpreterAsset(nil), state.InterpreterAssets...),
 	}
 	if message := officialImageTextMessage(data); message != "" && event.Result == "" {
 		event.Text = message
@@ -1143,6 +1156,9 @@ func updateOfficialImageConversationState(state *imageConversationState, payload
 	if messageID := assistantMessageIDFromOfficialImagePayload(event); messageID != "" {
 		state.MessageID = messageID
 	}
+	if assets := officialInterpreterAssetsFromEvent(event, state.ConversationID); len(assets) > 0 {
+		state.InterpreterAssets = appendUniqueOfficialInterpreterAssets(state.InterpreterAssets, assets...)
+	}
 	if event["type"] == "moderation" {
 		moderation := util.StringMap(event["moderation_response"])
 		if util.ToBool(moderation["blocked"]) {
@@ -1180,6 +1196,71 @@ func assistantMessageIDFromOfficialImagePayload(event map[string]any) string {
 	}
 	value := util.StringMap(event["v"])
 	return assistantMessageIDFromOfficialMessage(util.StringMap(value["message"]))
+}
+
+func officialInterpreterAssetsFromEvent(event map[string]any, fallbackConversationID string) []officialInterpreterAsset {
+	var assets []officialInterpreterAsset
+	for _, candidate := range []map[string]any{event, util.StringMap(event["v"])} {
+		message := util.StringMap(candidate["message"])
+		if !isOfficialCodeInterpreterAssistantMessage(message) {
+			continue
+		}
+		messageID := util.Clean(message["id"])
+		conversationID := firstNonEmpty(util.Clean(candidate["conversation_id"]), fallbackConversationID)
+		content := util.StringMap(message["content"])
+		for _, rawAsset := range anySlice(content["assets"]) {
+			asset := util.StringMap(rawAsset)
+			assetID := util.Clean(asset["asset_id"])
+			mimeType := strings.TrimSpace(util.Clean(asset["mime_type"]))
+			if assetID == "" || !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+				continue
+			}
+			assets = append(assets, officialInterpreterAsset{
+				AssetID:        assetID,
+				MessageID:      messageID,
+				ConversationID: conversationID,
+				FileName:       util.Clean(asset["file_name"]),
+				MIMEType:       mimeType,
+				Width:          util.ToInt(asset["width"], 0),
+				Height:         util.ToInt(asset["height"], 0),
+			})
+		}
+	}
+	return assets
+}
+
+func isOfficialCodeInterpreterAssistantMessage(message map[string]any) bool {
+	if len(message) == 0 {
+		return false
+	}
+	author := util.StringMap(message["author"])
+	if !strings.EqualFold(util.Clean(author["role"]), "assistant") {
+		return false
+	}
+	metadata := util.StringMap(message["metadata"])
+	return util.Clean(metadata["async_task_type"]) == "code_interpreter" || util.Clean(metadata["tool"]) == "code_interpreter"
+}
+
+func appendUniqueOfficialInterpreterAssets(base []officialInterpreterAsset, values ...officialInterpreterAsset) []officialInterpreterAsset {
+	seen := map[string]struct{}{}
+	for _, item := range base {
+		key := item.ConversationID + "\x00" + item.MessageID + "\x00" + item.AssetID
+		if strings.TrimSpace(item.AssetID) != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value.AssetID) == "" {
+			continue
+		}
+		key := value.ConversationID + "\x00" + value.MessageID + "\x00" + value.AssetID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		base = append(base, value)
+	}
+	return base
 }
 
 func assistantMessageIDFromOfficialMessage(message map[string]any) string {
@@ -1307,10 +1388,13 @@ func officialImageMessageText(message map[string]any) string {
 
 func (c *Client) resolveOfficialImageResults(ctx context.Context, request ResponsesImageRequest, event ResponsesImageEvent) ([]ResponsesImageEvent, error) {
 	conversationID := strings.TrimSpace(event.ConversationID)
+	messageID := strings.TrimSpace(event.MessageID)
+	if len(event.interpreterAssets) > 0 {
+		return c.resolveOfficialInterpreterAssetResults(ctx, request, event.interpreterAssets, conversationID, messageID)
+	}
 	fileIDs := filterOfficialImageIDs(event.FileIDs)
 	sedimentIDs := filterOfficialImageIDs(event.SedimentIDs)
 	text := ""
-	messageID := strings.TrimSpace(event.MessageID)
 	if conversationID != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 {
 		polled, err := c.pollOfficialImageResults(ctx, conversationID)
 		if err != nil {
@@ -1353,6 +1437,33 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 			ConversationID: conversationID,
 			FileIDs:        append([]string(nil), fileIDs...),
 			SedimentIDs:    append([]string(nil), sedimentIDs...),
+		})
+	}
+	return results, nil
+}
+
+func (c *Client) resolveOfficialInterpreterAssetResults(ctx context.Context, request ResponsesImageRequest, assets []officialInterpreterAsset, fallbackConversationID, fallbackMessageID string) ([]ResponsesImageEvent, error) {
+	results := make([]ResponsesImageEvent, 0, len(assets))
+	for index, asset := range assets {
+		conversationID := firstNonEmpty(strings.TrimSpace(asset.ConversationID), fallbackConversationID)
+		messageID := firstNonEmpty(strings.TrimSpace(asset.MessageID), fallbackMessageID)
+		data, err := c.downloadOfficialInterpreterAsset(ctx, conversationID, asset.AssetID, messageID)
+		if err != nil {
+			return nil, err
+		}
+		outputFormat := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(asset.MIMEType)), "image/")
+		if outputFormat == "" || outputFormat == "jpeg" {
+			outputFormat = "png"
+		}
+		results = append(results, ResponsesImageEvent{
+			Type:           "image_result",
+			ItemID:         fmt.Sprintf("image_%d", index+1),
+			MessageID:      messageID,
+			Result:         base64.StdEncoding.EncodeToString(data),
+			RevisedPrompt:  strings.TrimSpace(request.Prompt),
+			OutputFormat:   outputFormat,
+			Created:        time.Now().Unix(),
+			ConversationID: conversationID,
 		})
 	}
 	return results, nil
@@ -1658,6 +1769,44 @@ func officialImageMessageTimestamp(message map[string]any) float64 {
 		}
 	}
 	return 0
+}
+
+func (c *Client) downloadOfficialInterpreterAsset(ctx context.Context, conversationID, assetID, messageID string) ([]byte, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	assetID = strings.TrimSpace(assetID)
+	messageID = strings.TrimSpace(messageID)
+	if conversationID == "" {
+		return nil, fmt.Errorf("conversation_id is required for official interpreter asset download")
+	}
+	if assetID == "" {
+		return nil, fmt.Errorf("asset_id is required for official interpreter asset download")
+	}
+	if messageID == "" {
+		return nil, fmt.Errorf("message_id is required for official interpreter asset download")
+	}
+	query := urlpkg.Values{}
+	query.Set("asset_id", assetID)
+	query.Set("message_id", messageID)
+	targetPath := "/backend-api/conversation/" + urlpkg.PathEscape(conversationID) + "/interpreter/download"
+	path := targetPath + "?" + query.Encode()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	for key, value := range c.headers(targetPath, map[string]string{"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"}) {
+		req.Header.Set(key, value)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, upstreamTransportError(path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return nil, upstreamHTTPError(path, resp.StatusCode, data)
+	}
+	contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+	if contentType != "" && !strings.HasPrefix(contentType, "image/") {
+		return nil, fmt.Errorf("official interpreter asset %s returned non-image content type %s", assetID, contentType)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func (c *Client) getOfficialFileDownloadURL(ctx context.Context, conversationID, fileID string) (string, error) {

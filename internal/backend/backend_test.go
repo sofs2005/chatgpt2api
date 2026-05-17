@@ -418,9 +418,10 @@ func TestOfficialImageAssistantMessageIDExtraction(t *testing.T) {
 func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) {
 	data := map[string]any{
 		"mapping": map[string]any{
-			"old-tool": map[string]any{"message": map[string]any{
+			"old-tool": map[string]any{"parent": "old-user", "message": map[string]any{
 				"author":      map[string]any{"role": "tool"},
 				"create_time": float64(1),
+				"update_time": float64(99),
 				"metadata":    map[string]any{"async_task_type": "image_gen"},
 				"content": map[string]any{
 					"content_type": "multimodal_text",
@@ -430,7 +431,7 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 					}},
 				},
 			}},
-			"new-tool": map[string]any{"message": map[string]any{
+			"new-tool": map[string]any{"parent": "new-user", "message": map[string]any{
 				"author":      map[string]any{"role": "tool"},
 				"create_time": float64(2),
 				"metadata":    map[string]any{"async_task_type": "image_gen"},
@@ -442,7 +443,7 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 					}},
 				},
 			}},
-			"assistant": map[string]any{"message": map[string]any{
+			"assistant": map[string]any{"parent": "new-tool", "message": map[string]any{
 				"id":          "msg-new",
 				"author":      map[string]any{"role": "assistant"},
 				"create_time": float64(3),
@@ -452,7 +453,7 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 		},
 	}
 
-	result := officialConversationPollResultFromData(data)
+	result := officialConversationPollResultFromData(data, "msg-new")
 	if got := strings.Join(result.FileIDs, ","); got != "file_new" {
 		t.Fatalf("FileIDs = %q, want file_new", got)
 	}
@@ -464,6 +465,42 @@ func TestOfficialConversationPollResultUsesLatestImageToolMessage(t *testing.T) 
 	}
 	if result.Text != "" {
 		t.Fatalf("Text = %q, want empty when image asset exists", result.Text)
+	}
+}
+
+func TestOfficialImageToolEventReplacesHistoricalAssetPointers(t *testing.T) {
+	state := &imageConversationState{}
+	updateOfficialImageConversationState(state, `{"conversation_id":"conv","message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"file-service://file_old"}]}}}`, map[string]any{
+		"conversation_id": "conv",
+		"message": map[string]any{
+			"author":   map[string]any{"role": "tool"},
+			"metadata": map[string]any{"async_task_type": "image_gen"},
+			"content": map[string]any{
+				"content_type": "multimodal_text",
+				"parts": []any{map[string]any{
+					"content_type":  "image_asset_pointer",
+					"asset_pointer": "file-service://file_old",
+				}},
+			},
+		},
+	})
+	updateOfficialImageConversationState(state, `{"conversation_id":"conv","message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"file-service://file_new"}]}}}`, map[string]any{
+		"conversation_id": "conv",
+		"message": map[string]any{
+			"author":   map[string]any{"role": "tool"},
+			"metadata": map[string]any{"async_task_type": "image_gen"},
+			"content": map[string]any{
+				"content_type": "multimodal_text",
+				"parts": []any{map[string]any{
+					"content_type":  "image_asset_pointer",
+					"asset_pointer": "file-service://file_new",
+				}},
+			},
+		},
+	})
+
+	if got := strings.Join(state.FileIDs, ","); got != "file_new" {
+		t.Fatalf("FileIDs = %q, want file_new", got)
 	}
 }
 

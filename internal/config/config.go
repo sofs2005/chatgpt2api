@@ -49,6 +49,8 @@ var settingEnvKeys = map[string]string{
 	"login_page_image_zoom":             "CHATGPT2API_LOGIN_PAGE_IMAGE_ZOOM",
 	"login_page_image_position_x":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_X",
 	"login_page_image_position_y":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y",
+	"text_account_schedule_mode":        "CHATGPT2API_TEXT_ACCOUNT_SCHEDULE_MODE",
+	"image_account_schedule_mode":       "CHATGPT2API_IMAGE_ACCOUNT_SCHEDULE_MODE",
 }
 
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -221,6 +223,14 @@ func (s *Store) DefaultLogView() string {
 
 func (s *Store) ImageTaskTimeoutSeconds() int {
 	return normalizeImageTaskTimeoutSeconds(s.settingValue("image_task_timeout_seconds", defaultImageTaskTimeoutSeconds))
+}
+
+func (s *Store) TextAccountScheduleMode() string {
+	return normalizeAccountScheduleMode(s.settingValue("text_account_schedule_mode", "load_balance"))
+}
+
+func (s *Store) ImageAccountScheduleMode() string {
+	return normalizeAccountScheduleMode(s.settingValue("image_account_schedule_mode", "load_balance"))
 }
 
 func (s *Store) UserDefaultConcurrentLimit() int {
@@ -427,6 +437,8 @@ func (s *Store) Get() map[string]any {
 	delete(data, "image_concurrent_limit")
 	data["refresh_account_interval_minute"] = s.RefreshAccountIntervalMinute()
 	data["image_task_timeout_seconds"] = s.ImageTaskTimeoutSeconds()
+	data["text_account_schedule_mode"] = s.TextAccountScheduleMode()
+	data["image_account_schedule_mode"] = s.ImageAccountScheduleMode()
 	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
 	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
 	data["default_billing_type"] = s.DefaultBillingType()
@@ -485,6 +497,12 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 	}
 	if value, ok := next["image_task_timeout_seconds"]; ok {
 		next["image_task_timeout_seconds"] = normalizeImageTaskTimeoutSeconds(value)
+	}
+	if value, ok := next["text_account_schedule_mode"]; ok {
+		next["text_account_schedule_mode"] = normalizeAccountScheduleMode(value)
+	}
+	if value, ok := next["image_account_schedule_mode"]; ok {
+		next["image_account_schedule_mode"] = normalizeAccountScheduleMode(value)
 	}
 	if value, ok := next["image_storage_limit_mb"]; ok {
 		next["image_storage_limit_mb"] = normalizeNonNegativeInt(value)
@@ -796,6 +814,14 @@ func normalizeImageTaskTimeoutSeconds(value any) int {
 		return maxImageTaskTimeoutSeconds
 	}
 	return seconds
+}
+
+func normalizeAccountScheduleMode(value any) string {
+	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	if mode == "fill_first" {
+		return "fill_first"
+	}
+	return "load_balance"
 }
 
 func normalizeNonNegativeInt(value any) int {

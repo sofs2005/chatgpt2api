@@ -89,6 +89,55 @@ func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
 	}
 }
 
+func TestStoreNormalizesAccountScheduleModes(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetEnv(t, "CHATGPT2API_TEXT_ACCOUNT_SCHEDULE_MODE")
+	unsetEnv(t, "CHATGPT2API_IMAGE_ACCOUNT_SCHEDULE_MODE")
+	unsetLinuxDoEnv(t)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	if store.TextAccountScheduleMode() != "load_balance" {
+		t.Fatalf("TextAccountScheduleMode() = %q, want load_balance", store.TextAccountScheduleMode())
+	}
+	if store.ImageAccountScheduleMode() != "load_balance" {
+		t.Fatalf("ImageAccountScheduleMode() = %q, want load_balance", store.ImageAccountScheduleMode())
+	}
+
+	got, err := store.Update(map[string]any{
+		"text_account_schedule_mode":  "fill_first",
+		"image_account_schedule_mode": "invalid",
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertConfigValue(t, got, "text_account_schedule_mode", "fill_first")
+	assertConfigValue(t, got, "image_account_schedule_mode", "load_balance")
+	if store.TextAccountScheduleMode() != "fill_first" {
+		t.Fatalf("TextAccountScheduleMode() = %q, want fill_first", store.TextAccountScheduleMode())
+	}
+	if store.ImageAccountScheduleMode() != "load_balance" {
+		t.Fatalf("ImageAccountScheduleMode() = %q, want load_balance", store.ImageAccountScheduleMode())
+	}
+
+	envData, err := os.ReadFile(filepath.Join(root, ".env"))
+	if err != nil {
+		t.Fatalf("read .env: %v", err)
+	}
+	envText := string(envData)
+	for _, want := range []string{
+		"CHATGPT2API_TEXT_ACCOUNT_SCHEDULE_MODE=fill_first",
+		"CHATGPT2API_IMAGE_ACCOUNT_SCHEDULE_MODE=load_balance",
+	} {
+		if !strings.Contains(envText, want) {
+			t.Fatalf(".env missing %q in:\n%s", want, envText)
+		}
+	}
+}
+
 func TestStoreNormalizesUnsupportedLoginPageImageMode(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)

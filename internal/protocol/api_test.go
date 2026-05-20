@@ -6,10 +6,70 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"chatgpt2api/internal/backend"
+	"chatgpt2api/internal/service"
+	"chatgpt2api/internal/storage"
 )
 
 func ptrInt(value int) *int {
 	return &value
+}
+
+type testTextLeaseConfig struct{}
+
+func (testTextLeaseConfig) AutoRemoveInvalidAccounts() bool     { return false }
+func (testTextLeaseConfig) AutoRemoveRateLimitedAccounts() bool { return false }
+func (testTextLeaseConfig) TextAccountScheduleMode() string     { return "load_balance" }
+func (testTextLeaseConfig) ImageAccountScheduleMode() string    { return "load_balance" }
+func (testTextLeaseConfig) Proxy() string                       { return "" }
+
+type testProtocolStorageBackend struct {
+	accounts []map[string]any
+}
+
+var _ storage.Backend = (*testProtocolStorageBackend)(nil)
+
+func (b *testProtocolStorageBackend) LoadAccounts() ([]map[string]any, error) {
+	return cloneMapSlice(b.accounts), nil
+}
+
+func (b *testProtocolStorageBackend) SaveAccounts(items []map[string]any) error {
+	b.accounts = cloneMapSlice(items)
+	return nil
+}
+
+func (b *testProtocolStorageBackend) LoadAuthKeys() ([]map[string]any, error) { return nil, nil }
+func (b *testProtocolStorageBackend) SaveAuthKeys([]map[string]any) error     { return nil }
+func (b *testProtocolStorageBackend) HealthCheck() map[string]any {
+	return map[string]any{"status": "healthy"}
+}
+func (b *testProtocolStorageBackend) Info() map[string]any { return map[string]any{"status": "ok"} }
+
+func cloneMapSlice(items []map[string]any) []map[string]any {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, len(items))
+	for i, item := range items {
+		cloned := map[string]any{}
+		for key, value := range item {
+			cloned[key] = value
+		}
+		out[i] = cloned
+	}
+	return out
+}
+
+func newTextLeaseTestEngine(t *testing.T, tokens ...string) (*Engine, *service.AccountService) {
+	t.Helper()
+	store := &testProtocolStorageBackend{}
+	accounts := service.NewAccountService(store, testTextLeaseConfig{}, service.NewProxyService(testTextLeaseConfig{}), service.NewLogService(store))
+	if len(tokens) > 0 {
+		accounts.AddAccounts(tokens)
+	}
+	return &Engine{Accounts: accounts, Proxy: service.NewProxyService(testTextLeaseConfig{})}, accounts
 }
 
 func TestChatAndResponsesImageParsing(t *testing.T) {
@@ -76,6 +136,272 @@ func TestTextModelDoesNotForceImageChatRoute(t *testing.T) {
 	if !IsImageChatRequest(map[string]any{"model": "gpt-5", "modalities": []any{"image"}, "messages": []any{map[string]any{"role": "user", "content": "draw"}}}) {
 		t.Fatal("gpt-5 with image modality should be routed as an image request")
 	}
+}
+
+func TestWithTextLeaseReleasesOnSuccess(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1")
+	if err := engine.withTextLease(nil, func(_ *backend.Client, lease service.AccountLease) error {
+		if lease.Token != "token-1" {
+			t.Fatalf("lease token = %q, want token-1", lease.Token)
+		}
+		if _, err := accounts.AcquireTextAccessToken(nil); err == nil {
+			t.Fatal("expected second acquire to fail while lease is held")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("withTextLease() error = %v", err)
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after release error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestWithTextLeaseReleasesOnError(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1")
+	wantErr := errors.New("boom")
+	if err := engine.withTextLease(nil, func(_ *backend.Client, lease service.AccountLease) error {
+		if lease.Token != "token-1" {
+			t.Fatalf("lease token = %q, want token-1", lease.Token)
+		}
+		if _, err := accounts.AcquireTextAccessToken(nil); err == nil {
+			t.Fatal("expected second acquire to fail while lease is held")
+		}
+		return wantErr
+	}); !errors.Is(err, wantErr) {
+		t.Fatalf("withTextLease() error = %v, want %v", err, wantErr)
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after error release error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestWithTextLeaseReleasesOnCanceledContext(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := engine.withTextLease(nil, func(_ *backend.Client, lease service.AccountLease) error {
+		if ctx.Err() == nil {
+			t.Fatal("expected canceled context")
+		}
+		if _, err := accounts.AcquireTextAccessToken(nil); err == nil {
+			t.Fatal("expected second acquire to fail while lease is held")
+		}
+		return ctx.Err()
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("withTextLease() error = %v, want context.Canceled", err)
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after context cancel release error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestTextLeaseRetrySkipsExpiredTokenAndReleasesEachAttempt(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1", "token-2")
+	accounts.UpdateAccount("token-1", map[string]any{"session_token": "session-1"})
+	accounts.UpdateAccount("token-2", map[string]any{"session_token": "session-2"})
+	exhaustedTokens := map[string]struct{}{}
+	var firstToken string
+	if err := engine.withTextLease(exhaustedTokens, func(_ *backend.Client, lease service.AccountLease) error {
+		firstToken = lease.Token
+		if !engine.markTextTokenExpiredForRetry(lease.Token, errors.New("authentication token is expired"), exhaustedTokens) {
+			t.Fatalf("markTextTokenExpiredForRetry() = false, want true")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("withTextLease() error = %v", err)
+	}
+	lease, err := accounts.AcquireTextAccessToken(exhaustedTokens)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() retry error = %v", err)
+	}
+	if lease.Token == firstToken {
+		t.Fatalf("retry token = %q, want a different token", lease.Token)
+	}
+	lease.Release()
+}
+
+func stubStreamTextDeltasForTokenRetry(t *testing.T, fn func(context.Context, *Engine, *backend.Client, ConversationRequest) (<-chan string, <-chan error)) {
+	t.Helper()
+	old := streamTextDeltasForTokenRetry
+	streamTextDeltasForTokenRetry = fn
+	t.Cleanup(func() { streamTextDeltasForTokenRetry = old })
+}
+
+func receiveRetryTestError(t *testing.T, errCh <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for retry stream error")
+		return nil
+	}
+}
+
+func TestStreamTextDeltasWithTokenRetryHoldsLeaseUntilSuccessStreamEnds(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1")
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		deltas := make(chan string)
+		errs := make(chan error, 1)
+		close(started)
+		go func() {
+			defer close(deltas)
+			defer close(errs)
+			<-finish
+			errs <- nil
+		}()
+		return deltas, errs
+	})
+
+	deltas, errCh := engine.streamTextDeltasWithTokenRetry(context.Background(), ConversationRequest{Model: "auto"})
+	<-started
+	if _, err := accounts.AcquireTextAccessToken(nil); err == nil {
+		t.Fatal("expected second acquire to fail while stream lease is held")
+	}
+	close(finish)
+	for range deltas {
+	}
+	if err := receiveRetryTestError(t, errCh); err != nil {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v", err)
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after stream end error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestStreamTextDeltasWithTokenRetryReleasesLeaseOnCanceledContext(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1")
+	started := make(chan struct{})
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		deltas := make(chan string)
+		errs := make(chan error, 1)
+		close(started)
+		go func() {
+			defer close(deltas)
+			defer close(errs)
+			<-ctx.Done()
+			errs <- ctx.Err()
+		}()
+		return deltas, errs
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	deltas, errCh := engine.streamTextDeltasWithTokenRetry(ctx, ConversationRequest{Model: "auto"})
+	<-started
+	cancel()
+	for range deltas {
+	}
+	if err := receiveRetryTestError(t, errCh); !errors.Is(err, context.Canceled) {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v, want context.Canceled", err)
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after canceled stream error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestStreamTextDeltasWithTokenRetrySwitchesTokenAfterExpiredBeforeOutput(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1", "token-2")
+	accounts.UpdateAccount("token-1", map[string]any{"session_token": "session-1"})
+	accounts.UpdateAccount("token-2", map[string]any{"session_token": "session-2"})
+	attemptTokens := []string{}
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		attemptTokens = append(attemptTokens, client.AccessToken)
+		deltas := make(chan string, 1)
+		errs := make(chan error, 1)
+		if len(attemptTokens) == 1 {
+			close(deltas)
+			errs <- errors.New("authentication token is expired")
+			close(errs)
+			return deltas, errs
+		}
+		deltas <- "ok"
+		close(deltas)
+		errs <- nil
+		close(errs)
+		return deltas, errs
+	})
+
+	deltas, errCh := engine.streamTextDeltasWithTokenRetry(context.Background(), ConversationRequest{Model: "auto"})
+	var text string
+	for delta := range deltas {
+		text += delta
+	}
+	if err := receiveRetryTestError(t, errCh); err != nil {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v", err)
+	}
+	if text != "ok" {
+		t.Fatalf("streamed text = %q, want ok", text)
+	}
+	if len(attemptTokens) != 2 {
+		t.Fatalf("attempt count = %d, want 2 (%#v)", len(attemptTokens), attemptTokens)
+	}
+	if attemptTokens[0] == attemptTokens[1] {
+		t.Fatalf("retry reused token %q, want token switch", attemptTokens[0])
+	}
+	lease, err := accounts.AcquireTextAccessToken(map[string]struct{}{attemptTokens[0]: {}})
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() for successful retry token after stream error = %v", err)
+	}
+	if lease.Token != attemptTokens[1] {
+		t.Fatalf("acquired token = %q, want released retry token %q", lease.Token, attemptTokens[1])
+	}
+	lease.Release()
+}
+
+func TestStreamTextDeltasWithTokenRetryDoesNotSwitchTokenAfterPartialOutput(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1", "token-2")
+	attemptTokens := []string{}
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		attemptTokens = append(attemptTokens, client.AccessToken)
+		deltas := make(chan string, 1)
+		errs := make(chan error, 1)
+		deltas <- "partial"
+		close(deltas)
+		errs <- errors.New("authentication token is expired")
+		close(errs)
+		return deltas, errs
+	})
+
+	deltas, errCh := engine.streamTextDeltasWithTokenRetry(context.Background(), ConversationRequest{Model: "auto"})
+	var text string
+	for delta := range deltas {
+		text += delta
+	}
+	err := receiveRetryTestError(t, errCh)
+	if err == nil || !strings.Contains(err.Error(), "authentication token is expired") {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v, want token expired", err)
+	}
+	if text != "partial" {
+		t.Fatalf("streamed text = %q, want partial", text)
+	}
+	if len(attemptTokens) != 1 {
+		t.Fatalf("attempt count = %d, want 1 (%#v)", len(attemptTokens), attemptTokens)
+	}
+	exhausted := map[string]struct{}{}
+	for _, token := range []string{"token-1", "token-2"} {
+		if token != attemptTokens[0] {
+			exhausted[token] = struct{}{}
+		}
+	}
+	lease, err := accounts.AcquireTextAccessToken(exhausted)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() for first token after partial error = %v", err)
+	}
+	if lease.Token != attemptTokens[0] {
+		t.Fatalf("acquired token = %q, want released partial-attempt token %q", lease.Token, attemptTokens[0])
+	}
+	lease.Release()
 }
 
 func TestImageChatRouteStillWinsWhenToolsPresent(t *testing.T) {
@@ -315,7 +641,7 @@ func TestStreamChatCompletionEventsForcedToolErrorsWhenToolMissing(t *testing.T)
 }
 
 func TestStreamTextChatCompletionWithToolsRequiredToolErrorsBeforeUpstream(t *testing.T) {
-	events, errCh := (&Engine{}).StreamTextChatCompletionWithTools(context.Background(), nil, nil, "gpt-5", nil, "required")
+	events, errCh := (&Engine{}).StreamTextChatCompletionWithTools(context.Background(), nil, "gpt-5", nil, "required")
 	var chunks []map[string]any
 	for event := range events {
 		chunks = append(chunks, event)
@@ -333,7 +659,7 @@ func TestStreamTextChatCompletionWithToolsRequiredToolErrorsBeforeUpstream(t *te
 }
 
 func TestStreamVisionChatCompletionWithToolsRequiredToolErrorsBeforeUpstream(t *testing.T) {
-	events, errCh := (&Engine{}).StreamVisionChatCompletionWithTools(context.Background(), nil, nil, "gpt-5", nil, nil, "required")
+	events, errCh := (&Engine{}).StreamVisionChatCompletionWithTools(context.Background(), nil, "gpt-5", nil, nil, "required")
 	var chunks []map[string]any
 	for event := range events {
 		chunks = append(chunks, event)
@@ -353,7 +679,7 @@ func TestStreamVisionChatCompletionWithToolsRequiredToolErrorsBeforeUpstream(t *
 func TestStreamTextChatCompletionWithToolsForcedToolErrorsBeforeUpstream(t *testing.T) {
 	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "search"}}}
 	choice := map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}
-	events, errCh := (&Engine{}).StreamTextChatCompletionWithTools(context.Background(), nil, nil, "gpt-5", tools, choice)
+	events, errCh := (&Engine{}).StreamTextChatCompletionWithTools(context.Background(), nil, "gpt-5", tools, choice)
 	var chunks []map[string]any
 	for event := range events {
 		chunks = append(chunks, event)

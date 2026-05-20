@@ -122,6 +122,7 @@ export function supportsImageOutputCompression(format: ImageOutputFormat) {
 export type AuthRole = "admin" | "user";
 export type AnnouncementTarget = "login" | "image";
 export type LogView = "all" | "meaningful" | "business";
+export type AccountScheduleMode = "load_balance" | "fill_first";
 
 export type PermissionMenu = {
   id: string;
@@ -236,6 +237,8 @@ export type SettingsConfig = {
   default_log_view?: LogView | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
+  text_account_schedule_mode?: AccountScheduleMode | string;
+  image_account_schedule_mode?: AccountScheduleMode | string;
   log_levels?: string[];
   linuxdo_enabled?: boolean;
   linuxdo_client_id?: string;

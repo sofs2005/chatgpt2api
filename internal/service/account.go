@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -33,22 +34,43 @@ import (
 type AccountConfig interface {
 	AutoRemoveInvalidAccounts() bool
 	AutoRemoveRateLimitedAccounts() bool
+	TextAccountScheduleMode() string
+	ImageAccountScheduleMode() string
+}
+
+type AccountLease struct {
+	Token   string
+	release func()
+}
+
+func (l AccountLease) Release() {
+	if l.release != nil {
+		l.release()
+	}
 }
 
 type AccountService struct {
-	mu                sync.Mutex
-	storage           storage.Backend
-	config            AccountConfig
-	proxy             *ProxyService
-	logs              *LogService
-	index             int
-	items             []map[string]any
-	imageReservations map[string]int
-	remoteBaseURL     string
-	browserHTTPClient func(profile string, timeout time.Duration) *http.Client
-	textRequestCount  map[string]int
-	textCooldownUntil time.Time
-	refresher         *SessionRefresher
+	mu                        sync.Mutex
+	storage                   storage.Backend
+	config                    AccountConfig
+	proxy                     *ProxyService
+	logs                      *LogService
+	index                     int
+	items                     []map[string]any
+	imageReservations         map[string]int
+	imageReservationAliases   map[string]string
+	imageReservationAliasRefs map[string]int
+	busyTokens                map[string]int
+	busyTokenAliases          map[string]string
+	busyTokenAliasRefs        map[string]int
+	remoteBaseURL             string
+	browserHTTPClient         func(profile string, timeout time.Duration) *http.Client
+	textRequestCount          map[string]int
+	stickyTextToken           string
+	stickyImageToken          string
+	textCooldownUntil         time.Time
+	random                    *rand.Rand
+	refresher                 *SessionRefresher
 }
 
 const (
@@ -65,14 +87,20 @@ func NewAccountService(backend storage.Backend, config AccountConfig, proxy *Pro
 		return proxy.BrowserHTTPClientWithProfile(profile, timeout)
 	}
 	s := &AccountService{
-		storage:           backend,
-		config:            config,
-		proxy:             proxy,
-		logs:              logs,
-		imageReservations: map[string]int{},
-		remoteBaseURL:     "https://chatgpt.com",
-		browserHTTPClient: browserHTTPClient,
-		textRequestCount:  map[string]int{},
+		storage:                   backend,
+		config:                    config,
+		proxy:                     proxy,
+		logs:                      logs,
+		imageReservations:         map[string]int{},
+		imageReservationAliases:   map[string]string{},
+		imageReservationAliasRefs: map[string]int{},
+		busyTokens:                map[string]int{},
+		busyTokenAliases:          map[string]string{},
+		busyTokenAliasRefs:        map[string]int{},
+		remoteBaseURL:             "https://chatgpt.com",
+		browserHTTPClient:         browserHTTPClient,
+		textRequestCount:          map[string]int{},
+		random:                    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	// 初始化 SessionRefresher，使用 uTLS 客户端调用 /api/auth/session
 	s.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
@@ -350,8 +378,10 @@ func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 		token := util.Clean(item["access_token"])
 		if _, ok := targets[token]; ok {
 			removed++
-			delete(s.imageReservations, token)
+			s.clearImageReservationLocked(token)
+			s.clearBusyTokenLocked(token)
 			delete(s.textRequestCount, token)
+			s.clearStickyLocked(token, true, true)
 			continue
 		}
 		next = append(next, item)
@@ -397,7 +427,9 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 		return nil
 	}
 	if account["status"] == "限流" && s.config.AutoRemoveRateLimitedAccounts() {
-		delete(s.imageReservations, accessToken)
+		s.clearImageReservationLocked(accessToken)
+		s.clearBusyTokenLocked(accessToken)
+		s.clearStickyLocked(accessToken, true, true)
 		s.items = append(s.items[:idx], s.items[idx+1:]...)
 		_ = s.saveLocked()
 		s.logs.Add("自动移除限流账号", map[string]any{
@@ -406,6 +438,9 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 			"token":          util.AnonymizeToken(accessToken),
 		})
 		return nil
+	}
+	if status := util.Clean(account["status"]); status == "异常" || status == "限流" || status == "禁用" || status == "刷新中" || status == "过期待刷新" {
+		s.clearStickyLocked(accessToken, true, true)
 	}
 	s.items[idx] = account
 	_ = s.saveLocked()
@@ -451,13 +486,17 @@ func (s *AccountService) UpdateAccountFromSessionImport(oldAccessToken, newAcces
 	}
 	s.items[idx] = account
 	if oldAccessToken != newAccessToken {
-		if count, ok := s.imageReservations[oldAccessToken]; ok {
-			s.imageReservations[newAccessToken] = count
-			delete(s.imageReservations, oldAccessToken)
-		}
+		s.migrateImageReservationLocked(oldAccessToken, newAccessToken)
+		s.migrateBusyTokenLocked(oldAccessToken, newAccessToken)
 		if count, ok := s.textRequestCount[oldAccessToken]; ok {
-			s.textRequestCount[newAccessToken] = count
+			s.textRequestCount[newAccessToken] += count
 			delete(s.textRequestCount, oldAccessToken)
+		}
+		if s.stickyTextToken == oldAccessToken {
+			s.stickyTextToken = newAccessToken
+		}
+		if s.stickyImageToken == oldAccessToken {
+			s.stickyImageToken = newAccessToken
 		}
 	}
 	_ = s.saveLocked()
@@ -487,56 +526,43 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 const MaxTokenSwitchAttempts = 5
 
 func (s *AccountService) GetTextAccessToken() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	nonFree := s.filterNonFreeLocked()
-	if len(nonFree) > 0 {
-		return s.selectFromTextPoolLocked(nonFree, false)
+	lease, err := s.AcquireTextAccessToken(nil)
+	if err != nil {
+		return ""
 	}
-
-	free := s.filterFreeLocked()
-	if len(free) > 0 {
-		return s.selectFromTextPoolLocked(free, true)
-	}
-
-	return ""
+	defer lease.Release()
+	return lease.Token
 }
 
 func (s *AccountService) GetTextAccessTokenWithRetry(exhaustedTokens map[string]struct{}) (string, bool) {
+	lease, err := s.AcquireTextAccessToken(exhaustedTokens)
+	if err != nil {
+		return "", false
+	}
+	defer lease.Release()
+	return lease.Token, true
+}
+
+func (s *AccountService) AcquireTextAccessToken(exhaustedTokens map[string]struct{}) (AccountLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	nonFree := s.filterNonFreeLocked()
-	free := s.filterFreeLocked()
-
-	selectFrom := func(pool []map[string]any) string {
-		var bestToken string
-		bestCount := int(^uint(0) >> 1)
-		for _, item := range pool {
-			token := util.Clean(item["access_token"])
-			if _, exhausted := exhaustedTokens[token]; exhausted {
-				continue
-			}
-			count := s.textRequestCount[token]
-			if count < bestCount {
-				bestCount = count
-				bestToken = token
-			}
+	candidates := s.textCandidatesLocked(exhaustedTokens)
+	if len(candidates) == 0 {
+		return AccountLease{}, fmt.Errorf("no available text account")
+	}
+	if normalizeAccountScheduleMode(s.config.TextAccountScheduleMode()) == "fill_first" {
+		paid := s.textCandidatesByPaidLocked(true, exhaustedTokens)
+		if len(paid) > 0 {
+			return s.selectTextLeaseLocked(paid)
 		}
-		if bestToken != "" {
-			s.textRequestCount[bestToken] = bestCount + 1
+		free := s.textCandidatesByPaidLocked(false, exhaustedTokens)
+		if len(free) > 0 {
+			return s.selectTextLeaseLocked(free)
 		}
-		return bestToken
+		return AccountLease{}, fmt.Errorf("no available text account")
 	}
-
-	if token := selectFrom(nonFree); token != "" {
-		return token, true
-	}
-	if token := selectFrom(free); token != "" {
-		return token, true
-	}
-	return "", false
+	return s.selectTextLeaseLocked(candidates)
 }
 
 func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newToken string, shouldRetry bool) {
@@ -601,76 +627,129 @@ func (s *AccountService) filterFreeLocked() []map[string]any {
 	return out
 }
 
-func (s *AccountService) selectFromTextPoolLocked(pool []map[string]any, isFree bool) string {
-	const maxRequestsPerAccount = 10
+func (s *AccountService) textCandidatesLocked(exhaustedTokens map[string]struct{}) []map[string]any {
+	var out []map[string]any
+	for _, item := range s.items {
+		token := util.Clean(item["access_token"])
+		if token == "" || !s.isTextAccountAvailableLocked(item) || !s.accountIdleLocked(token) {
+			continue
+		}
+		if _, exhausted := exhaustedTokens[token]; exhausted {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
 
-	var bestToken string
+func (s *AccountService) textCandidatesByPaidLocked(paid bool, exhaustedTokens map[string]struct{}) []map[string]any {
+	var out []map[string]any
+	for _, item := range s.items {
+		token := util.Clean(item["access_token"])
+		if token == "" || !s.isTextAccountAvailableLocked(item) || !s.accountIdleLocked(token) {
+			continue
+		}
+		if _, exhausted := exhaustedTokens[token]; exhausted {
+			continue
+		}
+		if IsPaidImageAccount(item) == paid {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func (s *AccountService) isTextAccountAvailableLocked(item map[string]any) bool {
+	status := util.Clean(item["status"])
+	return status != "禁用" && status != "异常" && status != "限流" && status != "刷新中" && status != "过期待刷新"
+}
+
+func (s *AccountService) selectTextLeaseLocked(candidates []map[string]any) (AccountLease, error) {
+	var token string
+	if normalizeAccountScheduleMode(s.config.TextAccountScheduleMode()) == "fill_first" {
+		token = s.selectStickyTextTokenLocked(candidates)
+	} else {
+		token = s.selectLeastUsedTextTokenLocked(candidates)
+	}
+	if token == "" {
+		return AccountLease{}, fmt.Errorf("no available text account")
+	}
+	s.textRequestCount[token]++
+	return s.occupyTokenLocked(token), nil
+}
+
+func (s *AccountService) selectStickyTextTokenLocked(candidates []map[string]any) string {
+	if s.tokenInAccounts(s.stickyTextToken, candidates) {
+		return s.stickyTextToken
+	}
+	token := s.selectRandomTokenLocked(candidates)
+	s.stickyTextToken = token
+	return token
+}
+
+func (s *AccountService) selectLeastUsedTextTokenLocked(candidates []map[string]any) string {
 	bestCount := int(^uint(0) >> 1)
-	allExhausted := true
-	for _, item := range pool {
+	var tokens []string
+	for _, item := range candidates {
 		token := util.Clean(item["access_token"])
 		count := s.textRequestCount[token]
 		if count < bestCount {
 			bestCount = count
-			bestToken = token
-		}
-		if count < maxRequestsPerAccount {
-			allExhausted = false
-		}
-	}
-
-	if allExhausted {
-		if isFree {
-			now := time.Now()
-			if now.After(s.textCooldownUntil) {
-				s.resetTextCountsLocked(pool)
-				s.textCooldownUntil = now.Add(5 * time.Hour)
-				bestCount = 0
-			}
-		} else if len(pool) > 1 {
-			s.resetTextCountsLocked(pool)
-			bestCount = 0
+			tokens = []string{token}
+		} else if count == bestCount {
+			tokens = append(tokens, token)
 		}
 	}
-
-	s.textRequestCount[bestToken] = bestCount + 1
-	return bestToken
-}
-
-func (s *AccountService) resetTextCountsLocked(pool []map[string]any) {
-	for _, item := range pool {
-		s.textRequestCount[util.Clean(item["access_token"])] = 0
-	}
+	return s.selectRandomTokenLockedByToken(tokens)
 }
 
 func (s *AccountService) GetAvailableAccessToken(ctx context.Context) (string, error) {
-	return s.GetAvailableAccessTokenFor(ctx, nil)
+	lease, err := s.GetAvailableImageAccessToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer lease.Release()
+	return lease.Token, nil
 }
 
 func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error) {
+	lease, err := s.GetAvailableImageAccessTokenFor(ctx, allow)
+	if err != nil {
+		return "", err
+	}
+	defer lease.Release()
+	return lease.Token, nil
+}
+
+func (s *AccountService) GetAvailableImageAccessToken(ctx context.Context) (AccountLease, error) {
+	return s.GetAvailableImageAccessTokenFor(ctx, nil)
+}
+
+func (s *AccountService) GetAvailableImageAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (AccountLease, error) {
 	attempted := map[string]struct{}{}
 	var lastRefreshErr error
 	for {
-		reservation, err := s.reserveNextCandidateToken(attempted, allow)
+		lease, reservation, err := s.acquireImageCandidateLease(attempted, allow)
 		if err != nil {
 			if lastRefreshErr != nil {
-				return "", lastRefreshErr
+				return AccountLease{}, lastRefreshErr
 			}
-			return "", err
+			return AccountLease{}, err
 		}
-		attempted[reservation.token] = struct{}{}
-		account, refreshErr := s.RefreshAccountState(ctx, reservation.token)
+		attempted[lease.Token] = struct{}{}
+		account, refreshErr := s.RefreshAccountState(ctx, lease.Token)
 		if refreshErr != nil {
 			lastRefreshErr = refreshErr
-			if cached := s.cachedAccountForTransientRefreshError(reservation.token, refreshErr); cached != nil &&
+			if cached := s.cachedAccountForTransientRefreshError(lease.Token, refreshErr); cached != nil &&
 				(allow == nil || allow(cached)) &&
 				s.reservedImageSlotAvailable(reservation) {
-				return reservation.token, nil
+				return lease, nil
 			}
 		}
 		if account != nil && (allow == nil || allow(account)) && s.reservedImageSlotAvailable(reservation) {
-			return reservation.token, nil
+			return lease, nil
 		}
+		lease.Release()
 		s.releaseImageReservation(reservation.token)
 	}
 }
@@ -924,8 +1003,9 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	resolvedToken := s.resolveImageReservationTokenLocked(accessToken)
 	s.releaseImageReservationLocked(accessToken)
-	idx := s.findIndexLocked(accessToken)
+	idx := s.findIndexLocked(resolvedToken)
 	if idx < 0 {
 		return nil
 	}
@@ -951,19 +1031,25 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 		}
 	} else {
 		next["fail"] = util.ToInt(next["fail"], 0) + 1
+		s.clearStickyLocked(resolvedToken, false, true)
+	}
+	if util.Clean(next["status"]) == "限流" || util.ToInt(next["quota"], 0) <= 0 && !util.ToBool(next["image_quota_unknown"]) {
+		s.clearStickyLocked(resolvedToken, false, true)
 	}
 	account := normalizeAccount(next)
 	if account == nil {
 		return nil
 	}
 	if account["status"] == "限流" && s.config.AutoRemoveRateLimitedAccounts() {
-		delete(s.imageReservations, accessToken)
+		s.clearImageReservationLocked(resolvedToken)
+		s.clearBusyTokenLocked(resolvedToken)
+		s.clearStickyLocked(resolvedToken, true, true)
 		s.items = append(s.items[:idx], s.items[idx+1:]...)
 		_ = s.saveLocked()
 		s.logs.Add("自动移除限流账号", map[string]any{
 			"module":         "accounts",
 			"operation_type": "自动移除",
-			"token":          util.AnonymizeToken(accessToken),
+			"token":          util.AnonymizeToken(resolvedToken),
 		})
 		return nil
 	}
@@ -1070,13 +1156,17 @@ func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, n
 	}
 	s.items[idx] = account
 	if accessToken != newAccessToken {
-		if count, ok := s.imageReservations[accessToken]; ok {
-			s.imageReservations[newAccessToken] = count
-			delete(s.imageReservations, accessToken)
-		}
+		s.migrateImageReservationLocked(accessToken, newAccessToken)
+		s.migrateBusyTokenLocked(accessToken, newAccessToken)
 		if count, ok := s.textRequestCount[accessToken]; ok {
-			s.textRequestCount[newAccessToken] = count
+			s.textRequestCount[newAccessToken] += count
 			delete(s.textRequestCount, accessToken)
+		}
+		if s.stickyTextToken == accessToken {
+			s.stickyTextToken = newAccessToken
+		}
+		if s.stickyImageToken == accessToken {
+			s.stickyImageToken = newAccessToken
 		}
 	}
 	_ = s.saveLocked()
@@ -1222,12 +1312,41 @@ type imageTokenReservation struct {
 }
 
 func (s *AccountService) reserveNextCandidateToken(excluded map[string]struct{}, allow func(map[string]any) bool) (imageTokenReservation, error) {
+	lease, reservation, err := s.acquireImageCandidateLease(excluded, allow)
+	if err != nil {
+		return imageTokenReservation{}, err
+	}
+	lease.Release()
+	return reservation, nil
+}
+
+func (s *AccountService) acquireImageCandidateLease(excluded map[string]struct{}, allow func(map[string]any) bool) (AccountLease, imageTokenReservation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var tokens []string
+	candidates := s.imageCandidatesLocked(excluded, allow)
+	if len(candidates) == 0 {
+		return AccountLease{}, imageTokenReservation{}, fmt.Errorf("no available image quota")
+	}
+	var token string
+	if normalizeAccountScheduleMode(s.config.ImageAccountScheduleMode()) == "fill_first" {
+		token = s.selectStickyImageTokenLocked(candidates)
+	} else {
+		token = s.selectWeightedImageTokenLocked(candidates)
+	}
+	if token == "" {
+		return AccountLease{}, imageTokenReservation{}, fmt.Errorf("no available image quota")
+	}
+	s.ensureImageReservationsLocked()
+	s.imageReservations[token]++
+	lease := s.occupyTokenLocked(token)
+	return lease, imageTokenReservation{token: token, slot: s.imageReservations[token]}, nil
+}
+
+func (s *AccountService) imageCandidatesLocked(excluded map[string]struct{}, allow func(map[string]any) bool) []map[string]any {
+	var out []map[string]any
 	for _, item := range s.items {
 		token := util.Clean(item["access_token"])
-		if token == "" {
+		if token == "" || !s.accountIdleLocked(token) {
 			continue
 		}
 		if _, ok := excluded[token]; ok {
@@ -1237,17 +1356,212 @@ func (s *AccountService) reserveNextCandidateToken(excluded map[string]struct{},
 			continue
 		}
 		if s.availableImageSlotsLocked(item) > 0 {
-			tokens = append(tokens, token)
+			out = append(out, item)
 		}
 	}
-	if len(tokens) == 0 {
-		return imageTokenReservation{}, fmt.Errorf("no available image quota")
+	return out
+}
+
+func (s *AccountService) selectStickyImageTokenLocked(candidates []map[string]any) string {
+	if s.tokenInAccounts(s.stickyImageToken, candidates) {
+		return s.stickyImageToken
 	}
-	token := tokens[s.index%len(tokens)]
-	s.index++
-	s.ensureImageReservationsLocked()
-	s.imageReservations[token]++
-	return imageTokenReservation{token: token, slot: s.imageReservations[token]}, nil
+	token := s.selectRandomTokenLocked(candidates)
+	s.stickyImageToken = token
+	return token
+}
+
+func (s *AccountService) selectWeightedImageTokenLocked(candidates []map[string]any) string {
+	total := 0
+	for _, item := range candidates {
+		total += s.imageAccountWeightLocked(item)
+	}
+	if total <= 0 {
+		return ""
+	}
+	pick := s.randIntnLocked(total)
+	for _, item := range candidates {
+		weight := s.imageAccountWeightLocked(item)
+		if pick < weight {
+			return util.Clean(item["access_token"])
+		}
+		pick -= weight
+	}
+	return util.Clean(candidates[len(candidates)-1]["access_token"])
+}
+
+func (s *AccountService) imageAccountWeightLocked(account map[string]any) int {
+	if util.ToBool(account["image_quota_unknown"]) {
+		if s.availableImageSlotsLocked(account) > 0 {
+			return 1
+		}
+		return 0
+	}
+	available := s.availableImageSlotsLocked(account)
+	if available < 0 {
+		return 0
+	}
+	return available
+}
+
+func imageAccountWeight(account map[string]any) int {
+	if util.ToBool(account["image_quota_unknown"]) {
+		return 1
+	}
+	quota := util.ToInt(account["quota"], 0)
+	if quota < 0 {
+		return 0
+	}
+	return quota
+}
+
+func (s *AccountService) selectRandomTokenLocked(candidates []map[string]any) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	return util.Clean(candidates[s.randIntnLocked(len(candidates))]["access_token"])
+}
+
+func (s *AccountService) selectRandomTokenLockedByToken(tokens []string) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	return tokens[s.randIntnLocked(len(tokens))]
+}
+
+func (s *AccountService) randIntnLocked(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	if s.random == nil {
+		s.random = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+	return s.random.Intn(n)
+}
+
+func (s *AccountService) tokenInAccounts(token string, candidates []map[string]any) bool {
+	token = util.Clean(token)
+	if token == "" {
+		return false
+	}
+	for _, item := range candidates {
+		if util.Clean(item["access_token"]) == token {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *AccountService) accountIdleLocked(token string) bool {
+	return s.busyTokens[token] <= 0
+}
+
+func (s *AccountService) occupyTokenLocked(token string) AccountLease {
+	if s.busyTokens == nil {
+		s.busyTokens = map[string]int{}
+	}
+	s.busyTokens[token]++
+	var once sync.Once
+	return AccountLease{Token: token, release: func() {
+		once.Do(func() {
+			s.releaseBusyToken(token)
+		})
+	}}
+}
+
+func (s *AccountService) releaseBusyToken(token string) {
+	original := util.Clean(token)
+	if original == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	token = original
+	if alias := s.busyTokenAliases[original]; alias != "" {
+		token = alias
+	}
+	count := s.busyTokens[token]
+	if count <= 1 {
+		delete(s.busyTokens, token)
+	} else {
+		s.busyTokens[token] = count - 1
+	}
+	if refs := s.busyTokenAliasRefs[original]; refs > 0 {
+		if refs <= 1 {
+			delete(s.busyTokenAliases, original)
+			delete(s.busyTokenAliasRefs, original)
+		} else {
+			s.busyTokenAliasRefs[original] = refs - 1
+		}
+	}
+}
+
+func (s *AccountService) migrateBusyTokenLocked(oldToken, newToken string) {
+	oldToken = util.Clean(oldToken)
+	newToken = util.Clean(newToken)
+	if oldToken == "" || newToken == "" || oldToken == newToken {
+		return
+	}
+	if s.busyTokens == nil {
+		s.busyTokens = map[string]int{}
+	}
+	if s.busyTokenAliases == nil {
+		s.busyTokenAliases = map[string]string{}
+	}
+	if s.busyTokenAliasRefs == nil {
+		s.busyTokenAliasRefs = map[string]int{}
+	}
+
+	count := s.busyTokens[oldToken]
+	inboundRefs := 0
+	for alias, target := range s.busyTokenAliases {
+		if target == oldToken {
+			s.busyTokenAliases[alias] = newToken
+			inboundRefs += s.busyTokenAliasRefs[alias]
+		}
+	}
+	if count <= 0 {
+		return
+	}
+	s.busyTokens[newToken] += count
+	delete(s.busyTokens, oldToken)
+	if directRefs := count - inboundRefs; directRefs > 0 {
+		s.busyTokenAliases[oldToken] = newToken
+		s.busyTokenAliasRefs[oldToken] += directRefs
+	}
+}
+
+func (s *AccountService) clearBusyTokenLocked(token string) {
+	token = util.Clean(token)
+	if token == "" {
+		return
+	}
+	delete(s.busyTokens, token)
+	delete(s.busyTokenAliases, token)
+	delete(s.busyTokenAliasRefs, token)
+	for alias, target := range s.busyTokenAliases {
+		if target == token {
+			delete(s.busyTokenAliases, alias)
+			delete(s.busyTokenAliasRefs, alias)
+		}
+	}
+}
+
+func (s *AccountService) clearStickyLocked(token string, text bool, image bool) {
+	if text && s.stickyTextToken == token {
+		s.stickyTextToken = ""
+	}
+	if image && s.stickyImageToken == token {
+		s.stickyImageToken = ""
+	}
+}
+
+func normalizeAccountScheduleMode(mode string) string {
+	if strings.TrimSpace(mode) == "fill_first" {
+		return "fill_first"
+	}
+	return "load_balance"
 }
 
 func (s *AccountService) reservedImageSlotAvailable(reservation imageTokenReservation) bool {
@@ -1287,18 +1601,105 @@ func (s *AccountService) releaseImageReservation(accessToken string) {
 }
 
 func (s *AccountService) releaseImageReservationLocked(accessToken string) {
-	s.ensureImageReservationsLocked()
-	count := s.imageReservations[accessToken]
-	if count <= 1 {
-		delete(s.imageReservations, accessToken)
+	original := util.Clean(accessToken)
+	if original == "" {
 		return
 	}
-	s.imageReservations[accessToken] = count - 1
+	s.ensureImageReservationsLocked()
+
+	token := original
+	if alias := s.imageReservationAliases[original]; alias != "" {
+		token = alias
+	}
+	count := s.imageReservations[token]
+	if count <= 1 {
+		delete(s.imageReservations, token)
+	} else {
+		s.imageReservations[token] = count - 1
+	}
+	if refs := s.imageReservationAliasRefs[original]; refs > 0 {
+		if refs <= 1 {
+			delete(s.imageReservationAliases, original)
+			delete(s.imageReservationAliasRefs, original)
+		} else {
+			s.imageReservationAliasRefs[original] = refs - 1
+		}
+	}
+}
+
+func (s *AccountService) resolveImageReservationTokenLocked(accessToken string) string {
+	current := util.Clean(accessToken)
+	if current == "" {
+		return ""
+	}
+	s.ensureImageReservationsLocked()
+	seen := map[string]struct{}{}
+	for {
+		alias := s.imageReservationAliases[current]
+		if alias == "" || alias == current {
+			return current
+		}
+		if _, ok := seen[current]; ok {
+			return current
+		}
+		seen[current] = struct{}{}
+		current = alias
+	}
+}
+
+func (s *AccountService) migrateImageReservationLocked(oldToken, newToken string) {
+	oldToken = util.Clean(oldToken)
+	newToken = util.Clean(newToken)
+	if oldToken == "" || newToken == "" || oldToken == newToken {
+		return
+	}
+	s.ensureImageReservationsLocked()
+
+	count := s.imageReservations[oldToken]
+	inboundRefs := 0
+	for alias, target := range s.imageReservationAliases {
+		if target == oldToken {
+			s.imageReservationAliases[alias] = newToken
+			inboundRefs += s.imageReservationAliasRefs[alias]
+		}
+	}
+	if count <= 0 {
+		return
+	}
+	s.imageReservations[newToken] += count
+	delete(s.imageReservations, oldToken)
+	if directRefs := count - inboundRefs; directRefs > 0 {
+		s.imageReservationAliases[oldToken] = newToken
+		s.imageReservationAliasRefs[oldToken] += directRefs
+	}
+}
+
+func (s *AccountService) clearImageReservationLocked(token string) {
+	token = util.Clean(token)
+	if token == "" {
+		return
+	}
+	s.ensureImageReservationsLocked()
+	delete(s.imageReservations, token)
+	delete(s.imageReservationAliases, token)
+	delete(s.imageReservationAliasRefs, token)
+	for alias, target := range s.imageReservationAliases {
+		if target == token {
+			delete(s.imageReservationAliases, alias)
+			delete(s.imageReservationAliasRefs, alias)
+		}
+	}
 }
 
 func (s *AccountService) ensureImageReservationsLocked() {
 	if s.imageReservations == nil {
 		s.imageReservations = map[string]int{}
+	}
+	if s.imageReservationAliases == nil {
+		s.imageReservationAliases = map[string]string{}
+	}
+	if s.imageReservationAliasRefs == nil {
+		s.imageReservationAliasRefs = map[string]int{}
 	}
 }
 

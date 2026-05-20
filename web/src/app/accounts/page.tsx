@@ -74,6 +74,8 @@ const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = 
   { label: "正常", value: "正常" },
   { label: "限流", value: "限流" },
   { label: "异常", value: "异常" },
+  { label: "刷新中", value: "刷新中" },
+  { label: "过期待刷新", value: "过期待刷新" },
   { label: "禁用", value: "禁用" },
 ];
 
@@ -87,6 +89,8 @@ const statusMeta: Record<
   正常: { icon: CheckCircle2, badge: "success" },
   限流: { icon: CircleAlert, badge: "warning" },
   异常: { icon: CircleOff, badge: "danger" },
+  刷新中: { icon: LoaderCircle, badge: "warning" },
+  过期待刷新: { icon: CircleAlert, badge: "warning" },
   禁用: { icon: Ban, badge: "secondary" },
 };
 
@@ -265,7 +269,9 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const [isExporting, setIsExporting] = useState(false);
   const [refreshingAccountIds, setRefreshingAccountIds] = useState<string[]>([]);
 
-  const canImportAccounts = hasAPIPermission(session, "POST", "/api/accounts");
+  const canImportTokenAccounts = hasAPIPermission(session, "POST", "/api/accounts");
+  const canImportSessionAccounts = hasAPIPermission(session, "POST", "/api/accounts/session");
+  const canImportAccounts = canImportTokenAccounts || canImportSessionAccounts;
   const canRefreshAccounts = hasAPIPermission(session, "POST", "/api/accounts/refresh");
   const canUpdateAccount = hasAPIPermission(session, "POST", "/api/accounts/update");
   const canDeleteAccounts = hasAPIPermission(session, "DELETE", "/api/accounts");
@@ -617,6 +623,8 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             {canImportAccounts ? (
               <AccountImportDialog
                 disabled={isLoading || isRefreshing || isDeleting}
+                canImportTokens={canImportTokenAccounts}
+                canImportSession={canImportSessionAccounts}
                 onImported={(items) => {
                   applyAccountItems(items);
                   setSelectedIds([]);

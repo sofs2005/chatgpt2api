@@ -22,6 +22,8 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { LogView } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 import { useSettingsStore } from "../store";
@@ -33,6 +35,11 @@ import {
 } from "./settings-ui";
 
 const LOG_LEVEL_OPTIONS = ["debug", "info", "warning", "error"];
+const LOG_VIEW_OPTIONS: Array<{ value: LogView; label: string; description: string }> = [
+  { value: "meaningful", label: "有意义日志", description: "默认隐藏成功的查询类 HTTP 审计日志。" },
+  { value: "business", label: "仅业务日志", description: "只显示业务事件，隐藏 HTTP 审计日志。" },
+  { value: "all", label: "全部日志", description: "显示所有业务和 HTTP 审计日志。" },
+];
 
 function formatLogTime(value?: string) {
   return value && value.trim() ? value : "暂无数据";
@@ -113,6 +120,7 @@ export function LogGovernanceCard() {
   const setLogRetentionDays = useSettingsStore(
     (state) => state.setLogRetentionDays,
   );
+  const setDefaultLogView = useSettingsStore((state) => state.setDefaultLogView);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
   const loadLogGovernance = useSettingsStore((state) => state.loadLogGovernance);
@@ -121,6 +129,7 @@ export function LogGovernanceCard() {
   );
 
   const retentionDays = Math.max(1, Number(config?.log_retention_days) || 7);
+  const defaultLogView = (config?.default_log_view || "meaningful") as LogView;
   const total = logGovernance?.total ?? 0;
 
   const handleCleanup = async () => {
@@ -186,18 +195,40 @@ export function LogGovernanceCard() {
               刷新统计
             </Button>
           </div>
-          <Field className="gap-1.5">
-            <FieldLabel htmlFor="settings-log-retention-days">
-              日志保留天数
-            </FieldLabel>
-            <LogRetentionInput
-              value={config?.log_retention_days || ""}
-              onChange={setLogRetentionDays}
-            />
-            <FieldDescription>
-              按保留策略清理时会保留最近 N 天日志，删除更早的历史日志。
-            </FieldDescription>
-          </Field>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <Field className="gap-1.5">
+              <FieldLabel htmlFor="settings-log-retention-days">
+                日志保留天数
+              </FieldLabel>
+              <LogRetentionInput
+                value={config?.log_retention_days || ""}
+                onChange={setLogRetentionDays}
+              />
+              <FieldDescription>
+                按保留策略清理时会保留最近 N 天日志，删除更早的历史日志。
+              </FieldDescription>
+            </Field>
+            <Field className="gap-1.5">
+              <FieldLabel htmlFor="settings-default-log-view">
+                默认日志视图
+              </FieldLabel>
+              <Select value={defaultLogView} onValueChange={(value) => setDefaultLogView(value as LogView)}>
+                <SelectTrigger id="settings-default-log-view" className={settingsInputClassName}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {LOG_VIEW_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                {LOG_VIEW_OPTIONS.find((option) => option.value === defaultLogView)?.description}
+              </FieldDescription>
+            </Field>
+          </div>
         </section>
 
         <section className="flex flex-col gap-3">

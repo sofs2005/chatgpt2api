@@ -246,8 +246,8 @@ function RBACContent() {
       />
 
       <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
-        <Card className="overflow-hidden">
-          <CardContent className="p-0">
+        <Card className="overflow-hidden xl:max-h-[calc(100dvh-11rem)]">
+          <CardContent className="flex min-h-0 flex-col p-0">
             <div className="border-b border-border px-5 py-4">
               <div className="mb-3 flex items-center justify-between text-sm text-muted-foreground">
                 <span>角色 {filteredRoles.length} / {roles.length}</span>
@@ -366,7 +366,7 @@ function RBACContent() {
                 />
               </div>
             </div>
-            <div className="p-5">
+            <div className="min-h-0 overflow-y-auto overscroll-contain p-5 [scrollbar-color:rgba(142,142,147,.45)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] xl:max-h-[calc(100dvh-20rem)] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#8e8e93]/45 [&::-webkit-scrollbar-track]:bg-transparent">
               {isLoading ? (
                 <div className="flex min-h-[420px] items-center justify-center">
                   <LoaderCircle className="size-5 animate-spin text-stone-400" />

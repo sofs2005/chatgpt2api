@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +15,6 @@ import (
 
 type CPAConfig struct {
 	mu      sync.Mutex
-	path    string
 	store   storage.JSONDocumentBackend
 	pools   []map[string]any
 	docName string
@@ -28,8 +26,8 @@ type CPAImportService struct {
 	proxy    *ProxyService
 }
 
-func NewCPAConfig(dataDir string, backend ...storage.Backend) *CPAConfig {
-	c := &CPAConfig{path: filepath.Join(dataDir, "cpa_config.json"), store: firstJSONDocumentStore(backend), docName: "cpa_config.json"}
+func NewCPAConfig(backend ...storage.Backend) *CPAConfig {
+	c := &CPAConfig{store: firstJSONDocumentStore(backend), docName: "cpa_config.json"}
 	c.pools = c.load()
 	return c
 }
@@ -128,7 +126,7 @@ func (c *CPAConfig) GetImportJob(id string) map[string]any {
 }
 
 func (c *CPAConfig) load() []map[string]any {
-	raw := loadStoredJSON(c.store, c.docName, c.path)
+	raw := loadStoredJSON(c.store, c.docName)
 	if obj, ok := raw.(map[string]any); ok && obj["base_url"] != nil {
 		pool := normalizeCPAPool(obj)
 		if util.Clean(pool["base_url"]) != "" {
@@ -146,7 +144,7 @@ func (c *CPAConfig) load() []map[string]any {
 }
 
 func (c *CPAConfig) saveLocked() error {
-	return saveStoredJSON(c.store, c.docName, c.path, c.pools)
+	return saveStoredJSON(c.store, c.docName, c.pools)
 }
 
 func (s *CPAImportService) ListRemoteFiles(ctx context.Context, pool map[string]any) ([]map[string]any, error) {

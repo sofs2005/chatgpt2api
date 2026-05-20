@@ -2,7 +2,6 @@ package service
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"sync"
 
@@ -13,13 +12,12 @@ import (
 const promptFavoritesDocumentDir = "prompt_favorites"
 
 type PromptFavoriteService struct {
-	mu      sync.Mutex
-	dataDir string
-	store   storage.JSONDocumentBackend
+	mu    sync.Mutex
+	store storage.JSONDocumentBackend
 }
 
-func NewPromptFavoriteService(dataDir string, backend ...storage.Backend) *PromptFavoriteService {
-	return &PromptFavoriteService{dataDir: dataDir, store: firstJSONDocumentStore(backend)}
+func NewPromptFavoriteService(backend ...storage.Backend) *PromptFavoriteService {
+	return &PromptFavoriteService{store: firstJSONDocumentStore(backend)}
 }
 
 func (s *PromptFavoriteService) List(ownerID string) []map[string]any {
@@ -99,8 +97,7 @@ func (s *PromptFavoriteService) Delete(ownerID, id string) bool {
 
 func (s *PromptFavoriteService) loadLocked(ownerID string) []map[string]any {
 	name := promptFavoriteDocumentName(ownerID)
-	path := filepath.Join(s.dataDir, promptFavoritesDocumentDir, util.SHA256Hex(ownerID)+".json")
-	raw := loadStoredJSON(s.store, name, path)
+	raw := loadStoredJSON(s.store, name)
 	items := make([]map[string]any, 0)
 	for _, item := range util.AsMapSlice(util.StringMap(raw)["items"]) {
 		if normalized := normalizeStoredPromptFavorite(item); normalized != nil {
@@ -113,8 +110,7 @@ func (s *PromptFavoriteService) loadLocked(ownerID string) []map[string]any {
 
 func (s *PromptFavoriteService) saveLocked(ownerID string, items []map[string]any) error {
 	name := promptFavoriteDocumentName(ownerID)
-	path := filepath.Join(s.dataDir, promptFavoritesDocumentDir, util.SHA256Hex(ownerID)+".json")
-	return saveStoredJSON(s.store, name, path, map[string]any{"items": items})
+	return saveStoredJSON(s.store, name, map[string]any{"items": items})
 }
 
 func promptFavoriteDocumentName(ownerID string) string {

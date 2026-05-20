@@ -3,16 +3,15 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"chatgpt2api/internal/storage"
 )
 
 type testAccountConfig struct{}
@@ -249,6 +248,226 @@ func TestRefreshAccountStateMarksUnauthorizedInitAsInvalid(t *testing.T) {
 	}
 }
 
+func TestAddAccountFromSessionUpdatesExistingUserWhenAccessTokenRotates(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access-token","sessionToken":"new-session-token","expires":"2026-05-12T00:00:00Z","user":{"id":"user-123","email":"user@example.com","name":"New Name"}}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"old-access-token"})
+	accounts.UpdateAccount("old-access-token", map[string]any{
+		"user_id": "user-123",
+		"email":   "user@example.com",
+		"name":    "Old Name",
+		"type":    "Plus",
+		"quota":   7,
+		"status":  "禁用",
+	})
+
+	result, err := accounts.AddAccountFromSession(`{
+		"accessToken":"new-access-token",
+		"sessionToken":"new-session-token",
+		"expires":"2026-05-12T00:00:00Z",
+		"user":{"id":"user-123","email":"user@example.com","name":"New Name"}
+	}`)
+	if err != nil {
+		t.Fatalf("AddAccountFromSession() error = %v", err)
+	}
+	if result["added"] != 0 || result["updated"] != 1 {
+		t.Fatalf("AddAccountFromSession() result = %#v, want updated existing account", result)
+	}
+	if old := accounts.GetAccount("old-access-token"); old != nil {
+		t.Fatalf("old token account still exists: %#v", old)
+	}
+	updated := accounts.GetAccount("new-access-token")
+	if updated == nil {
+		t.Fatalf("new token account missing")
+	}
+	if len(accounts.items) != 1 {
+		t.Fatalf("account count = %d, want 1: %#v", len(accounts.items), accounts.items)
+	}
+	if updated["session_token"] != "new-session-token" || updated["session_expires"] != "2026-05-12T00:00:00Z" {
+		t.Fatalf("session fields not updated: %#v", updated)
+	}
+	if updated["type"] != "Plus" || updated["quota"] != 7 || updated["status"] != "禁用" {
+		t.Fatalf("existing account metadata not preserved: %#v", updated)
+	}
+	if updated["name"] != "New Name" || updated["email"] != "user@example.com" || updated["user_id"] != "user-123" {
+		t.Fatalf("session identity fields not updated: %#v", updated)
+	}
+}
+
+func TestAddAccountFromSessionUsesValidatedIdentityForMatching(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"validated-access-token","sessionToken":"validated-session-token","expires":"2026-05-13T00:00:00Z","user":{"id":"validated-user","email":"validated@example.com","name":"Validated Name"}}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"old-access-token"})
+	accounts.UpdateAccount("old-access-token", map[string]any{
+		"user_id": "validated-user",
+		"email":   "validated@example.com",
+		"type":    "Plus",
+		"status":  "异常",
+	})
+
+	result, err := accounts.AddAccountFromSession(`{
+		"accessToken":"submitted-access-token",
+		"sessionToken":"submitted-session-token",
+		"expires":"2026-05-12T00:00:00Z",
+		"user":{"id":"attacker-user","email":"attacker@example.com","name":"Attacker Name"}
+	}`)
+	if err != nil {
+		t.Fatalf("AddAccountFromSession() error = %v", err)
+	}
+	if result["updated"] != 1 || result["added"] != 0 {
+		t.Fatalf("AddAccountFromSession() result = %#v, want validated identity update", result)
+	}
+	if len(accounts.items) != 1 {
+		t.Fatalf("account count = %d, want 1: %#v", len(accounts.items), accounts.items)
+	}
+	updated := accounts.GetAccount("validated-access-token")
+	if updated == nil {
+		t.Fatalf("validated token account missing")
+	}
+	if updated["user_id"] != "validated-user" || updated["email"] != "validated@example.com" || updated["name"] != "Validated Name" {
+		t.Fatalf("submitted identity was used instead of validated identity: %#v", updated)
+	}
+	if updated["status"] != "正常" || updated["type"] != "Plus" {
+		t.Fatalf("validated account metadata not preserved: %#v", updated)
+	}
+}
+
+func TestAddAccountFromSessionValidatesSessionBeforeRecoveringAbnormalAccount(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"refreshed-access-token","sessionToken":"refreshed-session-token","expires":"2026-05-13T00:00:00Z","user":{"id":"user-123","email":"user@example.com","name":"Recovered Name"}}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"old-access-token"})
+	accounts.UpdateAccount("old-access-token", map[string]any{
+		"user_id": "user-123",
+		"email":   "user@example.com",
+		"type":    "Plus",
+		"quota":   0,
+		"status":  "异常",
+	})
+
+	result, err := accounts.AddAccountFromSession(`{
+		"accessToken":"submitted-access-token",
+		"sessionToken":"submitted-session-token",
+		"expires":"2026-05-12T00:00:00Z",
+		"user":{"id":"user-123","email":"user@example.com","name":"Recovered Name"}
+	}`)
+	if err != nil {
+		t.Fatalf("AddAccountFromSession() error = %v", err)
+	}
+	if result["updated"] != 1 {
+		t.Fatalf("AddAccountFromSession() result = %#v, want updated existing account", result)
+	}
+	if old := accounts.GetAccount("old-access-token"); old != nil {
+		t.Fatalf("old token account still exists: %#v", old)
+	}
+	updated := accounts.GetAccount("refreshed-access-token")
+	if updated == nil {
+		t.Fatalf("refreshed token account missing")
+	}
+	if len(accounts.items) != 1 {
+		t.Fatalf("account count = %d, want 1: %#v", len(accounts.items), accounts.items)
+	}
+	if updated["session_token"] != "refreshed-session-token" || updated["session_expires"] != "2026-05-13T00:00:00Z" {
+		t.Fatalf("validated session fields not stored: %#v", updated)
+	}
+	if updated["status"] != "正常" || updated["type"] != "Plus" {
+		t.Fatalf("abnormal account not recovered with metadata preserved: %#v", updated)
+	}
+}
+
+func TestAddAccountFromSessionRecoversAbnormalAccountWhenAccessTokenMatches(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"same-access-token","sessionToken":"fresh-session-token","expires":"2026-05-13T00:00:00Z","user":{"id":"user-123","email":"user@example.com","name":"Recovered Name"}}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"same-access-token"})
+	accounts.UpdateAccount("same-access-token", map[string]any{
+		"user_id": "user-123",
+		"email":   "user@example.com",
+		"type":    "Plus",
+		"status":  "异常",
+	})
+
+	result, err := accounts.AddAccountFromSession(`{
+		"accessToken":"same-access-token",
+		"sessionToken":"submitted-session-token",
+		"expires":"2026-05-12T00:00:00Z",
+		"user":{"id":"user-123","email":"user@example.com","name":"Recovered Name"}
+	}`)
+	if err != nil {
+		t.Fatalf("AddAccountFromSession() error = %v", err)
+	}
+	if result["updated"] != 1 {
+		t.Fatalf("AddAccountFromSession() result = %#v, want updated existing account", result)
+	}
+	updated := accounts.GetAccount("same-access-token")
+	if updated == nil {
+		t.Fatalf("same token account missing")
+	}
+	if updated["status"] != "正常" || updated["session_token"] != "fresh-session-token" || updated["session_expires"] != "2026-05-13T00:00:00Z" {
+		t.Fatalf("account not recovered with validated session fields: %#v", updated)
+	}
+}
+
+func TestAddAccountFromSessionRejectsInvalidSessionWithoutMutatingExistingAccount(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(strings.NewReader(`{"detail":"invalid session"}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"old-access-token"})
+	accounts.UpdateAccount("old-access-token", map[string]any{
+		"user_id":       "user-123",
+		"email":         "user@example.com",
+		"type":          "Plus",
+		"quota":         3,
+		"status":        "异常",
+		"session_token": "old-session-token",
+	})
+
+	_, err := accounts.AddAccountFromSession(`{
+		"accessToken":"submitted-access-token",
+		"sessionToken":"bad-session-token",
+		"expires":"2026-05-12T00:00:00Z",
+		"user":{"id":"user-123","email":"user@example.com","name":"Bad Session"}
+	}`)
+	if err == nil || !strings.Contains(err.Error(), "session token validation failed") {
+		t.Fatalf("AddAccountFromSession() error = %v, want validation failure", err)
+	}
+	if len(accounts.items) != 1 {
+		t.Fatalf("account count = %d, want unchanged single account: %#v", len(accounts.items), accounts.items)
+	}
+	if created := accounts.GetAccount("submitted-access-token"); created != nil {
+		t.Fatalf("invalid session created new account: %#v", created)
+	}
+	unchanged := accounts.GetAccount("old-access-token")
+	if unchanged == nil {
+		t.Fatalf("old account missing after invalid session import")
+	}
+	if unchanged["status"] != "异常" || unchanged["session_token"] != "old-session-token" || unchanged["quota"] != 3 {
+		t.Fatalf("old account mutated after invalid session import: %#v", unchanged)
+	}
+}
+
 func TestApplyAccountErrorMessageDoesNotMarkGenericUnauthorizedAsInvalid(t *testing.T) {
 	accounts := newTestAccountService(t)
 	accounts.AddAccounts([]string{"token-1"})
@@ -478,6 +697,27 @@ func TestGetAvailableAccessTokenReportsRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestGetAvailableAccessTokenUsesCachedAccountOnConnectionRefreshFailure(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New(`Get "https://chatgpt.com/": surf: HTTP/2 request failed: uTLS.HandshakeContext() error: EOF; HTTP/1.1 fallback failed: uTLS.HandshakeContext() error: EOF`)
+			}),
+		}
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 1, "type": "Plus"})
+
+	token, err := accounts.GetAvailableAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetAvailableAccessToken() error = %v", err)
+	}
+	if token != "token-1" {
+		t.Fatalf("token = %q, want cached token-1", token)
+	}
+}
+
 func TestReserveNextCandidateTokenCanFilterPaidAccounts(t *testing.T) {
 	accounts := newTestAccountService(t)
 	accounts.AddAccounts([]string{"free-token", "plus-token"})
@@ -537,6 +777,61 @@ func TestApplyAccountErrorMessageIgnoresBootstrapFailures(t *testing.T) {
 	}
 }
 
+func TestStartLimitedWatcherSkipsAccountBeforeRestoreTime(t *testing.T) {
+	var mu sync.Mutex
+	meCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/backend-api/me" {
+			mu.Lock()
+			meCalls++
+			mu.Unlock()
+		}
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			writeJSON(t, w, map[string]any{
+				"default_model_slug": "gpt-5",
+				"limits_progress": []map[string]any{{
+					"feature_name": "image_gen",
+					"remaining":    0,
+					"reset_after":  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{
+		"status":     "限流",
+		"quota":      0,
+		"restore_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	accounts.StartLimitedWatcher(ctx, 20*time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
+
+	mu.Lock()
+	got := meCalls
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("limited watcher refreshed account before restore time: /backend-api/me calls = %d, want 0", got)
+	}
+}
+
 func TestSummarizeRefreshErrorBodyPrefersJSONMessage(t *testing.T) {
 	got := summarizeRefreshErrorBody([]byte(`{"error":{"message":"You've reached the image generation limit"}}`))
 	if got != "body=You've reached the image generation limit" {
@@ -546,12 +841,12 @@ func TestSummarizeRefreshErrorBodyPrefersJSONMessage(t *testing.T) {
 
 func newTestAccountService(t *testing.T) *AccountService {
 	t.Helper()
-	dir := t.TempDir()
+	backend := newTestStorageBackend(t)
 	return NewAccountService(
-		storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json")),
+		backend,
 		testAccountConfig{},
 		NewProxyService(testAccountConfig{}),
-		NewLogService(dir),
+		NewLogService(backend),
 	)
 }
 

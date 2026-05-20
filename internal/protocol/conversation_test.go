@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +20,16 @@ import (
 	"time"
 
 	"chatgpt2api/internal/backend"
+	"chatgpt2api/internal/service"
 )
 
 type testProtocolImageConfig struct {
 	root string
 }
+
+type testProtocolProxyConfig struct{}
+
+func (testProtocolProxyConfig) Proxy() string { return "" }
 
 func (c testProtocolImageConfig) ImagesDir() string {
 	path := filepath.Join(c.root, "images")
@@ -39,8 +47,221 @@ func (c testProtocolImageConfig) BaseURL() string {
 	return "https://example.test"
 }
 
-func (c testProtocolImageConfig) CleanupOldImages() int {
-	return 0
+func testPNGDataURL(t *testing.T, width, height int) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+func TestCountMessageTokensCountsTextContentParts(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "text", "text": "again"},
+		},
+	}}
+
+	got := CountMessageTokens(messages, "gpt-5")
+	want := 3 + 3 + CountTextTokens("user", "gpt-5") + CountTextTokens("look", "gpt-5") + CountTextTokens("again", "gpt-5")
+	if got != want {
+		t.Fatalf("CountMessageTokens() = %d, want %d", got, want)
+	}
+}
+
+func TestCountMessageTokensCountsImageURLLowDetail(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.test/image.png", "detail": "low"}},
+		},
+	}}
+
+	got := CountMessageTokens(messages, "gpt-5")
+	base := 3 + 3 + CountTextTokens("user", "gpt-5") + CountTextTokens("look", "gpt-5")
+	want := base + 85
+	if got != want {
+		t.Fatalf("CountMessageTokens() = %d, want %d", got, want)
+	}
+}
+
+func TestCountMessageTokensImageURLTopLevelDetailFallback(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "image_url", "detail": "low", "image_url": map[string]any{"url": "https://example.test/image.png"}},
+		},
+	}}
+
+	got := CountMessageTokens(messages, "gpt-5")
+	base := 3 + 3 + CountTextTokens("user", "gpt-5")
+	want := base + 85
+	if got != want {
+		t.Fatalf("CountMessageTokens() = %d, want %d", got, want)
+	}
+}
+
+func TestCountMessageTokensCountsImageURLDataURLDimensions(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testPNGDataURL(t, 1, 1), "detail": "high"}},
+		},
+	}}
+
+	got := CountMessageTokens(messages, "gpt-5")
+	base := 3 + 3 + CountTextTokens("user", "gpt-5") + CountTextTokens("look", "gpt-5")
+	want := base + 255
+	if got != want {
+		t.Fatalf("CountMessageTokens() = %d, want %d", got, want)
+	}
+}
+
+func TestCompletionResponseIncludesImagePromptTokens(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testPNGDataURL(t, 1, 1), "detail": "high"}},
+		},
+	}}
+
+	response := CompletionResponse("gpt-5", "ok", 123, messages)
+	usage := response["usage"].(map[string]any)
+	promptTokens := usage["prompt_tokens"].(int)
+	completionTokens := usage["completion_tokens"].(int)
+	totalTokens := usage["total_tokens"].(int)
+
+	wantPrompt := CountMessageTokens(messages, "gpt-5")
+	wantCompletion := CountTextTokens("ok", "gpt-5")
+	if promptTokens != wantPrompt {
+		t.Fatalf("prompt_tokens = %d, want %d", promptTokens, wantPrompt)
+	}
+	if completionTokens != wantCompletion {
+		t.Fatalf("completion_tokens = %d, want %d", completionTokens, wantCompletion)
+	}
+	if totalTokens != wantPrompt+wantCompletion {
+		t.Fatalf("total_tokens = %d, want %d", totalTokens, wantPrompt+wantCompletion)
+	}
+}
+
+func TestTokenCountMessagesPreservesContentPartsAndPrependsToolPrompt(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{map[string]any{"content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.test/image.png", "detail": "low"}},
+		}}},
+		"tools": []any{map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}},
+	}
+
+	messages := TokenCountMessages(body["messages"], ChatToolPrompt(body))
+	if len(messages) != 2 {
+		t.Fatalf("TokenCountMessages() len = %d, want 2: %#v", len(messages), messages)
+	}
+	if messages[0]["role"] != "system" || !strings.Contains(messages[0]["content"].(string), "Tool: read_file") {
+		t.Fatalf("system tool prompt not prepended: %#v", messages[0])
+	}
+	if messages[1]["role"] != "user" {
+		t.Fatalf("default role = %#v, want user", messages[1]["role"])
+	}
+	parts, ok := messages[1]["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("content parts were not preserved: %#v", messages[1]["content"])
+	}
+	imagePart, ok := parts[1].(map[string]any)
+	if !ok || imagePart["type"] != "image_url" {
+		t.Fatalf("image_url part was not preserved: %#v", parts[1])
+	}
+
+	normalized := NormalizeMessages(body["messages"], ChatToolPrompt(body))
+	if normalized[1]["content"] != "look" {
+		t.Fatalf("NormalizeMessages() content = %#v, want text-only look", normalized[1]["content"])
+	}
+}
+
+func TestCompletionResponseIncludesImagePromptTokensWithTokenCountMessages(t *testing.T) {
+	body := map[string]any{
+		"model": "gpt-5",
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testPNGDataURL(t, 1, 1), "detail": "high"}},
+		}}},
+		"tools": []any{map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}},
+	}
+	rawMessages, err := ChatMessagesFromBody(body)
+	if err != nil {
+		t.Fatalf("ChatMessagesFromBody() error = %v", err)
+	}
+	usageMessages := TokenCountMessages(rawMessages, ChatToolPrompt(body))
+	normalizedMessages := NormalizeMessages(rawMessages, ChatToolPrompt(body))
+
+	response, err := CompletionResponseWithTools("gpt-5", "ok", 123, usageMessages, body["tools"], body["tool_choice"])
+	if err != nil {
+		t.Fatalf("CompletionResponseWithTools() error = %v", err)
+	}
+	usage := response["usage"].(map[string]any)
+	promptTokens := usage["prompt_tokens"].(int)
+	wantPrompt := CountMessageTokens(usageMessages, "gpt-5")
+	if promptTokens != wantPrompt {
+		t.Fatalf("prompt_tokens = %d, want %d", promptTokens, wantPrompt)
+	}
+	if promptTokens <= CountMessageTokens(normalizedMessages, "gpt-5") {
+		t.Fatalf("prompt_tokens = %d, want greater than normalized text-only count", promptTokens)
+	}
+}
+
+func TestCountMessageTokensCountsHighDetailDataURLAfterShortSideScaling(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testPNGDataURL(t, 2048, 2048), "detail": "high"}},
+		},
+	}}
+
+	got := CountMessageTokens(messages, "gpt-5")
+	base := 3 + 3 + CountTextTokens("user", "gpt-5")
+	want := base + 765
+	if got != want {
+		t.Fatalf("CountMessageTokens() = %d, want %d", got, want)
+	}
+}
+
+func TestCountMessageTokensImageURLFallbackDoesNotFetchRemote(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://127.0.0.1:1/not-fetched.png"}},
+		},
+	}}
+
+	got := CountMessageTokens(messages, "gpt-5")
+	base := 3 + 3 + CountTextTokens("user", "gpt-5")
+	want := base + 765
+	if got != want {
+		t.Fatalf("CountMessageTokens() = %d, want %d", got, want)
+	}
+}
+
+func TestCountMessageTokensIgnoresUnknownContentParts(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "file", "file": map[string]any{"file_id": "file_123", "size": 1024}},
+		},
+	}}
+
+	got := CountMessageTokens(messages, "gpt-5")
+	want := 3 + 3 + CountTextTokens("user", "gpt-5")
+	if got != want {
+		t.Fatalf("CountMessageTokens() = %d, want %d", got, want)
+	}
 }
 
 func TestFormatImageResultStoresOwnerName(t *testing.T) {
@@ -326,8 +547,231 @@ func TestImageStreamErrorMessage(t *testing.T) {
 	if got := imageStreamErrorMessage(flowControl); got != "upstream image stream interrupted by HTTP/2 flow control; retry the request or change proxy if it repeats" {
 		t.Fatalf("flow control error = %q", got)
 	}
-	if got := imageStreamErrorMessage(""); got != "image generation failed" {
+	if got := imageStreamErrorMessage(""); got != "upstream image request failed without error detail" {
 		t.Fatalf("empty error = %q", got)
+	}
+}
+
+func TestHandleImageGenerationsReturnsUpstreamTextResponse(t *testing.T) {
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "message", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Text: "你好！我是 ChatGPT。", UpstreamEventType: "image_text_response"}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	result, _, err := engine.HandleImageGenerations(context.Background(), map[string]any{
+		"prompt": "你好，你是什么模型？",
+		"model":  "gpt-image-2",
+	})
+	if err == nil {
+		t.Fatal("HandleImageGenerations() error = nil, want text-response image error")
+	}
+	var imageErr *ImageGenerationError
+	if !errors.As(err, &imageErr) {
+		t.Fatalf("HandleImageGenerations() error = %T %v, want ImageGenerationError", err, err)
+	}
+	if imageErr.Code != "image_generation_text_response" || imageErr.Message != "你好！我是 ChatGPT。" {
+		t.Fatalf("image error = %#v", imageErr)
+	}
+	if result["output_type"] != "text" {
+		t.Fatalf("output_type = %#v, want text in %#v", result["output_type"], result)
+	}
+	if result["message"] != "你好！我是 ChatGPT。" {
+		t.Fatalf("message = %#v, want upstream text", result["message"])
+	}
+}
+
+func TestHandleImageGenerationsReturnsArbitraryUpstreamImageText(t *testing.T) {
+	const upstreamText = "上游返回的任何非排队文本都应该原样返回。"
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "message", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Text: upstreamText, UpstreamEventType: "image_text_response"}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	result, _, err := engine.HandleImageGenerations(context.Background(), map[string]any{
+		"prompt": "draw",
+		"model":  "gpt-image-2",
+	})
+	if err == nil {
+		t.Fatal("HandleImageGenerations() error = nil, want text-response image error")
+	}
+	if result["output_type"] != "text" || result["message"] != upstreamText {
+		t.Fatalf("result = %#v, want arbitrary upstream text response", result)
+	}
+}
+
+func TestImageConversationFallbackReferenceUsedOnlyForNewUpstreamSession(t *testing.T) {
+	fallback := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("fallback"))
+	sessions := service.NewImageConversationSessionService(filepath.Join(t.TempDir(), "sessions.json"))
+	sessions.Bind(service.ImageConversationSession{
+		OwnerID:                 "owner-1",
+		FrontendConversationID:  "front-1",
+		AccessToken:             "bound-token",
+		UpstreamConversationID:  "conv-1",
+		UpstreamParentMessageID: "msg-1",
+	})
+	engine := &Engine{
+		ImageConversationSessions: sessions,
+		ImageTokenProvider:        func(context.Context) (string, error) { return "bound-token", nil },
+		ImageClientFactory:        func(string) *backend.Client { return nil },
+	}
+	var continuedRequest ConversationRequest
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		continuedRequest = request
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), ConversationID: "conv-1", MessageID: "msg-2", Data: []map[string]any{{"b64_json": "image"}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Prompt: "continue", Model: "gpt-image-2", N: 1, OwnerID: "owner-1", FrontendConversationID: "front-1", Images: []string{"current"}, FallbackReferenceImage: fallback})
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err != nil {
+		t.Fatalf("CollectImageOutputs() error = %v", err)
+	}
+	if continuedRequest.UpstreamConversationID != "conv-1" || continuedRequest.UpstreamParentMessageID != "msg-1" {
+		t.Fatalf("continuation pointers = %q/%q", continuedRequest.UpstreamConversationID, continuedRequest.UpstreamParentMessageID)
+	}
+	if got := strings.Join(continuedRequest.Images, ","); got != "current" {
+		t.Fatalf("continued request images = %q, want current only", got)
+	}
+
+	engine.ImageConversationSessions = service.NewImageConversationSessionService(filepath.Join(t.TempDir(), "sessions.json"))
+	engine.ImageTokenProvider = func(context.Context) (string, error) { return "new-token", nil }
+	var newRequest ConversationRequest
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		newRequest = request
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), ConversationID: "conv-new", MessageID: "msg-new", Data: []map[string]any{{"b64_json": "image"}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+	outputs, errCh = engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Prompt: "new", Model: "gpt-image-2", N: 1, OwnerID: "owner-1", FrontendConversationID: "front-2", Images: []string{"current"}, FallbackReferenceImage: fallback})
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err != nil {
+		t.Fatalf("CollectImageOutputs() new session error = %v", err)
+	}
+	if newRequest.UpstreamConversationID != "" || newRequest.UpstreamParentMessageID != "" {
+		t.Fatalf("new request continuation pointers = %q/%q, want empty", newRequest.UpstreamConversationID, newRequest.UpstreamParentMessageID)
+	}
+	if len(newRequest.Images) != 2 || newRequest.Images[0] != "current" || newRequest.Images[1] != fallback {
+		t.Fatalf("new request images = %#v, want current plus fallback", newRequest.Images)
+	}
+}
+
+func TestStreamResponsesImageOutputsCompletesWithUpstreamRefusalText(t *testing.T) {
+	const upstreamText = "非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。如果你认为此判断有误，请重试或修改提示语。"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation/prepare":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"title_generation\",\"title\":\"正在处理图片\",\"conversation_id\":\"conv-refused\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"conv-refused\"}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-refused":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{
+				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + upstreamText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-5-5"}}}
+			}}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(token string) *backend.Client {
+			client := backend.NewClient(token, nil, service.NewProxyService(testProtocolProxyConfig{}))
+			client.BaseURL = server.URL
+			return client
+		},
+	}
+
+	outputs, imageErr := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{
+		Prompt: "edit",
+		Model:  "gpt-image-2",
+		N:      1,
+	})
+	result, err := engine.CollectImageOutputs(outputs, imageErr)
+	if err != nil {
+		t.Fatalf("CollectImageOutputs() err = %v", err)
+	}
+	if result["output_type"] != "text" || result["message"] != upstreamText {
+		t.Fatalf("result = %#v, want upstream refusal text as text output", result)
+	}
+}
+
+func TestIsFinalImageTextEventIgnoresImageGenMetadataWithResultIDs(t *testing.T) {
+	toolFalse := false
+	event := backend.ResponsesImageEvent{
+		Type:           "server_ste_metadata",
+		Text:           "Here is the generated image.",
+		ToolInvoked:    &toolFalse,
+		TurnUseCase:    "image gen",
+		SedimentIDs:    []string{"file_image"},
+		ConversationID: "conv-image",
+	}
+
+	if isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = true, want false for image generation metadata", event)
+	}
+}
+
+func TestIsFinalImageTextEventWaitsForBackendTextMarkerOnImageGenRefusal(t *testing.T) {
+	event := backend.ResponsesImageEvent{
+		Type:        "message_stream_complete",
+		Text:        "非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。如果你认为此判断有误，请重试或修改提示语。",
+		TurnUseCase: "image gen",
+	}
+
+	if isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = true, want false before backend marks final text", event)
+	}
+
+	event.Type = "image_text_response"
+	if !isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = false, want true after backend marks final text", event)
+	}
+}
+
+func TestIsFinalImageTextEventKeepsQueuedImageNoticePending(t *testing.T) {
+	event := backend.ResponsesImageEvent{
+		Type:        "message_stream_complete",
+		Text:        "正在处理图片，目前有很多人在创建图片，因此可能需要一点时间。图片准备好后我们会通知你。",
+		TurnUseCase: "image gen",
+	}
+
+	if isFinalImageTextEvent(event) {
+		t.Fatalf("isFinalImageTextEvent(%#v) = true, want false for queued image notice", event)
 	}
 }
 
@@ -339,6 +783,8 @@ func TestIsTransientImageStreamErrorMessage(t *testing.T) {
 		"unexpected EOF",
 		"connection reset by peer",
 		"stream closed",
+		"bootstrap failed: upstream connection failed before TLS handshake completed; check proxy reachability to chatgpt.com or change proxy",
+		`bootstrap failed: Get "https://chatgpt.com/": surf: HTTP/2 request failed: uTLS.HandshakeContext() error: EOF; HTTP/1.1 fallback failed: uTLS.HandshakeContext() error: EOF`,
 	}
 	for _, input := range transient {
 		if !isTransientImageStreamErrorMessage(input) {

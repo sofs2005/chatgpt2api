@@ -1,7 +1,6 @@
 package service
 
 import (
-	"path/filepath"
 	"sync"
 
 	"chatgpt2api/internal/storage"
@@ -10,14 +9,13 @@ import (
 
 type AnnouncementService struct {
 	mu      sync.Mutex
-	path    string
 	store   storage.JSONDocumentBackend
 	items   []map[string]any
 	docName string
 }
 
-func NewAnnouncementService(dataDir string, backend ...storage.Backend) *AnnouncementService {
-	s := &AnnouncementService{path: filepath.Join(dataDir, "announcements.json"), store: firstJSONDocumentStore(backend), docName: "announcements.json"}
+func NewAnnouncementService(backend ...storage.Backend) *AnnouncementService {
+	s := &AnnouncementService{store: firstJSONDocumentStore(backend), docName: "announcements.json"}
 	s.items = s.load()
 	return s
 }
@@ -108,7 +106,7 @@ func (s *AnnouncementService) Delete(id string) bool {
 }
 
 func (s *AnnouncementService) load() []map[string]any {
-	raw := loadStoredJSON(s.store, s.docName, s.path)
+	raw := loadStoredJSON(s.store, s.docName)
 	items := make([]map[string]any, 0)
 	for _, item := range anyList(raw) {
 		if itemMap, ok := item.(map[string]any); ok {
@@ -122,7 +120,7 @@ func (s *AnnouncementService) load() []map[string]any {
 }
 
 func (s *AnnouncementService) saveLocked() error {
-	return saveStoredJSON(s.store, s.docName, s.path, s.items)
+	return saveStoredJSON(s.store, s.docName, s.items)
 }
 
 func normalizeAnnouncement(raw map[string]any) map[string]any {

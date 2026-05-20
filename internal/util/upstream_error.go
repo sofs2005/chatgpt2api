@@ -10,7 +10,8 @@ func SummarizeUpstreamConnectionError(message string) (string, bool) {
 		return "", false
 	}
 	lower := strings.ToLower(text)
-	if strings.Contains(lower, "utls.handshakecontext") ||
+	if strings.Contains(lower, strings.ToLower(UpstreamConnectionFailureMessage)) ||
+		strings.Contains(lower, "utls.handshakecontext") ||
 		strings.Contains(lower, "http/2 request failed") ||
 		strings.Contains(lower, "http/1.1 fallback failed") ||
 		strings.Contains(lower, "tls connect error") ||

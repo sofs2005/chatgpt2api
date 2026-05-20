@@ -34,6 +34,7 @@ func TestAccountPoolPermissionsAreExplicit(t *testing.T) {
 	operators := PermissionSet{APIPermissions: NormalizeAPIPermissions([]string{
 		APIPermissionKey("GET", "/api/accounts/tokens"),
 		APIPermissionKey("POST", "/api/accounts"),
+		APIPermissionKey("POST", "/api/accounts/session"),
 		APIPermissionKey("POST", "/api/accounts/refresh"),
 		APIPermissionKey("POST", "/api/accounts/update"),
 		APIPermissionKey("DELETE", "/api/accounts"),
@@ -44,6 +45,7 @@ func TestAccountPoolPermissionsAreExplicit(t *testing.T) {
 	}{
 		{"GET", "/api/accounts/tokens"},
 		{"POST", "/api/accounts"},
+		{"POST", "/api/accounts/session"},
 		{"POST", "/api/accounts/refresh"},
 		{"POST", "/api/accounts/update"},
 		{"DELETE", "/api/accounts"},

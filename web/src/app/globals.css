@@ -149,6 +149,9 @@
   body[data-scroll-locked] {
     margin-right: 0 !important;
   }
+  body[data-scroll-locked][data-select-scroll-unlocked] {
+    overflow: visible !important;
+  }
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;

@@ -5,6 +5,7 @@ import {
   Ban,
   CheckCircle2,
   Copy,
+  Gauge,
   Eye,
   EyeOff,
   KeyRound,
@@ -92,6 +93,37 @@ function creationConcurrentLimitLabel(session: StoredAuthSession) {
     return "不限制";
   }
   return `${session.creationConcurrentLimit} 个`;
+}
+
+function creationRpmLimitLabel(session: StoredAuthSession) {
+  if (session.role === "admin" || session.creationRpmLimit === 0) {
+    return "不限制";
+  }
+  return `${session.creationRpmLimit} 次/分`;
+}
+
+function billingTypeLabel(session: StoredAuthSession) {
+  const billing = session.billing;
+  if (!billing || billing.unlimited) {
+    return "无限额度";
+  }
+  return billing.type === "subscription" ? "订阅配额制" : "标准余额制";
+}
+
+function billingPrimaryValue(session: StoredAuthSession) {
+  const billing = session.billing;
+  if (!billing || billing.unlimited) {
+    return "不限制";
+  }
+  if (billing.type === "subscription") {
+    return `${billing.available} / ${billing.subscription?.quota_limit ?? 0}`;
+  }
+  return String(billing.standard?.available_balance ?? billing.available);
+}
+
+function billingResetLabel(session: StoredAuthSession) {
+  const endsAt = session.billing?.subscription?.quota_period_ends_at;
+  return endsAt ? formatDateTime(endsAt) : "—";
 }
 
 function maskKey(hasKey: boolean) {
@@ -358,6 +390,36 @@ function ProfileContent({ session }: { session: StoredAuthSession }) {
               <InfoRow label="登录来源" value={providerLabel(currentSession.provider)} />
               <InfoRow label="角色 ID" value={currentSession.roleId || currentSession.role} code />
               <InfoRow label="创作并发额度" value={creationConcurrentLimitLabel(currentSession)} />
+              <InfoRow label="RPM 限制" value={creationRpmLimitLabel(currentSession)} />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#edf4ff] text-[#1456f0] dark:bg-sky-950/30 dark:text-sky-300">
+                  <Gauge className="size-5" />
+                </div>
+                <div className="min-w-0">
+                  <CardTitle className="text-lg">本地计费</CardTitle>
+                  <CardDescription className="truncate">图片计费单位</CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+              <InfoRow label="计费类型" value={billingTypeLabel(currentSession)} />
+              <InfoRow label={currentSession.billing?.type === "subscription" ? "剩余 / 上限" : "可用余额"} value={billingPrimaryValue(currentSession)} />
+              {currentSession.billing?.type === "subscription" && !currentSession.billing.unlimited ? (
+                <>
+                  <InfoRow label="当期已用" value={String(currentSession.billing.subscription?.quota_used ?? 0)} />
+                  <InfoRow label="下次重置" value={billingResetLabel(currentSession)} />
+                </>
+              ) : null}
+              {currentSession.billing?.type === "standard" && !currentSession.billing.unlimited ? (
+                <>
+                  <InfoRow label="当前余额" value={String(currentSession.billing.standard?.balance ?? 0)} />
+                </>
+              ) : null}
             </CardContent>
           </Card>
 

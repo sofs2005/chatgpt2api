@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +16,6 @@ import (
 
 type Sub2APIConfig struct {
 	mu      sync.Mutex
-	path    string
 	store   storage.JSONDocumentBackend
 	servers []map[string]any
 	docName string
@@ -35,8 +33,8 @@ type cachedJWT struct {
 	expiresAt time.Time
 }
 
-func NewSub2APIConfig(dataDir string, backend ...storage.Backend) *Sub2APIConfig {
-	c := &Sub2APIConfig{path: filepath.Join(dataDir, "sub2api_config.json"), store: firstJSONDocumentStore(backend), docName: "sub2api_config.json"}
+func NewSub2APIConfig(backend ...storage.Backend) *Sub2APIConfig {
+	c := &Sub2APIConfig{store: firstJSONDocumentStore(backend), docName: "sub2api_config.json"}
 	c.servers = c.load()
 	return c
 }
@@ -134,7 +132,7 @@ func (c *Sub2APIConfig) GetImportJob(id string) map[string]any {
 }
 
 func (c *Sub2APIConfig) load() []map[string]any {
-	raw := util.AsMapSlice(loadStoredJSON(c.store, c.docName, c.path))
+	raw := util.AsMapSlice(loadStoredJSON(c.store, c.docName))
 	out := make([]map[string]any, 0, len(raw))
 	for _, item := range raw {
 		out = append(out, normalizeSub2Server(item))
@@ -143,7 +141,7 @@ func (c *Sub2APIConfig) load() []map[string]any {
 }
 
 func (c *Sub2APIConfig) saveLocked() error {
-	return saveStoredJSON(c.store, c.docName, c.path, c.servers)
+	return saveStoredJSON(c.store, c.docName, c.servers)
 }
 
 func (s *Sub2APIService) ListRemoteGroups(ctx context.Context, server map[string]any) ([]map[string]any, error) {

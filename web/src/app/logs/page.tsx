@@ -15,25 +15,40 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchSystemLogs, type SystemLog, type SystemLogFilters } from "@/lib/api";
+import { fetchSettingsConfig, fetchSystemLogs, type LogView, type SystemLog, type SystemLogFilters } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const methodOptions = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const statusOptions = ["200", "201", "400", "401", "403", "404", "422", "429", "500", "502"];
 const logLevelOptions = ["info", "warning", "error"];
+const logViewOptions: Array<{ value: LogView; label: string }> = [
+  { value: "meaningful", label: "有意义日志" },
+  { value: "business", label: "仅业务日志" },
+  { value: "all", label: "全部日志" },
+];
 
-const emptyFilters: SystemLogFilters = {
-  username: "",
-  module: "",
-  summary: "",
-  method: "all",
-  status: "all",
-  ip_address: "",
-  operation_type: "",
-  log_level: "all",
-  start_date: "",
-  end_date: "",
-};
+function normalizeLogView(value: unknown): LogView {
+  if (value === "all" || value === "meaningful" || value === "business") {
+    return value;
+  }
+  return "meaningful";
+}
+
+function createEmptyFilters(view: LogView): SystemLogFilters {
+  return {
+    username: "",
+    module: "",
+    summary: "",
+    method: "all",
+    status: "all",
+    ip_address: "",
+    operation_type: "",
+    log_level: "all",
+    view,
+    start_date: "",
+    end_date: "",
+  };
+}
 
 const detailLabels: Record<string, string> = {
   endpoint: "接口",
@@ -51,6 +66,8 @@ const detailLabels: Record<string, string> = {
   ended_at: "结束时间",
   username: "操作人",
   key_name: "令牌名称",
+  session_name: "会话名称",
+  auth_kind: "认证方式",
   key_role: "角色",
   key_id: "凭据 ID",
   subject_id: "用户 ID",
@@ -65,24 +82,40 @@ const detailLabels: Record<string, string> = {
   removed: "删除",
 };
 
-const primaryDetailKeys = [
+const summaryDetailKeys = new Set([
   "method",
   "path",
   "endpoint",
   "module",
-  "operation_type",
   "status",
   "outcome",
   "log_level",
   "duration_ms",
-  "username",
-  "key_name",
-  "subject_id",
-  "key_id",
-  "ip_address",
-  "started_at",
-  "ended_at",
-];
+  "response_time",
+]);
+
+const detailSectionDefinitions = [
+  {
+    title: "请求",
+    keys: ["operation_type", "ip_address", "user_agent", "model"],
+  },
+  {
+    title: "身份",
+    keys: ["username", "key_name", "session_name", "auth_kind", "key_role", "subject_id", "key_id", "provider"],
+  },
+  {
+    title: "时间",
+    keys: ["started_at", "ended_at"],
+  },
+] as const;
+
+type DetailFieldSection = {
+  title: string;
+  entries: Array<readonly [string, unknown]>;
+};
+
+const groupedDetailKeys = new Set(detailSectionDefinitions.flatMap((section) => section.keys));
+const payloadDetailKeys = new Set(["request_args", "request_body", "response_body"]);
 
 function primitiveText(value: unknown) {
   return typeof value === "string" || typeof value === "number" ? String(value) : "";
@@ -97,7 +130,7 @@ function detailText(item: SystemLog | null, key: string) {
 }
 
 function actorText(item: SystemLog | null) {
-  return detailText(item, "username") || detailText(item, "key_name") || detailText(item, "subject_id") || detailText(item, "key_id") || "-";
+  return detailText(item, "username") || detailText(item, "key_name") || detailText(item, "subject_id") || detailText(item, "key_id") || detailText(item, "session_name") || "-";
 }
 
 function moduleText(item: SystemLog | null) {
@@ -172,6 +205,10 @@ function isPrimitiveDetail(value: unknown) {
   return value === null || ["string", "number", "boolean"].includes(typeof value);
 }
 
+function isDisplayableDetailValue(value: unknown) {
+  return isPrimitiveDetail(value) && value !== null && value !== undefined && value !== "";
+}
+
 function formatDetailValue(key: string, value: unknown) {
   if (value === null || value === undefined || value === "") return "—";
   if ((key === "duration_ms" || key === "response_time") && typeof value === "number") return `${(value / 1000).toFixed(2)} s`;
@@ -179,21 +216,53 @@ function formatDetailValue(key: string, value: unknown) {
     if (value === "success") return "成功";
     if (value === "failed") return "失败";
   }
+  if (key === "auth_kind") {
+    if (value === "session") return "登录会话";
+    if (value === "api_key") return "API 令牌";
+  }
   if (typeof value === "boolean") return value ? "是" : "否";
   return String(value);
 }
 
-function getPrimaryDetailEntries(item: SystemLog | null) {
+function isRedundantDetailEntry(item: SystemLog | null, key: string, value: unknown) {
+  if (summaryDetailKeys.has(key)) {
+    return true;
+  }
+  const text = primitiveText(value);
+  if (key === "session_name" && detailText(item, "auth_kind") === "session" && text === "登录会话") {
+    return true;
+  }
+  if (text && ["username", "key_name", "session_name", "subject_id", "key_id"].includes(key)) {
+    return actorText(item) === text;
+  }
+  return false;
+}
+
+function getDetailGroupEntries(item: SystemLog | null, keys: readonly string[]) {
   const detail = item?.detail || {};
-  return primaryDetailKeys
-    .filter((key) => key in detail && isPrimitiveDetail(detail[key]))
+  return keys
+    .filter((key) => key in detail && isDisplayableDetailValue(detail[key]) && !isRedundantDetailEntry(item, key, detail[key]))
     .map((key) => [key, detail[key]] as const);
 }
 
 function getExtraDetailEntries(item: SystemLog | null) {
   const detail = item?.detail || {};
-  const skipped = new Set([...primaryDetailKeys, "urls", "error"]);
-  return Object.entries(detail).filter(([key, value]) => !skipped.has(key) && isPrimitiveDetail(value));
+  const skipped = new Set([...summaryDetailKeys, ...groupedDetailKeys, ...payloadDetailKeys, "urls", "error"]);
+  return Object.entries(detail).filter(([key, value]) => !skipped.has(key) && isDisplayableDetailValue(value));
+}
+
+function getDetailFieldSections(item: SystemLog | null) {
+  const sections: DetailFieldSection[] = detailSectionDefinitions
+    .map((section) => ({
+      title: section.title,
+      entries: getDetailGroupEntries(item, section.keys),
+    }))
+    .filter((section) => section.entries.length > 0);
+  const extraEntries = getExtraDetailEntries(item);
+  if (extraEntries.length > 0) {
+    sections.push({ title: "其他", entries: extraEntries });
+  }
+  return sections;
 }
 
 function detailJSON(item: SystemLog | null) {
@@ -210,15 +279,19 @@ function normalizeFilters(filters: SystemLogFilters): SystemLogFilters {
     ip_address: filters.ip_address?.trim() || "",
     operation_type: filters.operation_type?.trim() || "",
     log_level: filters.log_level || "all",
+    view: normalizeLogView(filters.view),
     start_date: filters.start_date || "",
     end_date: filters.end_date || "",
   };
 }
 
 function LogsContent() {
+  const initialFilters = createEmptyFilters("meaningful");
   const [items, setItems] = useState<SystemLog[]>([]);
-  const [filters, setFilters] = useState<SystemLogFilters>(emptyFilters);
-  const [query, setQuery] = useState<SystemLogFilters>(emptyFilters);
+  const [defaultLogView, setDefaultLogView] = useState<LogView>("meaningful");
+  const [isDefaultLogViewReady, setIsDefaultLogViewReady] = useState(false);
+  const [filters, setFilters] = useState<SystemLogFilters>(initialFilters);
+  const [query, setQuery] = useState<SystemLogFilters>(initialFilters);
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -227,6 +300,8 @@ function LogsContent() {
   const [isLoading, setIsLoading] = useState(true);
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
+  const detailMethod = detailText(detailLog, "method");
+  const detailFieldSections = getDetailFieldSections(detailLog);
   const pageSize = 15;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
@@ -255,8 +330,9 @@ function LogsContent() {
   };
 
   const clearFilters = () => {
-    setFilters(emptyFilters);
-    setQuery(emptyFilters);
+    const nextFilters = createEmptyFilters(defaultLogView);
+    setFilters(nextFilters);
+    setQuery(nextFilters);
   };
 
   const openDetail = (item: SystemLog) => {
@@ -274,8 +350,36 @@ function LogsContent() {
   };
 
   useEffect(() => {
+    let ignore = false;
+    const loadDefaultLogView = async () => {
+      let view: LogView = "meaningful";
+      try {
+        const data = await fetchSettingsConfig();
+        view = normalizeLogView(data.config.default_log_view);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "加载默认日志视图失败");
+      }
+      if (ignore) {
+        return;
+      }
+      const nextFilters = createEmptyFilters(view);
+      setDefaultLogView(view);
+      setFilters(nextFilters);
+      setQuery(nextFilters);
+      setIsDefaultLogViewReady(true);
+    };
+    void loadDefaultLogView();
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isDefaultLogViewReady) {
+      return;
+    }
     void loadLogs(query);
-  }, [loadLogs, query]);
+  }, [isDefaultLogViewReady, loadLogs, query]);
 
   return (
     <section className="flex flex-col gap-5">
@@ -287,6 +391,12 @@ function LogsContent() {
         </CardHeader>
         <CardContent>
           <form className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" onSubmit={handleSearch}>
+            <Select value={normalizeLogView(filters.view)} onValueChange={(value) => updateFilter("view", value)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {logViewOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
             <Input placeholder="操作人" value={filters.username || ""} onChange={(event) => updateFilter("username", event.target.value)} />
             <Input placeholder="模块" value={filters.module || ""} onChange={(event) => updateFilter("module", event.target.value)} />
             <Input placeholder="摘要或接口" value={filters.summary || ""} onChange={(event) => updateFilter("summary", event.target.value)} />
@@ -443,7 +553,10 @@ function LogsContent() {
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">接口</div>
-                      <div className="mt-1 truncate font-medium text-foreground">{pathText(detailLog)}</div>
+                      <div className="mt-1 flex min-w-0 items-center gap-2 font-medium text-foreground">
+                        {detailMethod ? <Badge variant={methodBadgeVariant(detailMethod)} className="shrink-0 rounded-md">{detailMethod}</Badge> : null}
+                        <span className="truncate">{pathText(detailLog)}</span>
+                      </div>
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">耗时</div>
@@ -453,22 +566,26 @@ function LogsContent() {
                 </div>
               </section>
 
-              <section className="space-y-3">
-                <div className="text-sm font-semibold text-foreground">关键字段</div>
-                <div className="grid gap-2 md:grid-cols-2">
-                  {[...getPrimaryDetailEntries(detailLog), ...getExtraDetailEntries(detailLog)].map(([key, value]) => (
-                    <div key={key} className="flex min-w-0 items-start justify-between gap-4 rounded-lg border border-border bg-background px-3 py-2 text-sm">
-                      <span className="shrink-0 text-muted-foreground">{detailLabel(key)}</span>
-                      <span className="min-w-0 break-words text-right font-medium text-foreground">{formatDetailValue(key, value)}</span>
-                    </div>
-                  ))}
-                  {getPrimaryDetailEntries(detailLog).length === 0 && getExtraDetailEntries(detailLog).length === 0 ? (
-                    <div className="rounded-lg border border-border bg-background px-3 py-6 text-center text-sm text-muted-foreground md:col-span-2">
-                      没有可展示的字段
-                    </div>
-                  ) : null}
-                </div>
-              </section>
+              {detailFieldSections.length > 0 ? (
+                <section className="space-y-3">
+                  <div className="text-sm font-semibold text-foreground">补充信息</div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {detailFieldSections.map((section) => (
+                      <div key={section.title} className="rounded-xl border border-border bg-background p-3">
+                        <div className="mb-2 text-xs font-semibold text-muted-foreground">{section.title}</div>
+                        <div className="space-y-2">
+                          {section.entries.map(([key, value]) => (
+                            <div key={key} className="flex min-w-0 items-start justify-between gap-4 text-sm">
+                              <span className="shrink-0 text-muted-foreground">{detailLabel(key)}</span>
+                              <span className="min-w-0 break-words text-right font-medium text-foreground">{formatDetailValue(key, value)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
 
               {typeof detailLog?.detail?.error === "string" && detailLog.detail.error ? (
                 <section className="space-y-3">
@@ -505,13 +622,6 @@ function LogsContent() {
                   </div>
                 </section>
               ) : null}
-
-              <section className="space-y-3">
-                <div className="text-sm font-semibold text-foreground">完整 JSON</div>
-                <pre className="max-h-72 overflow-auto rounded-xl border border-border bg-muted/40 p-4 text-xs leading-6 text-foreground">
-                  {detailJSON(detailLog)}
-                </pre>
-              </section>
             </div>
           </div>
         </DialogContent>

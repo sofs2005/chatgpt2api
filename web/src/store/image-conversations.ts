@@ -33,7 +33,7 @@ export type StoredImage = {
   id: string;
   taskId?: string;
   status?: "loading" | "success" | "error" | "cancelled" | "message";
-  taskStatus?: "queued" | "running" | "success";
+  taskStatus?: "queued" | "running" | "success" | "error" | "cancelled";
   path?: string;
   visibility?: ImageVisibility;
   b64_json?: string;
@@ -164,7 +164,11 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
   const height = Number(image.height);
   const resolution = typeof image.resolution === "string" && image.resolution ? image.resolution : undefined;
   const taskStatus =
-    image.taskStatus === "queued" || image.taskStatus === "running" || image.taskStatus === "success"
+    image.taskStatus === "queued" ||
+    image.taskStatus === "running" ||
+    image.taskStatus === "success" ||
+    image.taskStatus === "error" ||
+    image.taskStatus === "cancelled"
       ? image.taskStatus
       : image.status === "loading"
         ? "queued"

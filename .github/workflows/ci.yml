@@ -4,10 +4,14 @@ on:
   push:
     branches:
       - main
+      - dev
   pull_request:
 
 permissions:
   contents: read
+
+env:
+  BUN_VERSION: 1.3.13
 
 jobs:
   test:
@@ -17,7 +21,10 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Clear Bun cache
+        run: bun pm cache rm || true
 
       - name: Install dependencies
         working-directory: web
@@ -27,6 +34,13 @@ jobs:
         working-directory: web
         run: bun run build
 
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: internal/web/dist/
+          retention-days: 1
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -35,5 +49,73 @@ jobs:
       - name: Verify Go version
         run: go version | grep -q 'go1.26.2'
 
+      - name: Configure git for Go modules
+        run: git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Test backend
         run: go test ./...
+
+      - name: Validate Docker deployment files
+        run: |
+          test -f deploy/Dockerfile
+          test -f deploy/Dockerfile.dev
+          test -f deploy/Dockerfile.release
+          test -f deploy/Dockerfile.dockerignore
+          test -f deploy/Dockerfile.dev.dockerignore
+          test -f deploy/docker-compose.yml
+          sh -n deploy/docker-build-limited.sh
+          test ! -e .dockerignore
+          test ! -e Dockerfile
+          test ! -e Dockerfile.goreleaser
+          test ! -e docker-compose.yml
+          test ! -e docker-compose.build.yml
+          test ! -e docker-compose.local.yml
+          test ! -e .goreleaser.simple.yaml
+          CHATGPT2API_ENV_FILE="$PWD/.env.example" \
+          CHATGPT2API_DATA_DIR="$PWD/data" \
+          docker compose -f deploy/docker-compose.yml config >/dev/null
+
+  build-docker-dev:
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: internal/web/dist/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta
+        id: meta
+        run: |
+          OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "tags=ghcr.io/${OWNER_LOWER}/${{ github.event.repository.name }}:dev" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/Dockerfile.dev
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

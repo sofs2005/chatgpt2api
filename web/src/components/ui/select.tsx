@@ -4,8 +4,63 @@ import { Check, ChevronDown, ChevronUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-function Select(props: React.ComponentProps<typeof SelectPrimitive.Root>) {
-  return <SelectPrimitive.Root data-slot="select" {...props} />;
+const SELECT_SCROLL_UNLOCK_ATTRIBUTE = "data-select-scroll-unlocked";
+let selectScrollUnlockCount = 0;
+
+function hasOpenModalDialog() {
+  if (typeof document === "undefined") {
+    return false;
+  }
+  return Boolean(
+    document.querySelector(
+      '[data-slot="dialog-content"][data-state="open"], [role="dialog"][data-state="open"]',
+    ),
+  );
+}
+
+function acquireSelectScrollUnlock() {
+  if (typeof document === "undefined") {
+    return () => {};
+  }
+  selectScrollUnlockCount += 1;
+  document.body.setAttribute(SELECT_SCROLL_UNLOCK_ATTRIBUTE, "true");
+
+  return () => {
+    selectScrollUnlockCount = Math.max(0, selectScrollUnlockCount - 1);
+    if (selectScrollUnlockCount === 0) {
+      document.body.removeAttribute(SELECT_SCROLL_UNLOCK_ATTRIBUTE);
+    }
+  };
+}
+
+function Select({
+  defaultOpen,
+  onOpenChange,
+  open,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Root>) {
+  const [internalOpen, setInternalOpen] = React.useState(Boolean(defaultOpen));
+  const isOpen = open ?? internalOpen;
+
+  React.useEffect(() => {
+    if (!isOpen || hasOpenModalDialog()) {
+      return;
+    }
+    return acquireSelectScrollUnlock();
+  }, [isOpen]);
+
+  return (
+    <SelectPrimitive.Root
+      data-slot="select"
+      defaultOpen={defaultOpen}
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setInternalOpen(nextOpen);
+        onOpenChange?.(nextOpen);
+      }}
+      {...props}
+    />
+  );
 }
 
 function SelectGroup(

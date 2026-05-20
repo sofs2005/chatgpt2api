@@ -1,16 +1,10 @@
 package service
 
-import (
-	"path/filepath"
-	"testing"
-
-	"chatgpt2api/internal/storage"
-)
+import "testing"
 
 func TestPromptFavoriteServiceUpsertListAndDelete(t *testing.T) {
-	root := t.TempDir()
-	backend := storage.NewJSONBackend(filepath.Join(root, "accounts.json"), filepath.Join(root, "auth_keys.json"))
-	service := NewPromptFavoriteService(root, backend)
+	backend := newTestStorageBackend(t)
+	service := NewPromptFavoriteService(backend)
 
 	item, err := service.Upsert("user_1", map[string]any{
 		"prompt_id":            "prompt-a",
@@ -93,8 +87,7 @@ func TestPromptFavoriteServiceUpsertListAndDelete(t *testing.T) {
 }
 
 func TestPromptFavoriteServiceRejectsInvalidInput(t *testing.T) {
-	root := t.TempDir()
-	service := NewPromptFavoriteService(root, storage.NewJSONBackend(filepath.Join(root, "accounts.json"), filepath.Join(root, "auth_keys.json")))
+	service := NewPromptFavoriteService(newTestStorageBackend(t))
 
 	cases := []map[string]any{
 		{"source": "banana-prompt-quicker", "title": "Title", "preview": "https://example.test/a.png", "prompt": "draw", "author": "Alice"},

@@ -4,12 +4,14 @@ import { create } from "zustand";
 import { toast } from "sonner";
 
 import {
+  cleanupImageStorage,
   cleanupLogs,
   createCPAPool,
   deleteCPAPool,
   fetchCPAPoolFiles,
   fetchCPAPools,
   fetchLogGovernance,
+  fetchImageStorageGovernance,
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
   fetchSettingsConfig,
@@ -20,10 +22,15 @@ import {
   updateLoginPageImageSettings,
   updateRegisterConfig,
   updateSettingsConfig,
+  type BillingPeriod,
+  type BillingType,
   type CPAPool,
   type CPARemoteFile,
+  type ImageStorageCleanupResult,
+  type ImageStorageGovernanceSummary,
   type LogCleanupResult,
   type LogGovernanceSummary,
+  type LogView,
   type LoginPageImageSettings,
   type RegisterConfig,
   type SettingsConfig,
@@ -40,6 +47,24 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
+function normalizeDefaultBillingType(value: unknown): BillingType {
+  return value === "subscription" ? "subscription" : "standard";
+}
+
+function normalizeDefaultSubscriptionPeriod(value: unknown): BillingPeriod {
+  if (value === "daily" || value === "weekly" || value === "monthly") {
+    return value;
+  }
+  return "monthly";
+}
+
+function normalizeDefaultLogView(value: unknown): LogView {
+  if (value === "all" || value === "meaningful" || value === "business") {
+    return value;
+  }
+  return "meaningful";
+}
+
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   const loginImageTransform = normalizeLoginPageImageTransform({
     zoom: Number(config.login_page_image_zoom),
@@ -52,8 +77,14 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_task_timeout_seconds: Number(config.image_task_timeout_seconds || 300),
     user_default_concurrent_limit: Number(config.user_default_concurrent_limit || 0),
     user_default_rpm_limit: Number(config.user_default_rpm_limit || 0),
+    default_billing_type: normalizeDefaultBillingType(config.default_billing_type),
+    default_standard_balance: Math.max(0, Number(config.default_standard_balance) || 0),
+    default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
+    default_subscription_period: normalizeDefaultSubscriptionPeriod(config.default_subscription_period),
     image_retention_days: Number(config.image_retention_days || 30),
+    image_storage_limit_mb: Math.max(0, Number(config.image_storage_limit_mb) || 0),
     log_retention_days: Number(config.log_retention_days || 7),
+    default_log_view: normalizeDefaultLogView(config.default_log_view),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
@@ -103,6 +134,10 @@ type SettingsStore = {
   lastLogCleanup: LogCleanupResult | null;
   isLoadingLogGovernance: boolean;
   isCleaningLogs: boolean;
+  imageStorageGovernance: ImageStorageGovernanceSummary | null;
+  lastImageStorageCleanup: ImageStorageCleanupResult | null;
+  isLoadingImageStorageGovernance: boolean;
+  isCleaningImageStorage: boolean;
 
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
@@ -137,8 +172,14 @@ type SettingsStore = {
   setImageTaskTimeoutSeconds: (value: string) => void;
   setUserDefaultConcurrentLimit: (value: string) => void;
   setUserDefaultRpmLimit: (value: string) => void;
+  setDefaultBillingType: (value: BillingType) => void;
+  setDefaultStandardBalance: (value: string) => void;
+  setDefaultSubscriptionQuota: (value: string) => void;
+  setDefaultSubscriptionPeriod: (value: BillingPeriod) => void;
   setImageRetentionDays: (value: string) => void;
+  setImageStorageLimitMb: (value: string) => void;
   setLogRetentionDays: (value: string) => void;
+  setDefaultLogView: (value: LogView) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
@@ -159,6 +200,10 @@ type SettingsStore = {
   saveLoginPageImage: (options: { file?: File | null; action: "keep" | "replace" | "remove" }) => Promise<boolean>;
   loadLogGovernance: (silent?: boolean) => Promise<void>;
   cleanupLogsByRetention: () => Promise<void>;
+  loadImageStorageGovernance: (silent?: boolean) => Promise<void>;
+  cleanupImageStorageByRetention: () => Promise<void>;
+  cleanupImageStorageByQuota: (includePublic?: boolean) => Promise<void>;
+  cleanupImageThumbnails: () => Promise<void>;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -206,6 +251,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   lastLogCleanup: null,
   isLoadingLogGovernance: true,
   isCleaningLogs: false,
+  imageStorageGovernance: null,
+  lastImageStorageCleanup: null,
+  isLoadingImageStorageGovernance: true,
+  isCleaningImageStorage: false,
 
   registerConfig: null,
   isLoadingRegister: true,
@@ -234,7 +283,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   isStartingImport: false,
 
   initialize: async () => {
-    await Promise.allSettled([get().loadConfig(), get().loadPools(), get().loadLogGovernance()]);
+    await Promise.allSettled([get().loadConfig(), get().loadPools(), get().loadLogGovernance(), get().loadImageStorageGovernance()]);
   },
 
   loadConfig: async () => {
@@ -267,8 +316,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_task_timeout_seconds: Math.min(3600, Math.max(30, Number(config.image_task_timeout_seconds) || 300)),
         user_default_concurrent_limit: Math.max(0, Number(config.user_default_concurrent_limit) || 0),
         user_default_rpm_limit: Math.max(0, Number(config.user_default_rpm_limit) || 0),
+        default_billing_type: normalizeDefaultBillingType(config.default_billing_type),
+        default_standard_balance: Math.max(0, Number(config.default_standard_balance) || 0),
+        default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
+        default_subscription_period: normalizeDefaultSubscriptionPeriod(config.default_subscription_period),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
+        image_storage_limit_mb: Math.max(0, Number(config.image_storage_limit_mb) || 0),
         log_retention_days: Math.min(3650, Math.max(1, Number(config.log_retention_days) || 7)),
+        default_log_view: normalizeDefaultLogView(config.default_log_view),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
@@ -321,8 +376,16 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.config ? { config: { ...state.config, image_retention_days: value } } : {});
   },
 
+  setImageStorageLimitMb: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_storage_limit_mb: value } } : {});
+  },
+
   setLogRetentionDays: (value) => {
     set((state) => state.config ? { config: { ...state.config, log_retention_days: value } } : {});
+  },
+
+  setDefaultLogView: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_log_view: normalizeDefaultLogView(value) } } : {});
   },
 
   setImageTaskTimeoutSeconds: (value) => {
@@ -335,6 +398,22 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setUserDefaultRpmLimit: (value) => {
     set((state) => state.config ? { config: { ...state.config, user_default_rpm_limit: value } } : {});
+  },
+
+  setDefaultBillingType: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_billing_type: value } } : {});
+  },
+
+  setDefaultStandardBalance: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_standard_balance: value } } : {});
+  },
+
+  setDefaultSubscriptionQuota: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_subscription_quota: value } } : {});
+  },
+
+  setDefaultSubscriptionPeriod: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_subscription_period: value } } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {
@@ -522,6 +601,67 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  loadImageStorageGovernance: async (silent = false) => {
+    if (!silent) set({ isLoadingImageStorageGovernance: true });
+    try {
+      const data = await fetchImageStorageGovernance();
+      set({ imageStorageGovernance: data.governance });
+    } catch (error) {
+      if (!silent) toast.error(error instanceof Error ? error.message : "加载图片存储数据失败");
+    } finally {
+      if (!silent) set({ isLoadingImageStorageGovernance: false });
+    }
+  },
+
+  cleanupImageStorageByRetention: async () => {
+    const { config } = get();
+    if (!config) return;
+    const retentionDays = Math.max(1, Number(config.image_retention_days) || 30);
+    set({ isCleaningImageStorage: true });
+    try {
+      const data = await cleanupImageStorage({ action: "retention", retention_days: retentionDays });
+      set({ lastImageStorageCleanup: data.cleanup, imageStorageGovernance: data.governance });
+      toast.success(`已清理 ${data.cleanup.deleted_images} 张过期图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理图片失败");
+    } finally {
+      set({ isCleaningImageStorage: false });
+    }
+  },
+
+  cleanupImageStorageByQuota: async (includePublic = false) => {
+    const { config } = get();
+    if (!config) return;
+    const maxMb = Math.max(0, Number(config.image_storage_limit_mb) || 0);
+    if (maxMb <= 0) {
+      toast.error("请先设置图片容量上限");
+      return;
+    }
+    set({ isCleaningImageStorage: true });
+    try {
+      const data = await cleanupImageStorage({ action: "quota", max_mb: maxMb, include_public: includePublic });
+      set({ lastImageStorageCleanup: data.cleanup, imageStorageGovernance: data.governance });
+      toast.success(`已按容量清理 ${data.cleanup.deleted_images} 张图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "按容量清理图片失败");
+    } finally {
+      set({ isCleaningImageStorage: false });
+    }
+  },
+
+  cleanupImageThumbnails: async () => {
+    set({ isCleaningImageStorage: true });
+    try {
+      const data = await cleanupImageStorage({ action: "thumbnails" });
+      set({ lastImageStorageCleanup: data.cleanup, imageStorageGovernance: data.governance });
+      toast.success(`已清理 ${data.cleanup.deleted_thumbnails} 个缩略图缓存`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理缩略图失败");
+    } finally {
+      set({ isCleaningImageStorage: false });
+    }
+  },
+
   loadRegister: async (silent = false) => {
     if (!silent) set({ isLoadingRegister: true });
     try {
@@ -594,7 +734,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => {
       if (!state.registerConfig) return {};
       const providers = [...(state.registerConfig.mail.providers || [])];
-      providers[index] = { ...(providers[index] || {}), ...updates };
+      providers[index] = { ...providers[index], ...updates };
       return { registerConfig: { ...state.registerConfig, mail: { ...state.registerConfig.mail, providers } } };
     });
   },

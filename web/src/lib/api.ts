@@ -2,7 +2,7 @@ import { httpRequest } from "@/lib/request";
 import type { LoginPageImageMode } from "@/lib/login-page-image-layout";
 
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
-export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
+export type AccountStatus = "正常" | "限流" | "异常" | "禁用" | "刷新中" | "过期待刷新";
 export const IMAGE_MODEL_OPTIONS = [
   { value: "auto", label: "Auto" },
   { value: "gpt-image-2", label: "gpt-image-2" },
@@ -121,6 +121,7 @@ export function supportsImageOutputCompression(format: ImageOutputFormat) {
 
 export type AuthRole = "admin" | "user";
 export type AnnouncementTarget = "login" | "image";
+export type LogView = "all" | "meaningful" | "business";
 
 export type PermissionMenu = {
   id: string;
@@ -176,6 +177,8 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  session_refreshed?: number;
+  session_failed?: number;
   errors?: Array<{ access_token?: string; account_id?: string; error: string }>;
   results?: AccountRefreshResult[];
   total?: number;
@@ -223,8 +226,14 @@ export type SettingsConfig = {
   image_task_timeout_seconds?: number | string;
   user_default_concurrent_limit?: number | string;
   user_default_rpm_limit?: number | string;
+  default_billing_type?: BillingType;
+  default_standard_balance?: number | string;
+  default_subscription_quota?: number | string;
+  default_subscription_period?: BillingPeriod;
   image_retention_days?: number | string;
+  image_storage_limit_mb?: number | string;
   log_retention_days?: number | string;
+  default_log_view?: LogView | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
@@ -259,6 +268,9 @@ export type ManagedImage = {
   owner_id?: string;
   owner_name?: string;
   visibility: ImageVisibility;
+  prompt?: string;
+  model?: ImageModel;
+  quality?: ImageQuality;
   date: string;
   size: number;
   url: string;
@@ -268,6 +280,23 @@ export type ManagedImage = {
   resolution?: string;
   resolution_preset?: string;
   requested_size?: string;
+  output_format?: ImageOutputFormat;
+  output_compression?: number;
+  background?: string;
+  moderation?: string;
+  style?: string;
+  partial_images?: number;
+  input_image_mask?: string;
+  reference_image_urls?: string[];
+  reference_images?: Array<{
+    path: string;
+    url?: string;
+    filename?: string;
+    content_type?: string;
+    size?: number;
+  }>;
+  share_prompt_parameters?: boolean;
+  share_reference_images?: boolean;
   aspect_ratio?: string;
   orientation?: string;
   megapixels?: number;
@@ -291,6 +320,7 @@ export type SystemLogFilters = {
   ip_address?: string;
   operation_type?: string;
   log_level?: string;
+  view?: LogView | string;
   start_date?: string;
   end_date?: string;
   start_time?: string;
@@ -309,6 +339,39 @@ export type LogCleanupResult = {
   cutoff_date: string;
   deleted: number;
   remaining: number;
+};
+
+export type ImageStorageGovernanceSummary = {
+  total_bytes: number;
+  images_bytes: number;
+  thumbnails_bytes: number;
+  metadata_bytes: number;
+  reference_bytes: number;
+  images_count: number;
+  public_images_count: number;
+  private_images_count: number;
+  thumbnail_files: number;
+  metadata_files: number;
+  reference_files: number;
+  limit_bytes: number;
+  over_limit_bytes: number;
+  oldest_image_at?: string;
+  latest_image_at?: string;
+};
+
+export type ImageStorageCleanupResult = {
+  retention_days?: number;
+  max_bytes?: number;
+  include_public?: boolean;
+  deleted_images: number;
+  deleted_thumbnails: number;
+  deleted_metadata_files: number;
+  deleted_reference_files: number;
+  deleted_bytes: number;
+  remaining_bytes: number;
+  over_limit_bytes: number;
+  preserved_public_images?: number;
+  action?: string;
 };
 
 export type ReleaseAsset = {
@@ -372,7 +435,7 @@ export type CreationTask = {
   created_at: string;
   updated_at: string;
   data?: CreationTaskData[];
-  output_statuses?: ("queued" | "running" | "success")[];
+  output_statuses?: ("queued" | "running" | "success" | "error" | "cancelled")[];
   error?: string;
   output_type?: "text";
   visibility?: ImageVisibility;
@@ -381,6 +444,13 @@ export type CreationTask = {
 export type CreationTaskMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+};
+
+export type FallbackReferenceImage = {
+  path?: string;
+  url?: string;
+  b64_json?: string;
+  outputFormat?: ImageOutputFormat;
 };
 
 export type ChatCompletionResponse = {
@@ -409,6 +479,8 @@ export type LoginResponse = {
   credential_id?: string;
   credential_name?: string;
   creation_concurrent_limit: number;
+  creation_rpm_limit: number;
+  billing?: BillingState | null;
   menu_paths?: string[];
   api_permissions?: string[];
   menus?: PermissionMenu[];
@@ -451,6 +523,80 @@ export type UserKey = {
   api_permissions?: string[];
 };
 
+export type BillingType = "standard" | "subscription";
+export type BillingPeriod = "daily" | "weekly" | "monthly";
+
+export type BillingStandardState = {
+  balance: number;
+  lifetime_consumed: number;
+  available_balance?: number;
+};
+
+export type BillingSubscriptionState = {
+  quota_limit: number;
+  quota_used: number;
+  manual_delta: number;
+  quota_period: BillingPeriod;
+  quota_period_started_at?: string;
+  quota_period_ends_at?: string;
+  remaining_quota?: number;
+};
+
+export type BillingState = {
+  type: BillingType;
+  unit: "image";
+  unlimited: boolean;
+  available: number;
+  standard?: BillingStandardState | null;
+  subscription?: BillingSubscriptionState | null;
+  limit_state?: "ok" | "insufficient" | "unlimited" | string;
+  updated_at?: string;
+};
+
+export type BillingAdjustment = {
+  id: string;
+  user_id: string;
+  operator_id?: string;
+  operator_name?: string;
+  billing_type: BillingType;
+  type: string;
+  amount?: number;
+  reason?: string;
+  before?: BillingState | Record<string, unknown>;
+  after?: BillingState | Record<string, unknown>;
+  created_at: string;
+};
+
+export type BillingAdjustmentPayload = {
+  type: string;
+  reason?: string;
+  amount?: number;
+  balance?: number;
+  quota_limit?: number;
+  quota_period?: BillingPeriod;
+  unlimited?: boolean;
+};
+
+export type BulkBillingAdjustmentPayload = {
+  scope: "users" | "role";
+  user_ids?: string[];
+  role_id?: string;
+  billing: BillingAdjustmentPayload;
+};
+
+export type BulkBillingAdjustmentResult = {
+  user_id: string;
+  billing?: BillingState | null;
+  adjustment?: BillingAdjustment;
+  error?: string;
+};
+
+export type BulkBillingAdjustmentSummary = {
+  total: number;
+  succeeded: number;
+  failed: number;
+};
+
 export type ManagedUser = {
   id: string;
   username?: string;
@@ -477,6 +623,7 @@ export type ManagedUser = {
   success_count?: number;
   failure_count?: number;
   quota_used?: number;
+  billing?: BillingState | null;
   usage_curve?: Array<{
     date: string;
     calls: number;
@@ -486,6 +633,26 @@ export type ManagedUser = {
   }>;
   menu_paths?: string[];
   api_permissions?: string[];
+  billing_adjustments?: BillingAdjustment[];
+};
+
+export type ManagedUsersQuery = {
+  page?: number | string;
+  page_size?: number | string;
+  search?: string;
+  provider?: "all" | "local" | "linuxdo" | string;
+  status?: "all" | "enabled" | "disabled" | string;
+  sort_by?: string;
+  sort_order?: "asc" | "desc" | string;
+  signal?: AbortSignal;
+};
+
+export type ManagedUsersResponse = {
+  items: ManagedUser[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 };
 
 export type ManagedRole = {
@@ -572,6 +739,10 @@ export async function verifySession(token: string) {
   });
 }
 
+export async function fetchProfile() {
+  return httpRequest<LoginResponse>("/api/profile");
+}
+
 export async function logout() {
   return httpRequest<{ ok: boolean }>("/auth/logout", {
     method: "POST",
@@ -637,6 +808,13 @@ export async function createAccounts(tokens: string[]) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
     body: { tokens },
+  });
+}
+
+export async function createAccountFromSession(sessionJson: string) {
+  return httpRequest<AccountMutationResponse>("/api/accounts/session", {
+    method: "POST",
+    body: { session_json: sessionJson },
   });
 }
 
@@ -734,6 +912,8 @@ export async function createImageGenerationTask(
     style?: string;
     partialImages?: number;
   },
+  frontendConversationId?: string,
+  fallbackReferenceImage?: FallbackReferenceImage,
 ) {
   return httpRequest<CreationTask>("/api/creation-tasks/image-generations", {
     method: "POST",
@@ -751,6 +931,8 @@ export async function createImageGenerationTask(
       ...(toolOptions?.style ? { style: toolOptions.style } : {}),
       ...(typeof toolOptions?.partialImages === "number" ? { partial_images: toolOptions.partialImages } : {}),
       ...(messages?.length ? { messages } : {}),
+      ...(frontendConversationId ? { frontend_conversation_id: frontendConversationId } : {}),
+      ...(fallbackReferenceImage ? { fallback_reference_image: fallbackReferenceImage } : {}),
       visibility,
       n: count,
     },
@@ -777,6 +959,8 @@ export async function createImageEditTask(
     partialImages?: number;
     inputImageMask?: string;
   },
+  frontendConversationId?: string,
+  fallbackReferenceImage?: FallbackReferenceImage,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -822,6 +1006,12 @@ export async function createImageEditTask(
   if (messages?.length) {
     formData.append("messages", JSON.stringify(messages));
   }
+  if (frontendConversationId) {
+    formData.append("frontend_conversation_id", frontendConversationId);
+  }
+  if (fallbackReferenceImage) {
+    formData.append("fallback_reference_image", JSON.stringify(fallbackReferenceImage));
+  }
   formData.append("visibility", visibility);
   formData.append("n", String(count));
 
@@ -836,15 +1026,32 @@ export async function createChatCompletionTask(
   prompt: string,
   model: ImageModel,
   messages: CreationTaskMessage[],
+  referenceImages?: { name: string; dataUrl: string }[],
 ) {
+  const body: Record<string, unknown> = {
+    client_task_id: clientTaskId,
+    prompt,
+    model,
+    messages,
+  };
+
+  if (referenceImages && referenceImages.length > 0) {
+    const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+      { type: "text", text: prompt },
+      ...referenceImages.map((img) => ({
+        type: "image_url" as const,
+        image_url: { url: img.dataUrl },
+      })),
+    ];
+    body.messages = [
+      ...messages,
+      { role: "user" as const, content },
+    ];
+  }
+
   return httpRequest<CreationTask>("/api/creation-tasks/chat-completions", {
     method: "POST",
-    body: {
-      client_task_id: clientTaskId,
-      prompt,
-      model,
-      messages,
-    },
+    body,
   });
 }
 
@@ -932,12 +1139,21 @@ export async function fetchManagedImages(
   };
 }
 
-export async function updateManagedImageVisibility(path: string, visibility: ImageVisibility) {
+export async function updateManagedImageVisibility(
+  path: string,
+  visibility: ImageVisibility,
+  options: { sharePromptParameters?: boolean; shareReferenceImages?: boolean } = {},
+) {
   return httpRequest<{ item: Partial<ManagedImage> & { path: string; visibility: ImageVisibility } }>(
     "/api/images/visibility",
     {
       method: "PATCH",
-      body: { path, visibility },
+      body: {
+        path,
+        visibility,
+        ...(visibility === "public" && options.sharePromptParameters ? { share_prompt_parameters: true } : {}),
+        ...(visibility === "public" && options.sharePromptParameters && options.shareReferenceImages ? { share_reference_images: true } : {}),
+      },
     },
   );
 }
@@ -952,12 +1168,12 @@ export async function deleteManagedImages(paths: string[]) {
 export async function fetchSystemLogs(filters: SystemLogFilters) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
-    if (value === undefined || value === null || value === "" || value === "all") {
+    if (value === undefined || value === null || value === "" || (key !== "view" && value === "all")) {
       continue;
     }
     params.set(key, String(value));
   }
-  return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+  return httpRequest<{ items: SystemLog[]; view?: LogView | string }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
 export async function fetchLogGovernance() {
@@ -969,6 +1185,26 @@ export async function cleanupLogs(retentionDays: number) {
     method: "POST",
     body: { retention_days: retentionDays },
   });
+}
+
+export async function fetchImageStorageGovernance() {
+  return httpRequest<{ governance: ImageStorageGovernanceSummary }>("/api/images/storage-governance");
+}
+
+export async function cleanupImageStorage(body: {
+  action: "retention" | "quota" | "thumbnails" | "all";
+  retention_days?: number;
+  max_mb?: number;
+  include_public?: boolean;
+  clear_thumbnails?: boolean;
+}) {
+  return httpRequest<{ cleanup: ImageStorageCleanupResult; governance: ImageStorageGovernanceSummary }>(
+    "/api/images/storage-governance",
+    {
+      method: "POST",
+      body,
+    },
+  );
 }
 
 export async function checkSystemUpdates(force = false) {
@@ -1081,8 +1317,30 @@ function managedUserPath(userId: string) {
   return `/api/admin/users/${encodeURIComponent(userId)}`;
 }
 
-export async function fetchManagedUsers() {
-  return httpRequest<{ items: ManagedUser[] }>("/api/admin/users");
+export async function fetchManagedUsers(query: ManagedUsersQuery = {}) {
+  const params = new URLSearchParams();
+  if (query.page) params.set("page", String(query.page));
+  if (query.page_size) params.set("page_size", String(query.page_size));
+  if (query.search?.trim()) params.set("search", query.search.trim());
+  if (query.provider && query.provider !== "all") params.set("provider", query.provider);
+  if (query.status && query.status !== "all") params.set("status", query.status);
+  if (query.sort_by) params.set("sort_by", query.sort_by);
+  if (query.sort_order) params.set("sort_order", query.sort_order);
+  const data = await httpRequest<Partial<ManagedUsersResponse>>(
+    `/api/admin/users${params.toString() ? `?${params.toString()}` : ""}`,
+    { signal: query.signal },
+  );
+  return {
+    items: Array.isArray(data.items) ? data.items : [],
+    total: Number(data.total ?? data.items?.length ?? 0),
+    page: Number(data.page ?? query.page ?? 1),
+    page_size: Number(data.page_size ?? query.page_size ?? 20),
+    total_pages: Number(data.total_pages ?? 1),
+  };
+}
+
+export async function fetchManagedUser(userId: string) {
+  return httpRequest<{ item: ManagedUser }>(managedUserPath(userId));
 }
 
 export async function fetchPermissionCatalog() {
@@ -1126,7 +1384,7 @@ export async function deleteManagedRole(roleId: string) {
 }
 
 export async function createManagedUser(payload: CreateManagedUserPayload) {
-  return httpRequest<{ item: ManagedUser; items: ManagedUser[] }>("/api/admin/users", {
+  return httpRequest<{ item: ManagedUser; items?: ManagedUser[] } & Partial<ManagedUsersResponse>>("/api/admin/users", {
     method: "POST",
     body: payload,
   });
@@ -1134,11 +1392,38 @@ export async function createManagedUser(payload: CreateManagedUserPayload) {
 
 export async function updateManagedUser(
   userId: string,
-  updates: { enabled?: boolean; name?: string; role_id?: string },
+  updates: { enabled?: boolean; name?: string; role_id?: string; billing?: BillingAdjustmentPayload },
 ) {
-  return httpRequest<{ item: ManagedUser; items: ManagedUser[] }>(managedUserPath(userId), {
+  return httpRequest<{ item: ManagedUser; items?: ManagedUser[] } & Partial<ManagedUsersResponse>>(managedUserPath(userId), {
     method: "POST",
     body: updates,
+  });
+}
+
+export async function fetchBillingAdjustments(userId: string, limit = 20) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return httpRequest<{ items: BillingAdjustment[] }>(`${managedUserPath(userId)}/billing-adjustments?${params.toString()}`);
+}
+
+export async function createBillingAdjustment(userId: string, payload: BillingAdjustmentPayload) {
+  return httpRequest<
+    { item?: ManagedUser; billing?: BillingState; adjustment?: BillingAdjustment; items?: ManagedUser[] } & Partial<ManagedUsersResponse>
+  >(`${managedUserPath(userId)}/billing-adjustments`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function createBulkBillingAdjustment(payload: BulkBillingAdjustmentPayload) {
+  return httpRequest<
+    {
+      results?: BulkBillingAdjustmentResult[];
+      summary?: BulkBillingAdjustmentSummary;
+      items?: ManagedUser[];
+    } & Partial<ManagedUsersResponse>
+  >("/api/admin/users/billing-adjustments/bulk", {
+    method: "POST",
+    body: payload,
   });
 }
 
@@ -1147,7 +1432,7 @@ export async function revealManagedUserKey(userId: string) {
 }
 
 export async function resetManagedUserKey(userId: string, name?: string) {
-  return httpRequest<{ item: ManagedUser; api_key: UserKey; key: string; items: ManagedUser[] }>(
+  return httpRequest<{ item: ManagedUser; api_key: UserKey; key: string; items?: ManagedUser[] } & Partial<ManagedUsersResponse>>(
     `${managedUserPath(userId)}/reset-key`,
     {
       method: "POST",
@@ -1157,7 +1442,7 @@ export async function resetManagedUserKey(userId: string, name?: string) {
 }
 
 export async function deleteManagedUser(userId: string) {
-  return httpRequest<{ items: ManagedUser[] }>(managedUserPath(userId), {
+  return httpRequest<{ items?: ManagedUser[] } & Partial<ManagedUsersResponse>>(managedUserPath(userId), {
     method: "DELETE",
   });
 }

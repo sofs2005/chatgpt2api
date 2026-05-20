@@ -5,12 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"regexp"
 	"strings"
 	"time"
 
 	"chatgpt2api/internal/backend"
+	"chatgpt2api/internal/service"
+	tooladapter "chatgpt2api/internal/toolcall"
 	"chatgpt2api/internal/util"
 )
 
@@ -21,6 +22,13 @@ type StreamResult struct {
 }
 
 const ImageOutputSlotAcquirerPayloadKey = "image_output_slot_acquirer"
+
+// ImageOutputChargePayloadKey names the per-image-output billing charge hook
+// carried through the request body. The value must be an ImageOutputCharger
+// (or a compatible func(index int) error). The hook runs before each image
+// is persisted to disk and can veto the save by returning an error; returning
+// a service.BillingLimitError propagates as the request-level error.
+const ImageOutputChargePayloadKey = "image_output_charge"
 
 const xmlToolRule = "Tool output adapter: when calling tools, output ONLY this XML and no prose/markdown:\n<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters><PARAM><![CDATA[value]]></PARAM></parameters></tool_call></tool_calls>"
 
@@ -40,7 +48,7 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	outputCompression, hasOutputCompression := normalizedImageOutputCompression(body["output_compression"])
 	responseFormat := firstNonEmpty(util.Clean(body["response_format"]), "b64_json")
 	baseURL := util.Clean(body["base_url"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), MessageAsError: true, AcquireImageOutputSlot: imageOutputSlotAcquirer(body)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), FrontendConversationID: util.Clean(body["frontend_conversation_id"]), FallbackReferenceImage: util.Clean(body["fallback_reference_image_b64"]), MessageAsError: true, AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
@@ -77,11 +85,14 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		BaseURL:                util.Clean(body["base_url"]),
 		OwnerID:                util.Clean(body["owner_id"]),
 		OwnerName:              util.Clean(body["owner_name"]),
+		FrontendConversationID: util.Clean(body["frontend_conversation_id"]),
+		FallbackReferenceImage: util.Clean(body["fallback_reference_image_b64"]),
 		Messages:               NormalizeMessages(util.AsMapSlice(body["messages"]), nil),
 		Images:                 encoded,
 		InputImageMask:         responseImageMask(body["input_image_mask"]),
 		MessageAsError:         true,
 		AcquireImageOutputSlot: imageOutputSlotAcquirer(body),
+		ChargeImageOutput:      imageOutputCharger(body),
 	}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
@@ -123,6 +134,17 @@ func imageOutputSlotAcquirer(body map[string]any) ImageOutputSlotAcquirer {
 	}
 }
 
+func imageOutputCharger(body map[string]any) ImageOutputCharger {
+	switch charge := body[ImageOutputChargePayloadKey].(type) {
+	case ImageOutputCharger:
+		return charge
+	case func(int) error:
+		return charge
+	default:
+		return nil
+	}
+}
+
 func StreamImageChunks(outputs <-chan ImageOutput) <-chan map[string]any {
 	out := make(chan map[string]any)
 	go func() {
@@ -134,33 +156,204 @@ func StreamImageChunks(outputs <-chan ImageOutput) <-chan map[string]any {
 	return out
 }
 
+func (e *Engine) textBackendWithRetry(exhaustedTokens map[string]struct{}) (*backend.Client, string, bool) {
+	token, ok := e.Accounts.GetTextAccessTokenWithRetry(exhaustedTokens)
+	if !ok {
+		return nil, "", false
+	}
+	return e.TextBackend(token), token, true
+}
+
+func (e *Engine) markTextTokenExpiredForRetry(accessToken string, err error, exhaustedTokens map[string]struct{}) bool {
+	if err == nil || !service.IsAccountTokenExpiredErrorMessage(err.Error()) {
+		return false
+	}
+	exhaustedTokens[accessToken] = struct{}{}
+	if _, shouldRetry := e.Accounts.HandleTokenExpiredOnRequest(accessToken); shouldRetry {
+		return true
+	}
+	e.Accounts.ApplyAccountError(accessToken, "text_stream", err)
+	return false
+}
+
+func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, firstClient *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+	out := make(chan string)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		exhaustedTokens := map[string]struct{}{}
+		client := firstClient
+		var lastErr error
+		for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
+			if client == nil {
+				var ok bool
+				client, _, ok = e.textBackendWithRetry(exhaustedTokens)
+				if !ok {
+					break
+				}
+			}
+			deltas, upstreamErr := e.StreamTextDeltas(ctx, client, request)
+			sent := false
+			for delta := range deltas {
+				sent = true
+				select {
+				case out <- delta:
+				case <-ctx.Done():
+					errOut <- ctx.Err()
+					return
+				}
+			}
+			err := <-upstreamErr
+			if err == nil {
+				errOut <- nil
+				return
+			}
+			lastErr = err
+			if sent || !e.markTextTokenExpiredForRetry(client.AccessToken, err, exhaustedTokens) {
+				errOut <- err
+				return
+			}
+			client = nil
+		}
+		if lastErr != nil {
+			errOut <- lastErr
+			return
+		}
+		errOut <- fmt.Errorf("no available text access token")
+	}()
+	return out, errOut
+}
+
+func (e *Engine) collectTextWithTokenRetry(ctx context.Context, request ConversationRequest) (string, error) {
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, nil, request)
+	var parts []string
+	for delta := range deltas {
+		parts = append(parts, delta)
+	}
+	return strings.Join(parts, ""), <-errCh
+}
+
+func (e *Engine) collectVisionTextWithTokenRetry(ctx context.Context, messages []map[string]any, model string, images []backend.VisionImage) (string, error) {
+	exhaustedTokens := map[string]struct{}{}
+	var lastErr error
+	for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
+		client, token, ok := e.textBackendWithRetry(exhaustedTokens)
+		if !ok {
+			break
+		}
+		text, err := e.CollectVisionText(ctx, client, messages, model, images)
+		if err == nil {
+			return text, nil
+		}
+		lastErr = err
+		if !e.markTextTokenExpiredForRetry(token, err, exhaustedTokens) {
+			return "", err
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("no available text access token")
+}
+
+func (e *Engine) streamVisionDeltasWithTokenRetry(ctx context.Context, firstClient *backend.Client, messages []map[string]any, model string, images []backend.VisionImage) (<-chan string, <-chan error) {
+	out := make(chan string)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		exhaustedTokens := map[string]struct{}{}
+		client := firstClient
+		var lastErr error
+		for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
+			if client == nil {
+				var ok bool
+				client, _, ok = e.textBackendWithRetry(exhaustedTokens)
+				if !ok {
+					break
+				}
+			}
+			deltas, upstreamErr := client.StreamMultimodalConversation(ctx, messages, model, images)
+			sent := false
+			for delta := range deltas {
+				sent = true
+				select {
+				case out <- delta:
+				case <-ctx.Done():
+					errOut <- ctx.Err()
+					return
+				}
+			}
+			err := <-upstreamErr
+			if err == nil {
+				errOut <- nil
+				return
+			}
+			lastErr = err
+			if sent || !e.markTextTokenExpiredForRetry(client.AccessToken, err, exhaustedTokens) {
+				errOut <- err
+				return
+			}
+			client = nil
+		}
+		if lastErr != nil {
+			errOut <- lastErr
+			return
+		}
+		errOut <- fmt.Errorf("no available text access token")
+	}()
+	return out, errOut
+}
+
 func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {
 	if util.ToBool(body["stream"]) {
 		var items <-chan map[string]any
 		var errCh <-chan error
 		if IsImageChatRequest(body) {
 			items, errCh = e.ImageChatEvents(ctx, body)
+		} else if HasVisionImages(body) {
+			model, messages, images, err := VisionChatParts(body)
+			if err != nil {
+				return nil, nil, err
+			}
+			items, errCh = e.StreamVisionChatCompletionWithTools(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), messages, model, images, body["tools"], body["tool_choice"])
 		} else {
 			model, messages, err := TextChatParts(body)
 			if err != nil {
 				return nil, nil, err
 			}
-			items, errCh = e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), messages, model)
+			items, errCh = e.StreamTextChatCompletionWithTools(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), messages, model, body["tools"], body["tool_choice"])
 		}
 		return nil, &StreamResult{Items: items, Err: errCh, Kind: "openai"}, nil
 	}
 	if IsImageChatRequest(body) {
 		return e.ImageChatResponse(ctx, body)
 	}
+	if HasVisionImages(body) {
+		model, messages, images, err := VisionChatParts(body)
+		if err != nil {
+			return nil, nil, err
+		}
+		result, err := e.VisionChatResponse(ctx, body, model, messages, images)
+		if err != nil {
+			return nil, nil, err
+		}
+		return result, nil, nil
+	}
 	model, messages, err := TextChatParts(body)
 	if err != nil {
 		return nil, nil, err
 	}
-	text, err := e.CollectText(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), ConversationRequest{Model: model, Messages: messages})
+	text, err := e.collectTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages})
 	if err != nil {
 		return nil, nil, err
 	}
-	return CompletionResponse(model, text, 0, messages), nil, nil
+	result, err := CompletionResponseWithTools(model, text, 0, messages, body["tools"], body["tool_choice"])
+	if err != nil {
+		return nil, nil, err
+	}
+	return result, nil, nil
 }
 
 func CompletionChunk(model string, delta map[string]any, finishReason any, completionID string, created int64) map[string]any {
@@ -189,35 +382,243 @@ func CompletionResponse(model, content string, created int64, messages []map[str
 	}
 }
 
-func (e *Engine) StreamTextChatCompletion(ctx context.Context, client *backend.Client, messages []map[string]any, model string) (<-chan map[string]any, <-chan error) {
+func CompletionResponseWithTools(model, content string, created int64, messages []map[string]any, tools any, choice any) (map[string]any, error) {
+	policy := tooladapter.PolicyFromToolChoice(choice)
+	toolNames := tooladapter.ToolNames(tools)
+	if policy.Mode == tooladapter.ChoiceNone {
+		return CompletionResponse(model, content, created, messages), nil
+	}
+	if err := validateToolChoice(policy, toolNames); err != nil {
+		return nil, HTTPError{Status: 400, Message: err.Error()}
+	}
+	if len(toolNames) == 0 {
+		return CompletionResponse(model, content, created, messages), nil
+	}
+	calls, visible, err := tooladapter.Parse(content, toolNames, policy)
+	if err != nil {
+		return nil, HTTPError{Status: 400, Message: err.Error()}
+	}
+	calls = tooladapter.NormalizeForSchemas(calls, tools)
+	if len(calls) == 0 {
+		return CompletionResponse(model, visible, created, messages), nil
+	}
+	response := CompletionResponse(model, "", created, messages)
+	choiceMap := response["choices"].([]map[string]any)[0]
+	message := choiceMap["message"].(map[string]any)
+	message["content"] = nil
+	message["tool_calls"] = tooladapter.FormatOpenAI(calls)
+	choiceMap["finish_reason"] = "tool_calls"
+	return response, nil
+}
+
+func streamChatCompletionEvents(ctx context.Context, model string, deltas <-chan string, upstreamErr <-chan error, tools any, choice any) (<-chan map[string]any, <-chan error) {
+	policy := tooladapter.PolicyFromToolChoice(choice)
+	toolNames := tooladapter.ToolNames(tools)
+	if err := preflightToolChoiceWithoutToolsError(policy, toolNames); err != nil {
+		return streamHTTPError(err)
+	}
 	out := make(chan map[string]any)
 	errOut := make(chan error, 1)
 	go func() {
 		defer close(out)
 		defer close(errOut)
-		deltas, errCh := e.StreamTextDeltas(ctx, client, ConversationRequest{Model: model, Messages: messages})
 		id := "chatcmpl-" + util.NewHex(32)
 		created := time.Now().Unix()
+		toolMode := len(toolNames) > 0 && policy.Mode != tooladapter.ChoiceNone
+		current := ""
+		streamedLen := 0
 		sentRole := false
-		for deltaText := range deltas {
-			if !sentRole {
-				sentRole = true
-				out <- CompletionChunk(model, map[string]any{"role": "assistant", "content": deltaText}, nil, id, created)
-			} else {
-				out <- CompletionChunk(model, map[string]any{"content": deltaText}, nil, id, created)
+
+		send := func(chunk map[string]any) bool {
+			select {
+			case out <- chunk:
+				return true
+			case <-ctx.Done():
+				errOut <- ctx.Err()
+				return false
 			}
 		}
-		if err := <-errCh; err != nil {
-			errOut <- err
+		sendText := func(text string) bool {
+			if text == "" {
+				return true
+			}
+			if !sentRole {
+				sentRole = true
+				return send(CompletionChunk(model, map[string]any{"role": "assistant", "content": text}, nil, id, created))
+			}
+			return send(CompletionChunk(model, map[string]any{"content": text}, nil, id, created))
+		}
+		sendRoleIfNeeded := func() bool {
+			if sentRole {
+				return true
+			}
+			sentRole = true
+			return send(CompletionChunk(model, map[string]any{"role": "assistant", "content": ""}, nil, id, created))
+		}
+
+		for deltaText := range deltas {
+			current += deltaText
+			visible := current
+			if toolMode {
+				visible = safeRawToolVisiblePrefix(current)
+			}
+			if len(visible) >= streamedLen {
+				next := visible[streamedLen:]
+				if next != "" {
+					if !sendText(next) {
+						return
+					}
+					streamedLen = len(visible)
+				}
+			}
+		}
+		if upstreamErr != nil {
+			if err := <-upstreamErr; err != nil {
+				errOut <- err
+				return
+			}
+		}
+		if toolMode {
+			calls, _, err := tooladapter.Parse(current, toolNames, policy)
+			if err != nil {
+				errOut <- HTTPError{Status: 400, Message: err.Error()}
+				return
+			}
+			calls = tooladapter.NormalizeForSchemas(calls, tools)
+			if len(calls) > 0 {
+				if !sendRoleIfNeeded() {
+					return
+				}
+				if !send(CompletionChunk(model, map[string]any{"tool_calls": tooladapter.FormatOpenAIStream(calls)}, "tool_calls", id, created)) {
+					return
+				}
+				errOut <- nil
+				return
+			}
+			if streamedLen <= len(current) {
+				if !sendText(current[streamedLen:]) {
+					return
+				}
+			}
+		}
+		if !sendRoleIfNeeded() {
 			return
 		}
-		if !sentRole {
-			out <- CompletionChunk(model, map[string]any{"role": "assistant", "content": ""}, nil, id, created)
+		if !send(CompletionChunk(model, map[string]any{}, "stop", id, created)) {
+			return
 		}
-		out <- CompletionChunk(model, map[string]any{}, "stop", id, created)
 		errOut <- nil
 	}()
 	return out, errOut
+}
+
+func streamHTTPError(err error) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		errOut <- HTTPError{Status: 400, Message: err.Error()}
+	}()
+	return out, errOut
+}
+
+func safeRawToolVisiblePrefix(text string) string {
+	masked := maskFencedToolBlocks(text)
+	markerStart := -1
+	for _, marker := range toolMarkupMarkers {
+		if pos := strings.Index(masked, marker); pos >= 0 && (markerStart < 0 || pos < markerStart) {
+			markerStart = pos
+		}
+	}
+	if markerStart >= 0 {
+		return text[:markerStart]
+	}
+	for keep := len(text) - 1; keep >= 0; keep-- {
+		suffix := text[keep:]
+		for _, marker := range toolMarkupMarkers {
+			if strings.HasPrefix(marker, suffix) {
+				return text[:keep]
+			}
+		}
+	}
+	return text
+}
+
+var toolMarkupMarkers = []string{"<tool_calls", "<tool_call", "<function_call", "<invoke"}
+
+func maskFencedToolBlocks(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	inFence := false
+	for i := 0; i < len(text); {
+		if strings.HasPrefix(text[i:], "```") {
+			inFence = !inFence
+			b.WriteString("   ")
+			i += 3
+			continue
+		}
+		if inFence {
+			b.WriteByte(' ')
+		} else {
+			b.WriteByte(text[i])
+		}
+		i++
+	}
+	return b.String()
+}
+
+func (e *Engine) StreamTextChatCompletion(ctx context.Context, client *backend.Client, messages []map[string]any, model string) (<-chan map[string]any, <-chan error) {
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, client, ConversationRequest{Model: model, Messages: messages})
+	return streamChatCompletionEvents(ctx, model, deltas, errCh, nil, nil)
+}
+
+func (e *Engine) StreamTextChatCompletionWithTools(ctx context.Context, client *backend.Client, messages []map[string]any, model string, tools any, choice any) (<-chan map[string]any, <-chan error) {
+	if err := preflightToolChoiceWithoutToolsError(tooladapter.PolicyFromToolChoice(choice), tooladapter.ToolNames(tools)); err != nil {
+		return streamHTTPError(err)
+	}
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, client, ConversationRequest{Model: model, Messages: messages})
+	return streamChatCompletionEvents(ctx, model, deltas, errCh, tools, choice)
+}
+
+func (e *Engine) StreamVisionChatCompletion(ctx context.Context, client *backend.Client, messages []map[string]any, model string, images []UploadedImage) (<-chan map[string]any, <-chan error) {
+	return e.StreamVisionChatCompletionWithTools(ctx, client, messages, model, images, nil, nil)
+}
+
+func (e *Engine) StreamVisionChatCompletionWithTools(ctx context.Context, client *backend.Client, messages []map[string]any, model string, images []UploadedImage, tools any, choice any) (<-chan map[string]any, <-chan error) {
+	if err := preflightToolChoiceWithoutToolsError(tooladapter.PolicyFromToolChoice(choice), tooladapter.ToolNames(tools)); err != nil {
+		return streamHTTPError(err)
+	}
+	visionImages := make([]backend.VisionImage, len(images))
+	for i, img := range images {
+		visionImages[i] = backend.VisionImage{
+			Data:        img.Data,
+			ContentType: img.ContentType,
+			FileName:    img.Filename,
+		}
+	}
+	deltas, errCh := e.streamVisionDeltasWithTokenRetry(ctx, client, messages, model, visionImages)
+	return streamChatCompletionEvents(ctx, model, deltas, errCh, tools, choice)
+}
+
+func (e *Engine) VisionChatResponse(ctx context.Context, body map[string]any, model string, messages []map[string]any, images []UploadedImage) (map[string]any, error) {
+	visionImages := make([]backend.VisionImage, len(images))
+	for i, img := range images {
+		visionImages[i] = backend.VisionImage{
+			Data:        img.Data,
+			ContentType: img.ContentType,
+			FileName:    img.Filename,
+		}
+	}
+	text, err := e.collectVisionTextWithTokenRetry(ctx, messages, model, visionImages)
+	if err != nil {
+		return nil, err
+	}
+	usageMessages := TokenCountMessages(util.AsMapSlice(body["messages"]), ChatToolPrompt(body))
+	if len(usageMessages) == 0 {
+		usageMessages = messages
+	}
+	return CompletionResponseWithTools(model, text, 0, usageMessages, body["tools"], body["tool_choice"])
 }
 
 func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {
@@ -230,13 +631,17 @@ func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {
 	return nil, HTTPError{Status: 400, Message: "messages or prompt is required"}
 }
 
+func ChatToolPrompt(body map[string]any) string {
+	return tooladapter.BuildPrompt(body["tools"], tooladapter.PolicyFromToolChoice(body["tool_choice"]))
+}
+
 func TextChatParts(body map[string]any) (string, []map[string]any, error) {
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	messages, err := ChatMessagesFromBody(body)
 	if err != nil {
 		return "", nil, err
 	}
-	return model, NormalizeMessages(messages, nil), nil
+	return model, NormalizeMessages(messages, ChatToolPrompt(body)), nil
 }
 
 func IsImageChatRequest(body map[string]any) bool {
@@ -251,13 +656,44 @@ func IsImageChatRequest(body map[string]any) bool {
 	return false
 }
 
+func HasVisionImages(body map[string]any) bool {
+	if IsImageChatRequest(body) {
+		return false
+	}
+	for _, msg := range util.AsMapSlice(body["messages"]) {
+		if len(ExtractImagesFromMessageContent(msg["content"])) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func ExtractVisionImages(body map[string]any) []UploadedImage {
+	var images []UploadedImage
+	for _, msg := range util.AsMapSlice(body["messages"]) {
+		images = append(images, ExtractImagesFromMessageContent(msg["content"])...)
+	}
+	return images
+}
+
+func VisionChatParts(body map[string]any) (string, []map[string]any, []UploadedImage, error) {
+	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	rawMessages, err := ChatMessagesFromBody(body)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	messages := NormalizeMessages(rawMessages, ChatToolPrompt(body))
+	images := ExtractVisionImages(body)
+	return model, messages, images, nil
+}
+
 func (e *Engine) ImageChatResponse(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {
 	model, prompt, n, images, messages, err := ChatImageArgs(body)
 	if err != nil {
 		return nil, nil, err
 	}
 	size := util.Clean(body["size"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
@@ -283,7 +719,7 @@ func (e *Engine) ImageChatEvents(ctx context.Context, body map[string]any) (<-ch
 			return
 		}
 		size := util.Clean(body["size"])
-		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body)}
+		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 		if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 			request.PartialImages = &partialImages
 		}
@@ -567,6 +1003,7 @@ func (e *Engine) ResponseEventsScoped(ctx context.Context, body map[string]any, 
 		return nil, nil, err
 	}
 	request.AcquireImageOutputSlot = imageOutputSlotAcquirer(body)
+	request.ChargeImageOutput = imageOutputCharger(body)
 	var currentImages []string
 	if inputImages := ExtractResponseImages(body["input"]); len(inputImages) > 0 {
 		currentImages = EncodeImages(inputImages)
@@ -659,7 +1096,7 @@ func (e *Engine) StreamTextResponse(ctx context.Context, body map[string]any) (<
 }
 
 func (e *Engine) StreamTextResponseWithMessages(ctx context.Context, model string, messages []map[string]any) (<-chan map[string]any, <-chan error) {
-	deltas, errCh := e.StreamTextDeltas(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), ConversationRequest{Model: model, Messages: messages})
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), ConversationRequest{Model: model, Messages: messages})
 	return streamTextResponseEvents(ctx, model, deltas, errCh)
 }
 
@@ -767,7 +1204,7 @@ func StreamImageResponse(outputs <-chan ImageOutput, prompt, model string) (<-ch
 				return
 			}
 		}
-		errCh <- fmt.Errorf("image generation failed")
+		errCh <- fmt.Errorf("upstream image stream completed without image output")
 	}()
 	return out, errCh
 }
@@ -973,42 +1410,30 @@ func (e *Engine) HandleMessages(ctx context.Context, body map[string]any) (map[s
 	if err := <-errCh; err != nil {
 		return nil, nil, err
 	}
-	return MessageResponse(request.Model, text, CountMessageTokens(request.Messages, request.Model), CountTextTokens(text, request.Model), request.Tools), nil, nil
+	response, err := MessageResponseWithChoice(request.Model, text, CountMessageTokens(request.Messages, request.Model), CountTextTokens(text, request.Model), request.Tools, request.ToolChoice)
+	if err != nil {
+		return nil, nil, err
+	}
+	return response, nil, nil
 }
 
 type MessageRequest struct {
-	Messages []map[string]any
-	Model    string
-	Tools    any
+	Messages   []map[string]any
+	Model      string
+	Tools      any
+	ToolChoice any
 }
 
 func MessageRequestFromBody(e *Engine, body map[string]any) MessageRequest {
 	payload := util.CopyMap(body)
+	policy := tooladapter.PolicyFromToolChoice(payload["tool_choice"])
 	payload["messages"] = PreprocessMessages(payload["messages"])
-	payload["system"] = MergeSystem(payload["system"], BuildToolPrompt(payload["tools"]))
-	return MessageRequest{Messages: NormalizeMessages(payload["messages"], payload["system"]), Model: firstNonEmpty(util.Clean(payload["model"]), "auto"), Tools: payload["tools"]}
+	payload["system"] = MergeSystem(payload["system"], tooladapter.BuildPrompt(payload["tools"], policy))
+	return MessageRequest{Messages: NormalizeMessages(payload["messages"], payload["system"]), Model: firstNonEmpty(util.Clean(payload["model"]), "auto"), Tools: payload["tools"], ToolChoice: payload["tool_choice"]}
 }
 
 func BuildToolPrompt(tools any) string {
-	var blocks []string
-	for _, raw := range anyList(tools) {
-		tool, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		fn := util.StringMap(tool["function"])
-		name := firstNonEmpty(util.Clean(tool["name"]), util.Clean(fn["name"]))
-		desc := firstNonEmpty(util.Clean(tool["description"]), util.Clean(fn["description"]))
-		schema := firstNonNil(tool["input_schema"], tool["parameters"], fn["input_schema"], fn["parameters"], map[string]any{})
-		if name != "" {
-			data, _ := json.Marshal(schema)
-			blocks = append(blocks, fmt.Sprintf("Tool: %s\nDescription: %s\nParameters: %s", name, desc, string(data)))
-		}
-	}
-	if len(blocks) == 0 {
-		return ""
-	}
-	return "Available tools:\n" + strings.Join(blocks, "\n") + "\n\nTool use rules:\n- If the user asks to list/read/search files, inspect project state, run a command, or answer from local code, you MUST call a suitable tool first. Do not say you cannot access files.\n- To call tools, output ONLY XML and no prose/markdown:\n<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters><PARAM><![CDATA[value]]></PARAM></parameters></tool_call></tool_calls>\n- Put parameters under <parameters> using the exact schema names."
+	return tooladapter.BuildPrompt(tools, tooladapter.ChoicePolicy{Mode: tooladapter.ChoiceAuto})
 }
 
 func MergeSystem(system any, extra string) any {
@@ -1119,31 +1544,101 @@ func preprocessBlock(block any) any {
 }
 
 func MessageResponse(model, text string, inputTokens, outputTokens int, tools any) map[string]any {
-	content, stopReason := ContentBlocks(text, tools)
-	return map[string]any{"id": "msg_" + util.NewUUID(), "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stopReason, "stop_sequence": nil, "usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens}}
+	response, err := MessageResponseWithChoice(model, text, inputTokens, outputTokens, tools, nil)
+	if err != nil {
+		return map[string]any{"id": "msg_" + util.NewUUID(), "type": "message", "role": "assistant", "model": model, "content": []map[string]any{{"type": "text", "text": StripToolMarkup(text)}}, "stop_reason": "end_turn", "stop_sequence": nil, "usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens}}
+	}
+	return response
+}
+
+func MessageResponseWithChoice(model, text string, inputTokens, outputTokens int, tools any, choice any) (map[string]any, error) {
+	content, stopReason, err := ContentBlocksWithChoice(text, tools, choice)
+	if err != nil {
+		return nil, HTTPError{Status: 400, Message: err.Error()}
+	}
+	return map[string]any{"id": "msg_" + util.NewUUID(), "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stopReason, "stop_sequence": nil, "usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens}}, nil
 }
 
 func ContentBlocks(text string, tools any) ([]map[string]any, string) {
-	var calls []ToolCall
-	if len(anyList(tools)) > 0 {
-		calls = ParseToolCalls(text)
+	content, stopReason, err := ContentBlocksWithChoice(text, tools, nil)
+	if err != nil {
+		return []map[string]any{{"type": "text", "text": StripToolMarkup(text)}}, "end_turn"
 	}
-	text = StripToolMarkup(text)
+	return content, stopReason
+}
+
+func noToolsForRequiredChoiceError(policy tooladapter.ChoicePolicy) error {
+	if policy.Mode == tooladapter.ChoiceRequired || policy.Mode == tooladapter.ChoiceForced {
+		return fmt.Errorf("tool_choice %s requires at least one available tool", policy.Mode)
+	}
+	return nil
+}
+
+func validateToolChoice(policy tooladapter.ChoicePolicy, toolNames []string) error {
+	if len(toolNames) == 0 {
+		return noToolsForRequiredChoiceError(policy)
+	}
+	if policy.Mode == tooladapter.ChoiceForced && policy.Name != "" && !hasToolName(toolNames, policy.Name) {
+		return fmt.Errorf("tool_choice forced %s is not an available tool", policy.Name)
+	}
+	return nil
+}
+
+func hasToolName(toolNames []string, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, toolName := range toolNames {
+		if strings.TrimSpace(toolName) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func preflightToolChoiceWithoutToolsError(policy tooladapter.ChoicePolicy, toolNames []string) error {
+	return validateToolChoice(policy, toolNames)
+}
+
+func ContentBlocksWithChoice(text string, tools any, choice any) ([]map[string]any, string, error) {
+	policy := tooladapter.PolicyFromToolChoice(choice)
+	toolNames := tooladapter.ToolNames(tools)
+	if policy.Mode == tooladapter.ChoiceNone {
+		return []map[string]any{{"type": "text", "text": text}}, "end_turn", nil
+	}
+	if err := validateToolChoice(policy, toolNames); err != nil {
+		return nil, "", err
+	}
+	if len(toolNames) == 0 {
+		return []map[string]any{{"type": "text", "text": text}}, "end_turn", nil
+	}
+
+	calls, visible, err := tooladapter.Parse(text, toolNames, policy)
+	if err != nil {
+		return nil, "", err
+	}
+	calls = tooladapter.NormalizeForSchemas(calls, tools)
 	if len(calls) == 0 {
-		return []map[string]any{{"type": "text", "text": text}}, "end_turn"
+		return []map[string]any{{"type": "text", "text": visible}}, "end_turn", nil
 	}
+
 	var content []map[string]any
-	if text != "" {
-		content = append(content, map[string]any{"type": "text", "text": text})
+	if visible != "" {
+		content = append(content, map[string]any{"type": "text", "text": visible})
 	}
-	for _, call := range calls {
-		content = append(content, map[string]any{"type": "tool_use", "id": "toolu_" + util.NewUUID(), "name": call.Name, "input": call.Input})
-	}
-	return content, "tool_use"
+	content = append(content, tooladapter.FormatAnthropic(calls)...)
+	return content, "tool_use", nil
+}
+
+var streamTextChatCompletionForAnthropic = func(ctx context.Context, e *Engine, request MessageRequest) (<-chan map[string]any, <-chan error) {
+	return e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), request.Messages, request.Model)
 }
 
 func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageRequest) (<-chan map[string]any, <-chan error) {
-	chunks, errCh := e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), request.Messages, request.Model)
+	policy := tooladapter.PolicyFromToolChoice(request.ToolChoice)
+	toolNames := tooladapter.ToolNames(request.Tools)
+	if err := validateToolChoice(policy, toolNames); err != nil {
+		return streamHTTPError(err)
+	}
+	chunks, errCh := streamTextChatCompletionForAnthropic(ctx, e, request)
 	out := make(chan map[string]any)
 	outErr := make(chan error, 1)
 	go func() {
@@ -1151,8 +1646,8 @@ func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageReque
 		defer close(outErr)
 		messageID := "msg_" + util.NewUUID()
 		current := ""
-		streamed := ""
-		toolMode := len(anyList(request.Tools)) > 0
+		streamedLen := 0
+		toolMode := len(toolNames) > 0 && policy.Mode != tooladapter.ChoiceNone
 		toolStarted := false
 		textOpen := false
 		out <- map[string]any{"type": "message_start", "message": map[string]any{"id": messageID, "type": "message", "role": "assistant", "model": request.Model, "content": []any{}, "stop_reason": nil, "stop_sequence": nil, "usage": map[string]any{"input_tokens": CountMessageTokens(request.Messages, request.Model), "output_tokens": 0}}}
@@ -1163,22 +1658,25 @@ func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageReque
 		for chunk := range chunks {
 			choice := firstChoice(chunk)
 			delta := util.StringMap(choice["delta"])
-			textDelta := util.Clean(delta["content"])
+			textDelta, _ := delta["content"].(string)
+			if textDelta == "" {
+				textDelta = util.Clean(delta["content"])
+			}
 			if textDelta != "" {
 				current += textDelta
 				if !toolStarted {
 					visible := current
 					if toolMode {
-						visible = StreamableText(current)
+						visible = safeRawToolVisiblePrefix(current)
 					}
-					if strings.HasPrefix(visible, streamed) {
-						next := visible[len(streamed):]
+					if len(visible) >= streamedLen {
+						next := visible[streamedLen:]
 						if next != "" {
 							if !textOpen {
 								textOpen = true
 								out <- map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}}
 							}
-							streamed = visible
+							streamedLen = len(visible)
 							out <- map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": next}}
 						}
 					}
@@ -1186,7 +1684,22 @@ func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageReque
 				}
 			}
 			if choice["finish_reason"] != nil {
-				content, stopReason := ContentBlocks(current, request.Tools)
+				content, stopReason, err := ContentBlocksWithChoice(current, request.Tools, request.ToolChoice)
+				if err != nil {
+					outErr <- HTTPError{Status: 400, Message: err.Error()}
+					return
+				}
+				if stopReason == "end_turn" && streamedLen <= len(current) {
+					remaining := current[streamedLen:]
+					if remaining != "" {
+						if !textOpen {
+							textOpen = true
+							out <- map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}}
+						}
+						out <- map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": remaining}}
+						streamedLen = len(current)
+					}
+				}
 				if textOpen {
 					out <- map[string]any{"type": "content_block_stop", "index": 0}
 				}
@@ -1194,6 +1707,7 @@ func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageReque
 					startIndex := 0
 					if textOpen {
 						startIndex = 1
+						content = toolUseBlocks(content)
 					}
 					outBufferedBlocks(out, content, startIndex)
 				}
@@ -1209,6 +1723,16 @@ func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageReque
 		outErr <- nil
 	}()
 	return out, outErr
+}
+
+func toolUseBlocks(content []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(content))
+	for _, block := range content {
+		if block["type"] == "tool_use" {
+			out = append(out, block)
+		}
+	}
+	return out
 }
 
 func outBufferedBlocks(out chan<- map[string]any, content []map[string]any, startIndex int) {
@@ -1255,73 +1779,23 @@ type ToolCall struct {
 }
 
 func StripToolMarkup(text string) string {
-	return strings.TrimSpace(regexp.MustCompile(`(?is)<tool_calls\b[^>]*>.*?</tool_calls>|<tool_call\b[^>]*>.*?</tool_call>|<function_call\b[^>]*>.*?</function_call>|<invoke\b[^>]*>.*?</invoke>`).ReplaceAllString(text, ""))
+	return tooladapter.StripMarkup(text)
 }
 
 func StreamableText(text string) string {
-	loc := regexp.MustCompile(`(?is)<tool_calls\b|<tool_call\b|<function_call\b|<invoke\b`).FindStringIndex(text)
-	if loc == nil {
-		return text
-	}
-	return strings.TrimRight(text[:loc[0]], " \t\r\n")
+	return tooladapter.StreamableText(text)
 }
 
 func ParseToolCalls(text string) []ToolCall {
-	text = regexp.MustCompile("(?is)```.*?```").ReplaceAllString(text, "")
-	matches := regexp.MustCompile(`(?is)<tool_call\b[^>]*>(.*?)</tool_call>|<function_call\b[^>]*>(.*?)</function_call>|<invoke\b[^>]*>(.*?)</invoke>`).FindAllStringSubmatch(text, -1)
-	var out []ToolCall
-	for _, match := range matches {
-		block := ""
-		for _, part := range match[1:] {
-			if part != "" {
-				block = part
-				break
-			}
-		}
-		name := firstNonEmpty(XMLValue(block, "tool_name"), XMLValue(block, "name"), XMLValue(block, "function"))
-		params := firstNonEmpty(XMLValue(block, "parameters"), XMLValue(block, "input"), XMLValue(block, "arguments"), "{}")
-		if name != "" {
-			out = append(out, ToolCall{Name: name, Input: ParseToolParams(params)})
-		}
+	calls, _, err := tooladapter.Parse(text, nil, tooladapter.ChoicePolicy{Mode: tooladapter.ChoiceAuto})
+	if err != nil {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, ToolCall{Name: call.Name, Input: call.Input})
 	}
 	return out
-}
-
-func XMLValue(text, tag string) string {
-	re := regexp.MustCompile(`(?is)<` + regexp.QuoteMeta(tag) + `\b[^>]*>(.*?)</` + regexp.QuoteMeta(tag) + `>`)
-	match := re.FindStringSubmatch(text)
-	if len(match) < 2 {
-		return ""
-	}
-	value := strings.TrimSpace(match[1])
-	if cdata := regexp.MustCompile(`(?is)^<!\[CDATA\[(.*?)]]>$`).FindStringSubmatch(value); len(cdata) > 1 {
-		value = cdata[1]
-	}
-	return strings.TrimSpace(html.UnescapeString(value))
-}
-
-func ParseToolParams(raw string) map[string]any {
-	raw = strings.TrimSpace(raw)
-	var parsed map[string]any
-	if json.Unmarshal([]byte(raw), &parsed) == nil {
-		return parsed
-	}
-	out := map[string]any{}
-	for _, match := range regexp.MustCompile(`(?is)<([\w.-]+)\b[^>]*>(.*?)</([\w.-]+)>`).FindAllStringSubmatch(raw, -1) {
-		if len(match) > 3 && match[1] == match[3] {
-			out[match[1]] = ParseToolValue(match[2])
-		}
-	}
-	return out
-}
-
-func ParseToolValue(raw string) any {
-	value := XMLValue("<x>"+raw+"</x>", "x")
-	var parsed any
-	if json.Unmarshal([]byte(value), &parsed) == nil {
-		return parsed
-	}
-	return value
 }
 
 func firstNonNil(values ...any) any {

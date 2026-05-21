@@ -64,6 +64,8 @@ type ConversationRequest struct {
 	Model                   string
 	Prompt                  string
 	Messages                []map[string]any
+	Tools                   any
+	ToolChoice              any
 	Images                  []string
 	InputImageMask          string
 	N                       int
@@ -366,7 +368,7 @@ func (e *Engine) StreamTextDeltas(ctx context.Context, client *backend.Client, r
 	go func() {
 		defer close(out)
 		defer close(errCh)
-		events, convErr := e.ConversationEvents(ctx, client, request.Messages, request.Model, request.Prompt)
+		events, convErr := e.ConversationEvents(ctx, client, request.Messages, request.Model, request.Prompt, request.Tools, request.ToolChoice)
 		for event := range events {
 			if event["type"] != "conversation.delta" {
 				continue
@@ -409,7 +411,7 @@ func (e *Engine) CollectVisionText(ctx context.Context, client *backend.Client, 
 	return strings.Join(parts, ""), <-errCh
 }
 
-func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client, messages []map[string]any, model, prompt string) (<-chan ConversationEvent, <-chan error) {
+func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client, messages []map[string]any, model, prompt string, tools any, choice any) (<-chan ConversationEvent, <-chan error) {
 	out := make(chan ConversationEvent)
 	errCh := make(chan error, 1)
 	go func() {
@@ -421,7 +423,7 @@ func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client,
 		}
 		historyText := AssistantHistoryText(normalized)
 		historyMessages := AssistantHistoryMessages(normalized)
-		payloads, upstreamErr := client.StreamConversation(ctx, normalized, model, prompt)
+		payloads, upstreamErr := client.StreamConversation(ctx, normalized, model, prompt, tools, choice)
 		iterErr := IterConversationPayloads(ctx, payloads, historyText, historyMessages, out)
 		upErr := <-upstreamErr
 		if iterErr != nil {

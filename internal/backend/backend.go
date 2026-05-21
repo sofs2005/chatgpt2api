@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"chatgpt2api/internal/contextoffload"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 )
@@ -129,7 +130,7 @@ func (c *Client) ListModels(ctx context.Context) (map[string]any, error) {
 	return map[string]any{"object": "list", "data": data}, nil
 }
 
-func (c *Client) StreamConversation(ctx context.Context, messages []map[string]any, model, prompt string) (<-chan string, <-chan error) {
+func (c *Client) StreamConversation(ctx context.Context, messages []map[string]any, model, prompt string, tools any, choice any) (<-chan string, <-chan error) {
 	out := make(chan string)
 	errCh := make(chan error, 1)
 	go func() {
@@ -148,9 +149,25 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 			return
 		}
 		if c.AccessToken != "" {
-			conduitToken, prepareErr := c.prepareTextConversation(ctx, messages, reqs, model)
+			plan := contextoffload.PlanContext(messages, tools, choice, contextoffload.DefaultOptions())
+			offloadMessages := plan.InlineMessages
+			var attachments []TextAttachmentRef
+			if plan.NeedsUpload() {
+				var uploadErr error
+				attachments, uploadErr = c.uploadTextContextFiles(ctx, plan.Files, reqs, 60*time.Second)
+				if uploadErr != nil {
+					fallback, fallbackErr := plan.FallbackInlineMessages()
+					if fallbackErr != nil {
+						errCh <- fmt.Errorf("context attachment upload failed: %w", uploadErr)
+						return
+					}
+					offloadMessages = fallback
+					attachments = nil
+				}
+			}
+			conduitToken, prepareErr := c.prepareTextConversation(ctx, offloadMessages, reqs, model, attachments)
 			if prepareErr == nil {
-				resp, startErr := c.startTextConversation(ctx, messages, reqs, conduitToken, model)
+				resp, startErr := c.startTextConversation(ctx, offloadMessages, reqs, conduitToken, model, attachments)
 				if startErr == nil {
 					defer resp.Body.Close()
 					if ensureOK(resp, officialStreamPath) == nil {
@@ -452,7 +469,7 @@ func textModelSlug(model string) string {
 	}
 }
 
-func (c *Client) prepareTextConversation(ctx context.Context, messages []map[string]any, reqs ChatRequirements, model string) (string, error) {
+func (c *Client) prepareTextConversation(ctx context.Context, messages []map[string]any, reqs ChatRequirements, model string, attachments []TextAttachmentRef) (string, error) {
 	prompt := conversationPrompt(messages)
 	payload := map[string]any{
 		"action":                "next",
@@ -475,6 +492,9 @@ func (c *Client) prepareTextConversation(ctx context.Context, messages []map[str
 			"app_name": "chatgpt.com",
 		},
 	}
+	if len(attachments) > 0 {
+		payload["attachments"] = buildTextPrepareAttachments(attachments)
+	}
 	resp, err := c.postJSON(ctx, officialPreparePath, payload, c.officialHeaders(officialPreparePath, reqs, "", "*/*"), false)
 	if err != nil {
 		return "", err
@@ -490,8 +510,17 @@ func (c *Client) prepareTextConversation(ctx context.Context, messages []map[str
 	return util.Clean(data["conduit_token"]), nil
 }
 
-func (c *Client) startTextConversation(ctx context.Context, messages []map[string]any, reqs ChatRequirements, conduitToken, model string) (*http.Response, error) {
+func (c *Client) startTextConversation(ctx context.Context, messages []map[string]any, reqs ChatRequirements, conduitToken, model string, attachments []TextAttachmentRef) (*http.Response, error) {
 	prompt := conversationPrompt(messages)
+	metadata := map[string]any{
+		"developer_mode_connector_ids": []any{},
+		"selected_github_repos":        []any{},
+		"selected_all_github_repos":    false,
+		"serialization_metadata":       map[string]any{"custom_symbol_offsets": []any{}},
+	}
+	if len(attachments) > 0 {
+		metadata["attachments"] = buildTextMessageAttachments(attachments)
+	}
 	payload := map[string]any{
 		"action": "next",
 		"messages": []any{
@@ -503,12 +532,7 @@ func (c *Client) startTextConversation(ctx context.Context, messages []map[strin
 					"content_type": "text",
 					"parts":        []any{prompt},
 				},
-				"metadata": map[string]any{
-					"developer_mode_connector_ids": []any{},
-					"selected_github_repos":        []any{},
-					"selected_all_github_repos":    false,
-					"serialization_metadata":       map[string]any{"custom_symbol_offsets": []any{}},
-				},
+				"metadata": metadata,
 			},
 		},
 		"parent_message_id":                    util.NewUUID(),

@@ -244,6 +244,73 @@ func receiveRetryTestError(t *testing.T, errCh <-chan error) error {
 	}
 }
 
+func TestHandleChatCompletionsCarriesToolsToTextBackendAndFormatsToolCalls(t *testing.T) {
+	engine, _ := newTextLeaseTestEngine(t, "token-1")
+	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}}
+	var captured ConversationRequest
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		captured = request
+		deltas := make(chan string, 1)
+		errs := make(chan error, 1)
+		deltas <- `<tool_calls><tool_call><tool_name>read_file</tool_name><parameters>{}</parameters></tool_call></tool_calls>`
+		close(deltas)
+		errs <- nil
+		close(errs)
+		return deltas, errs
+	})
+
+	response, stream, err := engine.HandleChatCompletions(context.Background(), map[string]any{
+		"model":       "gpt-5",
+		"messages":    []any{map[string]any{"role": "user", "content": "read"}},
+		"tools":       tools,
+		"tool_choice": "required",
+	})
+	if err != nil || stream != nil {
+		t.Fatalf("HandleChatCompletions() response=%#v stream=%#v err=%v", response, stream, err)
+	}
+	if captured.Tools == nil || captured.ToolChoice != "required" {
+		t.Fatalf("captured request missing tools/tool_choice: %#v", captured)
+	}
+	choice := response["choices"].([]map[string]any)[0]
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %#v, want tool_calls", choice["finish_reason"])
+	}
+	message := choice["message"].(map[string]any)
+	if message["content"] != nil {
+		t.Fatalf("message.content = %#v, want nil", message["content"])
+	}
+	if len(message["tool_calls"].([]map[string]any)) != 1 {
+		t.Fatalf("tool_calls = %#v, want one", message["tool_calls"])
+	}
+}
+
+func TestStreamTextChatCompletionWithToolsCarriesToolsToTextBackend(t *testing.T) {
+	engine, _ := newTextLeaseTestEngine(t, "token-1")
+	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}}
+	choice := map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}
+	var captured ConversationRequest
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		captured = request
+		deltas := make(chan string, 1)
+		errs := make(chan error, 1)
+		deltas <- `<tool_calls><tool_call><tool_name>read_file</tool_name><parameters>{}</parameters></tool_call></tool_calls>`
+		close(deltas)
+		errs <- nil
+		close(errs)
+		return deltas, errs
+	})
+
+	events, errCh := engine.StreamTextChatCompletionWithTools(context.Background(), []map[string]any{{"role": "user", "content": "read"}}, "gpt-5", tools, choice)
+	for range events {
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamTextChatCompletionWithTools() error = %v", err)
+	}
+	if captured.Tools == nil || captured.ToolChoice == nil {
+		t.Fatalf("captured request missing tools/tool_choice: %#v", captured)
+	}
+}
+
 func TestStreamTextDeltasWithTokenRetryHoldsLeaseUntilSuccessStreamEnds(t *testing.T) {
 	engine, accounts := newTextLeaseTestEngine(t, "token-1")
 	started := make(chan struct{})

@@ -429,7 +429,7 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 	if err != nil {
 		return nil, nil, err
 	}
-	text, err := e.collectTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages})
+	text, err := e.collectTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages, Tools: body["tools"], ToolChoice: body["tool_choice"]})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -661,7 +661,7 @@ func (e *Engine) StreamTextChatCompletionWithTools(ctx context.Context, messages
 	if err := preflightToolChoiceWithoutToolsError(tooladapter.PolicyFromToolChoice(choice), tooladapter.ToolNames(tools)); err != nil {
 		return streamHTTPError(err)
 	}
-	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages})
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages, Tools: tools, ToolChoice: choice})
 	return streamChatCompletionEvents(ctx, model, deltas, errCh, tools, choice)
 }
 

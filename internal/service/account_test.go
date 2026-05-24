@@ -109,6 +109,96 @@ func TestFetchRemoteInfoBootstrapsBeforeAccountRefresh(t *testing.T) {
 	}
 }
 
+func TestRunUpstreamAccountActionsCallsConfirmedEndpoints(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
+
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/settings/account_user_setting":
+			if r.Method != http.MethodPost {
+				t.Fatalf("memory method = %s, want POST", r.Method)
+			}
+			feature := r.URL.Query().Get("feature")
+			if r.URL.Query().Get("value") != "false" || (feature != "sunshine" && feature != "moonshine") {
+				t.Fatalf("memory query = %s", r.URL.RawQuery)
+			}
+			writeJSON(t, w, map[string]any{feature: false})
+		case "/backend-api/conversations":
+			if r.Method != http.MethodPatch {
+				t.Fatalf("conversations method = %s, want PATCH", r.Method)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode conversations body: %v", err)
+			}
+			if body["is_visible"] != false {
+				t.Fatalf("conversations body = %#v", body)
+			}
+			writeJSON(t, w, map[string]any{"success": true, "message": nil})
+		case "/backend-api/files/library":
+			if r.Method != http.MethodPost {
+				t.Fatalf("files library method = %s, want POST", r.Method)
+			}
+			writeJSON(t, w, map[string]any{
+				"items":  []map[string]any{{"file_id": "file_000000005ab871f5bef9279d29e84758", "file_name": "desktop.ini"}},
+				"cursor": nil,
+			})
+		case "/backend-api/files/file_000000005ab871f5bef9279d29e84758":
+			if r.Method != http.MethodDelete {
+				t.Fatalf("file delete method = %s, want DELETE", r.Method)
+			}
+			writeJSON(t, w, map[string]any{"success": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+
+	result := accounts.RunUpstreamAccountActions(context.Background(), []string{"token-1"}, UpstreamAccountActionOptions{
+		DisableMemory:     true,
+		HideConversations: true,
+		DeleteFiles:       true,
+		FilePageLimit:     50,
+	})
+	if result["succeeded"] != 1 || result["failed"] != 0 {
+		t.Fatalf("RunUpstreamAccountActions() = %#v", result)
+	}
+	details := result["results"].([]map[string]any)
+	actions := details[0]["actions"].(map[string]any)
+	deleteFiles := actions["delete_files"].(map[string]any)
+	if deleteFiles["files_deleted"] != 1 {
+		t.Fatalf("delete_files = %#v, want one deleted file", deleteFiles)
+	}
+	mu.Lock()
+	gotPaths := append([]string(nil), paths...)
+	mu.Unlock()
+	wantPaths := []string{
+		"GET /",
+		"POST /backend-api/settings/account_user_setting?feature=sunshine&value=false",
+		"POST /backend-api/settings/account_user_setting?feature=moonshine&value=false",
+		"PATCH /backend-api/conversations",
+		"POST /backend-api/files/library",
+		"DELETE /backend-api/files/file_000000005ab871f5bef9279d29e84758",
+	}
+	if !reflect.DeepEqual(gotPaths, wantPaths) {
+		t.Fatalf("request paths = %#v, want %#v", gotPaths, wantPaths)
+	}
+}
+
 func TestNormalizeAccountPreservesChatGPTAccountID(t *testing.T) {
 	normalized := normalizeAccount(map[string]any{
 		"access_token":       "token-1",

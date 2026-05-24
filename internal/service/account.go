@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -1180,92 +1181,224 @@ func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, n
 	return true
 }
 
+type UpstreamAccountActionOptions struct {
+	DisableMemory     bool
+	HideConversations bool
+	DeleteFiles       bool
+	FilePageLimit     int
+}
+
+type remoteAccountClient struct {
+	ctx     context.Context
+	baseURL string
+	headers map[string]string
+	client  *http.Client
+}
+
 func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {
-	accessToken = util.Clean(accessToken)
-	if accessToken == "" {
-		return nil, fmt.Errorf("access_token is required")
-	}
-	baseURL := strings.TrimRight(firstNonEmpty(s.remoteBaseURL, "https://chatgpt.com"), "/")
-	headers := s.remoteHeaders(accessToken)
-	client := s.browserHTTPClient(s.remoteImpersonation(accessToken), 30*time.Second)
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	if err := s.bootstrapRemote(ctx, client, baseURL, accessToken); err != nil {
+	remote, err := s.newRemoteAccountClient(ctx, accessToken, 30*time.Second)
+	if err != nil {
 		return nil, err
 	}
-	type response struct {
-		payload map[string]any
-		err     error
+	me, err := remote.doJSON(http.MethodGet, "/backend-api/me", nil, nil)
+	if err != nil {
+		return nil, err
 	}
-	fetch := func(method, urlPath string, body any, extra map[string]string) response {
-		var reader io.Reader
-		if body != nil {
-			data, _ := json.Marshal(body)
-			reader = bytes.NewReader(data)
-		}
-		req, _ := http.NewRequestWithContext(ctx, method, baseURL+urlPath, reader)
-		for key, value := range headers {
-			req.Header.Set(key, value)
-		}
-		req.Header.Set("x-openai-target-path", urlPath)
-		req.Header.Set("x-openai-target-route", urlPath)
-		for key, value := range extra {
-			req.Header.Set(key, value)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return response{err: err}
-		}
-		defer resp.Body.Close()
-		data, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return response{err: readErr}
-		}
-		if resp.StatusCode != http.StatusOK {
-			return response{err: refreshHTTPError(urlPath, resp.StatusCode, data)}
-		}
-		var payload map[string]any
-		if err := json.Unmarshal(data, &payload); err != nil {
-			return response{err: err}
-		}
-		return response{payload: payload}
-	}
-	me := fetch(http.MethodGet, "/backend-api/me", nil, nil)
-	if me.err != nil {
-		return nil, me.err
-	}
-	init := fetch(http.MethodPost, "/backend-api/conversation/init", map[string]any{
+	init, err := remote.doJSON(http.MethodPost, "/backend-api/conversation/init", map[string]any{
 		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": -480,
 	}, nil)
-	if init.err != nil {
-		return nil, init.err
+	if err != nil {
+		return nil, err
 	}
-	limits := anyList(init.payload["limits_progress"])
-	accountType := s.detectAccountType(accessToken, me.payload, init.payload)
+	accessToken = util.Clean(accessToken)
+	limits := anyList(init["limits_progress"])
+	accountType := s.detectAccountType(accessToken, me, init)
 	quota, restoreAt, unknown := extractQuotaAndRestoreAt(limits)
 	chatGPTAccountID := firstNonEmpty(
 		chatGPTAccountIDFromPayload(decodeAccessTokenPayload(accessToken)),
-		util.Clean(me.payload["chatgpt_account_id"]),
-		util.Clean(me.payload["account_id"]),
-		util.Clean(me.payload["id"]),
+		util.Clean(me["chatgpt_account_id"]),
+		util.Clean(me["account_id"]),
+		util.Clean(me["id"]),
 	)
 	status := "正常"
 	if !unknown && quota == 0 {
 		status = "限流"
 	}
 	return map[string]any{
-		"email":               me.payload["email"],
-		"user_id":             me.payload["id"],
+		"email":               me["email"],
+		"user_id":             me["id"],
 		"chatgpt_account_id":  chatGPTAccountID,
 		"type":                accountType,
 		"quota":               quota,
 		"image_quota_unknown": unknown,
 		"limits_progress":     limits,
-		"default_model_slug":  init.payload["default_model_slug"],
+		"default_model_slug":  init["default_model_slug"],
 		"restore_at":          restoreAt,
 		"status":              status,
 	}, nil
+}
+
+func (s *AccountService) RunUpstreamAccountActions(ctx context.Context, accessTokens []string, options UpstreamAccountActionOptions) map[string]any {
+	tokens := cleanTokens(accessTokens)
+	if len(tokens) == 0 {
+		return map[string]any{"total": 0, "succeeded": 0, "failed": 0, "errors": []map[string]string{}, "results": []map[string]any{}}
+	}
+	startedAt := time.Now()
+	results := make([]map[string]any, 0, len(tokens))
+	errors := []map[string]string{}
+	succeeded := 0
+	for _, token := range tokens {
+		accountStartedAt := time.Now()
+		detail := map[string]any{
+			"account_id":    accountIDFromToken(token),
+			"access_token":  token,
+			"token_preview": util.AnonymizeToken(token),
+			"success":       false,
+			"actions":       map[string]any{},
+		}
+		actions := detail["actions"].(map[string]any)
+		remote, err := s.newRemoteAccountClient(ctx, token, 60*time.Second)
+		if err == nil && options.DisableMemory {
+			actions["disable_memory"], err = remote.disableMemory()
+		}
+		if err == nil && options.HideConversations {
+			actions["hide_conversations"], err = remote.hideConversations()
+		}
+		if err == nil && options.DeleteFiles {
+			actions["delete_files"], err = remote.deleteFiles(options.FilePageLimit)
+		}
+		detail["duration_ms"] = time.Since(accountStartedAt).Milliseconds()
+		if err == nil {
+			detail["success"] = true
+			detail["status"] = "success"
+			detail["message"] = "上游账号操作完成"
+			succeeded++
+			results = append(results, detail)
+			continue
+		}
+		message := err.Error()
+		if normalized, handled := s.ApplyAccountError(token, "upstream_account_actions", err); handled {
+			message = normalized
+		}
+		detail["status"] = "error"
+		detail["error"] = message
+		errors = append(errors, map[string]string{"account_id": accountIDFromToken(token), "access_token": token, "error": message})
+		results = append(results, detail)
+	}
+	return map[string]any{
+		"total":       len(tokens),
+		"succeeded":   succeeded,
+		"failed":      len(tokens) - succeeded,
+		"duration_ms": time.Since(startedAt).Milliseconds(),
+		"errors":      errors,
+		"results":     results,
+	}
+}
+
+func (s *AccountService) newRemoteAccountClient(ctx context.Context, accessToken string, timeout time.Duration) (*remoteAccountClient, error) {
+	accessToken = util.Clean(accessToken)
+	if accessToken == "" {
+		return nil, fmt.Errorf("access_token is required")
+	}
+	baseURL := strings.TrimRight(firstNonEmpty(s.remoteBaseURL, "https://chatgpt.com"), "/")
+	client := s.browserHTTPClient(s.remoteImpersonation(accessToken), timeout)
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
+	if err := s.bootstrapRemote(ctx, client, baseURL, accessToken); err != nil {
+		return nil, err
+	}
+	return &remoteAccountClient{ctx: ctx, baseURL: baseURL, headers: s.remoteHeaders(accessToken), client: client}, nil
+}
+
+func (c *remoteAccountClient) doJSON(method, urlPath string, body any, extra map[string]string) (map[string]any, error) {
+	var reader io.Reader
+	if body != nil {
+		data, _ := json.Marshal(body)
+		reader = bytes.NewReader(data)
+	}
+	req, _ := http.NewRequestWithContext(c.ctx, method, c.baseURL+urlPath, reader)
+	for key, value := range c.headers {
+		req.Header.Set(key, value)
+	}
+	req.Header.Set("x-openai-target-path", urlPath)
+	req.Header.Set("x-openai-target-route", urlPath)
+	for key, value := range extra {
+		req.Header.Set(key, value)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, refreshHTTPError(urlPath, resp.StatusCode, data)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return map[string]any{}, nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func (c *remoteAccountClient) disableMemory() (map[string]any, error) {
+	result := map[string]any{}
+	for _, feature := range []string{"sunshine", "moonshine"} {
+		path := "/backend-api/settings/account_user_setting?feature=" + url.QueryEscape(feature) + "&value=false"
+		payload, err := c.doJSON(http.MethodPost, path, nil, nil)
+		if err != nil {
+			return result, err
+		}
+		result[feature] = payload[feature]
+	}
+	return result, nil
+}
+
+func (c *remoteAccountClient) hideConversations() (map[string]any, error) {
+	return c.doJSON(http.MethodPatch, "/backend-api/conversations", map[string]any{"is_visible": false}, nil)
+}
+
+func (c *remoteAccountClient) deleteFiles(limit int) (map[string]any, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	seen := 0
+	deleted := 0
+	cursor := ""
+	for page := 0; page < 100; page++ {
+		body := map[string]any{"limit": limit}
+		if cursor != "" {
+			body["cursor"] = cursor
+		}
+		payload, err := c.doJSON(http.MethodPost, "/backend-api/files/library", body, nil)
+		if err != nil {
+			return map[string]any{"files_seen": seen, "files_deleted": deleted}, err
+		}
+		items := util.AsMapSlice(payload["items"])
+		seen += len(items)
+		for _, item := range items {
+			fileID := util.Clean(item["file_id"])
+			if fileID == "" {
+				continue
+			}
+			if _, err := c.doJSON(http.MethodDelete, "/backend-api/files/"+url.PathEscape(fileID), nil, nil); err != nil {
+				return map[string]any{"files_seen": seen, "files_deleted": deleted}, err
+			}
+			deleted++
+		}
+		cursor = util.Clean(payload["cursor"])
+		if cursor == "" || len(items) == 0 {
+			break
+		}
+	}
+	return map[string]any{"files_seen": seen, "files_deleted": deleted}, nil
 }
 
 func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Client, baseURL, accessToken string) error {

@@ -30,12 +30,16 @@ func TestAccountPoolPermissionsAreExplicit(t *testing.T) {
 	if HasAPIPermission(readOnly, "POST", "/api/accounts/refresh") {
 		t.Fatalf("account list permission should not allow refresh")
 	}
+	if HasAPIPermission(readOnly, "POST", "/api/accounts/upstream-actions") {
+		t.Fatalf("account list permission should not allow upstream actions")
+	}
 
 	operators := PermissionSet{APIPermissions: NormalizeAPIPermissions([]string{
 		APIPermissionKey("GET", "/api/accounts/tokens"),
 		APIPermissionKey("POST", "/api/accounts"),
 		APIPermissionKey("POST", "/api/accounts/session"),
 		APIPermissionKey("POST", "/api/accounts/refresh"),
+		APIPermissionKey("POST", "/api/accounts/upstream-actions"),
 		APIPermissionKey("POST", "/api/accounts/update"),
 		APIPermissionKey("DELETE", "/api/accounts"),
 	})}
@@ -47,6 +51,7 @@ func TestAccountPoolPermissionsAreExplicit(t *testing.T) {
 		{"POST", "/api/accounts"},
 		{"POST", "/api/accounts/session"},
 		{"POST", "/api/accounts/refresh"},
+		{"POST", "/api/accounts/upstream-actions"},
 		{"POST", "/api/accounts/update"},
 		{"DELETE", "/api/accounts"},
 	} {

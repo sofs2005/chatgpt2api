@@ -214,6 +214,34 @@ type AccountRefreshResponse = {
   duration_ms?: number;
 };
 
+export type UpstreamAccountActionOptions = {
+  disable_memory?: boolean;
+  hide_conversations?: boolean;
+  delete_files?: boolean;
+  file_page_limit?: number;
+};
+
+export type UpstreamAccountActionResult = {
+  account_id: string;
+  access_token?: string;
+  token_preview?: string;
+  success: boolean;
+  status: string;
+  message?: string;
+  error?: string;
+  duration_ms?: number;
+  actions?: Record<string, unknown>;
+};
+
+export type UpstreamAccountActionResponse = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  duration_ms?: number;
+  errors: Array<{ access_token?: string; account_id?: string; error: string }>;
+  results: UpstreamAccountActionResult[];
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -832,6 +860,13 @@ export async function refreshAccounts(accountIds: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
     body: { account_ids: accountIds },
+  });
+}
+
+export async function runUpstreamAccountActions(accountIds: string[], options: UpstreamAccountActionOptions) {
+  return httpRequest<UpstreamAccountActionResponse>("/api/accounts/upstream-actions", {
+    method: "POST",
+    body: { account_ids: accountIds, ...options },
   });
 }
 

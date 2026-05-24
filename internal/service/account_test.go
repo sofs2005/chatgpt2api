@@ -122,14 +122,20 @@ func TestRunUpstreamAccountActionsCallsConfirmedEndpoints(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("<html>ok</html>"))
 		case "/backend-api/settings/account_user_setting":
-			if r.Method != http.MethodPost {
-				t.Fatalf("memory method = %s, want POST", r.Method)
+			if r.Method != http.MethodPatch {
+				t.Fatalf("memory method = %s, want PATCH", r.Method)
 			}
-			feature := r.URL.Query().Get("feature")
-			if r.URL.Query().Get("value") != "false" || (feature != "sunshine" && feature != "moonshine") {
+			if r.URL.Query().Get("feature") != "sunshine" || r.URL.Query().Get("value") != "false" {
 				t.Fatalf("memory query = %s", r.URL.RawQuery)
 			}
-			writeJSON(t, w, map[string]any{feature: false})
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode memory body: %v", err)
+			}
+			if body["sunshine"] != false {
+				t.Fatalf("memory body = %#v", body)
+			}
+			writeJSON(t, w, map[string]any{"sunshine": false})
 		case "/backend-api/conversations":
 			if r.Method != http.MethodPatch {
 				t.Fatalf("conversations method = %s, want PATCH", r.Method)
@@ -188,8 +194,7 @@ func TestRunUpstreamAccountActionsCallsConfirmedEndpoints(t *testing.T) {
 	mu.Unlock()
 	wantPaths := []string{
 		"GET /",
-		"POST /backend-api/settings/account_user_setting?feature=sunshine&value=false",
-		"POST /backend-api/settings/account_user_setting?feature=moonshine&value=false",
+		"PATCH /backend-api/settings/account_user_setting?feature=sunshine&value=false",
 		"PATCH /backend-api/conversations",
 		"POST /backend-api/files/library",
 		"DELETE /backend-api/files/file_000000005ab871f5bef9279d29e84758",

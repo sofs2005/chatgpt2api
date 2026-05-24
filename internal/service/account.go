@@ -1349,16 +1349,11 @@ func (c *remoteAccountClient) doJSON(method, urlPath string, body any, extra map
 }
 
 func (c *remoteAccountClient) disableMemory() (map[string]any, error) {
-	result := map[string]any{}
-	for _, feature := range []string{"sunshine", "moonshine"} {
-		path := "/backend-api/settings/account_user_setting?feature=" + url.QueryEscape(feature) + "&value=false"
-		payload, err := c.doJSON(http.MethodPost, path, nil, nil)
-		if err != nil {
-			return result, err
-		}
-		result[feature] = payload[feature]
+	payload, err := c.doJSON(http.MethodPatch, "/backend-api/settings/account_user_setting?feature=sunshine&value=false", map[string]any{"sunshine": false}, nil)
+	if err != nil {
+		return nil, err
 	}
-	return result, nil
+	return map[string]any{"sunshine": payload["sunshine"]}, nil
 }
 
 func (c *remoteAccountClient) hideConversations() (map[string]any, error) {

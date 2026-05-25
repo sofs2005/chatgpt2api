@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"chatgpt2api/internal/backend"
@@ -22,6 +23,68 @@ type StreamResult struct {
 }
 
 const ImageOutputSlotAcquirerPayloadKey = "image_output_slot_acquirer"
+
+type accountUsageContextKey struct{}
+
+type AccountUsageTracker struct {
+	mu     sync.Mutex
+	tokens []string
+	seen   map[string]struct{}
+}
+
+func WithAccountUsageTracker(ctx context.Context) (context.Context, *AccountUsageTracker) {
+	tracker := &AccountUsageTracker{seen: map[string]struct{}{}}
+	return context.WithValue(ctx, accountUsageContextKey{}, tracker), tracker
+}
+
+func AccountUsageFromContext(ctx context.Context) []map[string]any {
+	tracker, _ := ctx.Value(accountUsageContextKey{}).(*AccountUsageTracker)
+	if tracker == nil {
+		return nil
+	}
+	return tracker.Accounts()
+}
+
+func recordAccountUsage(ctx context.Context, token string) {
+	tracker, _ := ctx.Value(accountUsageContextKey{}).(*AccountUsageTracker)
+	if tracker == nil {
+		return
+	}
+	tracker.Record(token)
+}
+
+func (t *AccountUsageTracker) Record(token string) {
+	token = strings.TrimSpace(token)
+	if t == nil || token == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.seen == nil {
+		t.seen = map[string]struct{}{}
+	}
+	if _, ok := t.seen[token]; ok {
+		return
+	}
+	t.seen[token] = struct{}{}
+	t.tokens = append(t.tokens, token)
+}
+
+func (t *AccountUsageTracker) Accounts() []map[string]any {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]map[string]any, 0, len(t.tokens))
+	for _, token := range t.tokens {
+		out = append(out, map[string]any{
+			"account_id":    util.SHA1Short(token, 16),
+			"token_preview": util.AnonymizeToken(token),
+		})
+	}
+	return out
+}
 
 // ImageOutputChargePayloadKey names the per-image-output billing charge hook
 // carried through the request body. The value must be an ImageOutputCharger
@@ -156,7 +219,7 @@ func StreamImageChunks(outputs <-chan ImageOutput) <-chan map[string]any {
 	return out
 }
 
-func (e *Engine) withTextLease(exhaustedTokens map[string]struct{}, fn func(*backend.Client, service.AccountLease) error) error {
+func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]struct{}, fn func(*backend.Client, service.AccountLease) error) error {
 	if e == nil || e.Accounts == nil {
 		return fmt.Errorf("no account service configured")
 	}
@@ -165,6 +228,7 @@ func (e *Engine) withTextLease(exhaustedTokens map[string]struct{}, fn func(*bac
 		return err
 	}
 	defer lease.Release()
+	recordAccountUsage(ctx, lease.Token)
 	if fn == nil {
 		return nil
 	}
@@ -175,13 +239,15 @@ var streamTextDeltasForTokenRetry = func(ctx context.Context, e *Engine, client 
 	return e.StreamTextDeltas(ctx, client, request)
 }
 
-func (e *Engine) markTextTokenExpiredForRetry(accessToken string, err error, exhaustedTokens map[string]struct{}) bool {
-	if err == nil || !service.IsAccountTokenExpiredErrorMessage(err.Error()) {
+func (e *Engine) handleTextAccountErrorForRetry(accessToken string, err error, exhaustedTokens map[string]struct{}, allowRetry bool) bool {
+	if err == nil || e == nil || e.Accounts == nil {
 		return false
 	}
-	exhaustedTokens[accessToken] = struct{}{}
-	if _, shouldRetry := e.Accounts.HandleTokenExpiredOnRequest(accessToken); shouldRetry {
-		return true
+	if allowRetry && service.IsAccountTokenExpiredErrorMessage(err.Error()) {
+		exhaustedTokens[accessToken] = struct{}{}
+		if _, shouldRetry := e.Accounts.HandleTokenExpiredOnRequest(accessToken); shouldRetry {
+			return true
+		}
 	}
 	e.Accounts.ApplyAccountError(accessToken, "text_stream", err)
 	return false
@@ -198,7 +264,7 @@ func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, request Con
 		for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
 			retry := false
 			completed := false
-			err := e.withTextLease(exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
+			err := e.withTextLease(ctx, exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
 				deltas, upstreamErr := streamTextDeltasForTokenRetry(ctx, e, client, request)
 				sent := false
 				for {
@@ -236,7 +302,7 @@ func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, request Con
 					return nil
 				}
 				lastErr = err
-				if sent || !e.markTextTokenExpiredForRetry(lease.Token, err, exhaustedTokens) {
+				if !e.handleTextAccountErrorForRetry(lease.Token, err, exhaustedTokens, !sent) {
 					errOut <- err
 					completed = true
 					return nil
@@ -280,7 +346,7 @@ func (e *Engine) collectVisionTextWithTokenRetry(ctx context.Context, messages [
 		var text string
 		retry := false
 		succeeded := false
-		err := e.withTextLease(exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
+		err := e.withTextLease(ctx, exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
 			var collectErr error
 			text, collectErr = e.CollectVisionText(ctx, client, messages, model, images)
 			if collectErr == nil {
@@ -288,7 +354,7 @@ func (e *Engine) collectVisionTextWithTokenRetry(ctx context.Context, messages [
 				return nil
 			}
 			lastErr = collectErr
-			if !e.markTextTokenExpiredForRetry(lease.Token, collectErr, exhaustedTokens) {
+			if !e.handleTextAccountErrorForRetry(lease.Token, collectErr, exhaustedTokens, true) {
 				return collectErr
 			}
 			retry = true
@@ -324,7 +390,7 @@ func (e *Engine) streamVisionDeltasWithTokenRetry(ctx context.Context, messages 
 		for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
 			retry := false
 			completed := false
-			err := e.withTextLease(exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
+			err := e.withTextLease(ctx, exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
 				deltas, upstreamErr := client.StreamMultimodalConversation(ctx, messages, model, images)
 				sent := false
 				for {
@@ -362,7 +428,7 @@ func (e *Engine) streamVisionDeltasWithTokenRetry(ctx context.Context, messages 
 					return nil
 				}
 				lastErr = err
-				if sent || !e.markTextTokenExpiredForRetry(lease.Token, err, exhaustedTokens) {
+				if !e.handleTextAccountErrorForRetry(lease.Token, err, exhaustedTokens, !sent) {
 					errOut <- err
 					completed = true
 					return nil

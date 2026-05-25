@@ -140,7 +140,7 @@ func TestTextModelDoesNotForceImageChatRoute(t *testing.T) {
 
 func TestWithTextLeaseReleasesOnSuccess(t *testing.T) {
 	engine, accounts := newTextLeaseTestEngine(t, "token-1")
-	if err := engine.withTextLease(nil, func(_ *backend.Client, lease service.AccountLease) error {
+	if err := engine.withTextLease(context.Background(), nil, func(_ *backend.Client, lease service.AccountLease) error {
 		if lease.Token != "token-1" {
 			t.Fatalf("lease token = %q, want token-1", lease.Token)
 		}
@@ -161,7 +161,7 @@ func TestWithTextLeaseReleasesOnSuccess(t *testing.T) {
 func TestWithTextLeaseReleasesOnError(t *testing.T) {
 	engine, accounts := newTextLeaseTestEngine(t, "token-1")
 	wantErr := errors.New("boom")
-	if err := engine.withTextLease(nil, func(_ *backend.Client, lease service.AccountLease) error {
+	if err := engine.withTextLease(context.Background(), nil, func(_ *backend.Client, lease service.AccountLease) error {
 		if lease.Token != "token-1" {
 			t.Fatalf("lease token = %q, want token-1", lease.Token)
 		}
@@ -183,7 +183,7 @@ func TestWithTextLeaseReleasesOnCanceledContext(t *testing.T) {
 	engine, accounts := newTextLeaseTestEngine(t, "token-1")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := engine.withTextLease(nil, func(_ *backend.Client, lease service.AccountLease) error {
+	if err := engine.withTextLease(context.Background(), nil, func(_ *backend.Client, lease service.AccountLease) error {
 		if ctx.Err() == nil {
 			t.Fatal("expected canceled context")
 		}
@@ -207,10 +207,10 @@ func TestTextLeaseRetrySkipsExpiredTokenAndReleasesEachAttempt(t *testing.T) {
 	accounts.UpdateAccount("token-2", map[string]any{"session_token": "session-2"})
 	exhaustedTokens := map[string]struct{}{}
 	var firstToken string
-	if err := engine.withTextLease(exhaustedTokens, func(_ *backend.Client, lease service.AccountLease) error {
+	if err := engine.withTextLease(context.Background(), exhaustedTokens, func(_ *backend.Client, lease service.AccountLease) error {
 		firstToken = lease.Token
-		if !engine.markTextTokenExpiredForRetry(lease.Token, errors.New("authentication token is expired"), exhaustedTokens) {
-			t.Fatalf("markTextTokenExpiredForRetry() = false, want true")
+		if !engine.handleTextAccountErrorForRetry(lease.Token, errors.New("authentication token is expired"), exhaustedTokens, true) {
+			t.Fatalf("handleTextAccountErrorForRetry() = false, want true")
 		}
 		return nil
 	}); err != nil {
@@ -455,20 +455,54 @@ func TestStreamTextDeltasWithTokenRetryDoesNotSwitchTokenAfterPartialOutput(t *t
 	if len(attemptTokens) != 1 {
 		t.Fatalf("attempt count = %d, want 1 (%#v)", len(attemptTokens), attemptTokens)
 	}
-	exhausted := map[string]struct{}{}
-	for _, token := range []string{"token-1", "token-2"} {
-		if token != attemptTokens[0] {
-			exhausted[token] = struct{}{}
-		}
+	account := accounts.GetAccount(attemptTokens[0])
+	if account["status"] != "异常" || account["quota"] != 0 {
+		t.Fatalf("partial-error account = %#v, want status 异常 quota 0", account)
 	}
-	lease, err := accounts.AcquireTextAccessToken(exhausted)
-	if err != nil {
-		t.Fatalf("AcquireTextAccessToken() for first token after partial error = %v", err)
+}
+
+func TestStreamTextDeltasWithTokenRetryMarksInvalidAccountOnUpstreamError(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		detail      string
+		wantStatus  string
+		wantErrText string
+	}{
+		{name: "token invalidated", detail: "token_invalidated", wantStatus: "异常", wantErrText: "token_invalidated"},
+		{name: "token revoked", detail: "token_revoked", wantStatus: "异常", wantErrText: "token_revoked"},
+		{name: "insufficient quota", detail: "insufficient_quota", wantStatus: "限流", wantErrText: "insufficient_quota"},
+		{name: "usage limit", detail: "usage limit reached", wantStatus: "限流", wantErrText: "usage limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, accounts := newTextLeaseTestEngine(t, "token-1")
+			accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+			stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+				deltas := make(chan string)
+				errs := make(chan error, 1)
+				close(deltas)
+				errs <- errors.New("auth_chat_requirements failed: status=401, body={\"detail\":\"" + tc.detail + "\"}")
+				close(errs)
+				return deltas, errs
+			})
+
+			ctx, _ := WithAccountUsageTracker(context.Background())
+			deltas, errCh := engine.streamTextDeltasWithTokenRetry(ctx, ConversationRequest{Model: "auto"})
+			for range deltas {
+			}
+			err := receiveRetryTestError(t, errCh)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+				t.Fatalf("streamTextDeltasWithTokenRetry() error = %v, want upstream error containing %q", err, tc.wantErrText)
+			}
+			account := accounts.GetAccount("token-1")
+			if account["status"] != tc.wantStatus || account["quota"] != 0 {
+				t.Fatalf("account = %#v, want status %s quota 0", account, tc.wantStatus)
+			}
+			usedAccounts := AccountUsageFromContext(ctx)
+			if len(usedAccounts) != 1 || usedAccounts[0]["account_id"] == "" || usedAccounts[0]["token_preview"] == "" {
+				t.Fatalf("used accounts = %#v, want one recorded upstream account", usedAccounts)
+			}
+		})
 	}
-	if lease.Token != attemptTokens[0] {
-		t.Fatalf("acquired token = %q, want released partial-attempt token %q", lease.Token, attemptTokens[0])
-	}
-	lease.Release()
 }
 
 func TestImageChatRouteStillWinsWhenToolsPresent(t *testing.T) {

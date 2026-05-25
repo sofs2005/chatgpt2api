@@ -524,6 +524,70 @@ func TestLogsEndpointUsesDefaultLogView(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsCallLogIncludesUpstreamAccountPreview(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	const fullToken = "secret-upstream-token-for-log-test"
+	ctx, tracker := protocol.WithAccountUsageTracker(context.Background())
+	tracker.Record(fullToken)
+	app.logCall(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, "文本生成", http.MethodPost, "/v1/chat/completions", "gpt-5", time.Now(), "success", http.StatusOK, "", nil, auditRequestCapture{})
+
+	logs := app.logs.Search(service.LogQuery{Limit: 10})
+	item := findLogBySummary(logs, "文本生成调用完成")
+	if item == nil {
+		t.Fatalf("expected chat completions log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if util.Clean(detail["upstream_account_id"]) == "" || util.Clean(detail["upstream_token_preview"]) == "" {
+		t.Fatalf("log detail missing upstream singleton fields: %#v", detail)
+	}
+	accounts := util.AsMapSlice(detail["upstream_accounts"])
+	if len(accounts) != 1 || accounts[0]["account_id"] != detail["upstream_account_id"] || accounts[0]["token_preview"] != detail["upstream_token_preview"] {
+		t.Fatalf("log detail upstream accounts = %#v, detail = %#v", accounts, detail)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal log item: %v", err)
+	}
+	if strings.Contains(string(encoded), fullToken) {
+		t.Fatalf("log JSON leaked full upstream token: %s", encoded)
+	}
+}
+
+func TestRunLoggedChatTaskCreatesAccountUsageTrackerForLogs(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	const fullToken = "task-chat-upstream-token-for-log-test"
+	app.engine.Accounts.AddAccounts([]string{fullToken})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := app.runLoggedChatTask(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, map[string]any{
+		"model":    "gpt-5",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	})
+	if err == nil {
+		t.Fatal("runLoggedChatTask() error = nil, want canceled upstream error")
+	}
+	logs := app.logs.Search(service.LogQuery{Limit: 20})
+	item := findLogBySummary(logs, "文本生成调用失败")
+	if item == nil {
+		t.Fatalf("expected failed chat task log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if detail["endpoint"] != "/api/creation-tasks/chat-completions" || util.Clean(detail["upstream_account_id"]) == "" || util.Clean(detail["upstream_token_preview"]) == "" {
+		t.Fatalf("chat task log detail missing upstream account fields: %#v", detail)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal log item: %v", err)
+	}
+	if strings.Contains(string(encoded), fullToken) {
+		t.Fatalf("chat task log JSON leaked full upstream token: %s", encoded)
+	}
+}
+
 func TestCreationTaskResponseImageRouteIsNotAnAdminTaskResource(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()

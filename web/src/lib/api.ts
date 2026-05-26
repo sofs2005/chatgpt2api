@@ -122,6 +122,7 @@ export function supportsImageOutputCompression(format: ImageOutputFormat) {
 export type AuthRole = "admin" | "user";
 export type AnnouncementTarget = "login" | "image";
 export type LogView = "all" | "meaningful" | "business";
+export type AccountScheduleMode = "load_balance" | "fill_first";
 
 export type PermissionMenu = {
   id: string;
@@ -147,6 +148,7 @@ export type Account = {
   token_preview?: string;
   type: AccountType;
   status: AccountStatus;
+  enabled: boolean;
   quota: number;
   imageQuotaUnknown?: boolean;
   email?: string | null;
@@ -175,6 +177,7 @@ type AccountMutationResponse = {
   items: Account[];
   added?: number;
   skipped?: number;
+  updated?: number;
   removed?: number;
   refreshed?: number;
   session_refreshed?: number;
@@ -213,6 +216,34 @@ type AccountRefreshResponse = {
   duration_ms?: number;
 };
 
+export type UpstreamAccountActionOptions = {
+  disable_memory?: boolean;
+  hide_conversations?: boolean;
+  delete_files?: boolean;
+  file_page_limit?: number;
+};
+
+export type UpstreamAccountActionResult = {
+  account_id: string;
+  access_token?: string;
+  token_preview?: string;
+  success: boolean;
+  status: string;
+  message?: string;
+  error?: string;
+  duration_ms?: number;
+  actions?: Record<string, unknown>;
+};
+
+export type UpstreamAccountActionResponse = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  duration_ms?: number;
+  errors: Array<{ access_token?: string; account_id?: string; error: string }>;
+  results: UpstreamAccountActionResult[];
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -236,6 +267,8 @@ export type SettingsConfig = {
   default_log_view?: LogView | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
+  text_account_schedule_mode?: AccountScheduleMode | string;
+  image_account_schedule_mode?: AccountScheduleMode | string;
   log_levels?: string[];
   linuxdo_enabled?: boolean;
   linuxdo_client_id?: string;
@@ -829,6 +862,20 @@ export async function refreshAccounts(accountIds: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
     body: { account_ids: accountIds },
+  });
+}
+
+export async function toggleAccountsEnabled(accountIds: string[], enabled: boolean) {
+  return httpRequest<AccountMutationResponse>("/api/accounts/toggle-enabled", {
+    method: "POST",
+    body: { account_ids: accountIds, enabled },
+  });
+}
+
+export async function runUpstreamAccountActions(accountIds: string[], options: UpstreamAccountActionOptions) {
+  return httpRequest<UpstreamAccountActionResponse>("/api/accounts/upstream-actions", {
+    method: "POST",
+    body: { account_ids: accountIds, ...options },
   });
 }
 

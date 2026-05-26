@@ -524,6 +524,70 @@ func TestLogsEndpointUsesDefaultLogView(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsCallLogIncludesUpstreamAccountPreview(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	const fullToken = "secret-upstream-token-for-log-test"
+	ctx, tracker := protocol.WithAccountUsageTracker(context.Background())
+	tracker.Record(fullToken)
+	app.logCall(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, "文本生成", http.MethodPost, "/v1/chat/completions", "gpt-5", time.Now(), "success", http.StatusOK, "", nil, auditRequestCapture{})
+
+	logs := app.logs.Search(service.LogQuery{Limit: 10})
+	item := findLogBySummary(logs, "文本生成调用完成")
+	if item == nil {
+		t.Fatalf("expected chat completions log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if util.Clean(detail["upstream_account_id"]) == "" || util.Clean(detail["upstream_token_preview"]) == "" {
+		t.Fatalf("log detail missing upstream singleton fields: %#v", detail)
+	}
+	accounts := util.AsMapSlice(detail["upstream_accounts"])
+	if len(accounts) != 1 || accounts[0]["account_id"] != detail["upstream_account_id"] || accounts[0]["token_preview"] != detail["upstream_token_preview"] {
+		t.Fatalf("log detail upstream accounts = %#v, detail = %#v", accounts, detail)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal log item: %v", err)
+	}
+	if strings.Contains(string(encoded), fullToken) {
+		t.Fatalf("log JSON leaked full upstream token: %s", encoded)
+	}
+}
+
+func TestRunLoggedChatTaskCreatesAccountUsageTrackerForLogs(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	const fullToken = "task-chat-upstream-token-for-log-test"
+	app.engine.Accounts.AddAccounts([]string{fullToken})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := app.runLoggedChatTask(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, map[string]any{
+		"model":    "gpt-5",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	})
+	if err == nil {
+		t.Fatal("runLoggedChatTask() error = nil, want canceled upstream error")
+	}
+	logs := app.logs.Search(service.LogQuery{Limit: 20})
+	item := findLogBySummary(logs, "文本生成调用失败")
+	if item == nil {
+		t.Fatalf("expected failed chat task log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if detail["endpoint"] != "/api/creation-tasks/chat-completions" || util.Clean(detail["upstream_account_id"]) == "" || util.Clean(detail["upstream_token_preview"]) == "" {
+		t.Fatalf("chat task log detail missing upstream account fields: %#v", detail)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal log item: %v", err)
+	}
+	if strings.Contains(string(encoded), fullToken) {
+		t.Fatalf("chat task log JSON leaked full upstream token: %s", encoded)
+	}
+}
+
 func TestCreationTaskResponseImageRouteIsNotAnAdminTaskResource(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
@@ -1702,6 +1766,63 @@ func TestRBACPermissionsGateManagementAPIs(t *testing.T) {
 	tokens := util.AsStringSlice(tokenExport["tokens"])
 	if len(tokens) != 1 || tokens[0] != "pool-token" {
 		t.Fatalf("exported tokens = %#v", tokenExport["tokens"])
+	}
+}
+
+func TestAccountToggleEnabledEndpoint(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	app.accounts.AddAccounts([]string{"token-1", "token-2"})
+	app.accounts.UpdateAccount("token-1", map[string]any{"status": "正常"})
+	app.accounts.UpdateAccount("token-2", map[string]any{"status": "限流"})
+
+	accounts := app.accounts.ListAccounts()
+	account1 := findHTTPItem(accounts, util.SHA1Short("token-1", 16))
+	account2 := findHTTPItem(accounts, util.SHA1Short("token-2", 16))
+	if account1 == nil || account2 == nil {
+		t.Fatalf("created accounts missing: %#v", accounts)
+	}
+	account1ID := util.Clean(account1["id"])
+	account2ID := util.Clean(account2["id"])
+
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/toggle-enabled", strings.NewReader(`{"account_ids":["`+account1ID+`","`+account2ID+`"],"enabled":false}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("disable accounts status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("disable accounts json: %v", err)
+	}
+	if util.ToInt(payload["updated"], -1) != 2 || util.ToInt(payload["skipped"], -1) != 0 {
+		t.Fatalf("disable result = %#v", payload)
+	}
+	items := logItems(payload)
+	updated2 := findHTTPItem(items, account2ID)
+	if updated2 == nil || updated2["status"] != "限流" || updated2["enabled"] != false {
+		t.Fatalf("disabled token-2 item = %#v in %#v", updated2, payload)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/accounts/toggle-enabled", strings.NewReader(`{"account_id":"`+account2ID+`","enabled":true}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("enable account status = %d body = %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("enable account json: %v", err)
+	}
+	if util.ToInt(payload["updated"], -1) != 1 || util.ToInt(payload["skipped"], -1) != 0 {
+		t.Fatalf("enable result = %#v", payload)
+	}
+	items = logItems(payload)
+	updated2 = findHTTPItem(items, account2ID)
+	if updated2 == nil || updated2["status"] != "限流" || updated2["enabled"] != true {
+		t.Fatalf("enabled token-2 item = %#v in %#v", updated2, payload)
 	}
 }
 

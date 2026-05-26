@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"chatgpt2api/internal/backend"
@@ -22,6 +23,68 @@ type StreamResult struct {
 }
 
 const ImageOutputSlotAcquirerPayloadKey = "image_output_slot_acquirer"
+
+type accountUsageContextKey struct{}
+
+type AccountUsageTracker struct {
+	mu     sync.Mutex
+	tokens []string
+	seen   map[string]struct{}
+}
+
+func WithAccountUsageTracker(ctx context.Context) (context.Context, *AccountUsageTracker) {
+	tracker := &AccountUsageTracker{seen: map[string]struct{}{}}
+	return context.WithValue(ctx, accountUsageContextKey{}, tracker), tracker
+}
+
+func AccountUsageFromContext(ctx context.Context) []map[string]any {
+	tracker, _ := ctx.Value(accountUsageContextKey{}).(*AccountUsageTracker)
+	if tracker == nil {
+		return nil
+	}
+	return tracker.Accounts()
+}
+
+func recordAccountUsage(ctx context.Context, token string) {
+	tracker, _ := ctx.Value(accountUsageContextKey{}).(*AccountUsageTracker)
+	if tracker == nil {
+		return
+	}
+	tracker.Record(token)
+}
+
+func (t *AccountUsageTracker) Record(token string) {
+	token = strings.TrimSpace(token)
+	if t == nil || token == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.seen == nil {
+		t.seen = map[string]struct{}{}
+	}
+	if _, ok := t.seen[token]; ok {
+		return
+	}
+	t.seen[token] = struct{}{}
+	t.tokens = append(t.tokens, token)
+}
+
+func (t *AccountUsageTracker) Accounts() []map[string]any {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]map[string]any, 0, len(t.tokens))
+	for _, token := range t.tokens {
+		out = append(out, map[string]any{
+			"account_id":    util.SHA1Short(token, 16),
+			"token_preview": util.AnonymizeToken(token),
+		})
+	}
+	return out
+}
 
 // ImageOutputChargePayloadKey names the per-image-output billing charge hook
 // carried through the request body. The value must be an ImageOutputCharger
@@ -156,65 +219,107 @@ func StreamImageChunks(outputs <-chan ImageOutput) <-chan map[string]any {
 	return out
 }
 
-func (e *Engine) textBackendWithRetry(exhaustedTokens map[string]struct{}) (*backend.Client, string, bool) {
-	token, ok := e.Accounts.GetTextAccessTokenWithRetry(exhaustedTokens)
-	if !ok {
-		return nil, "", false
+func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]struct{}, fn func(*backend.Client, service.AccountLease) error) error {
+	if e == nil || e.Accounts == nil {
+		return fmt.Errorf("no account service configured")
 	}
-	return e.TextBackend(token), token, true
+	lease, err := e.Accounts.AcquireTextAccessToken(exhaustedTokens)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+	recordAccountUsage(ctx, lease.Token)
+	if fn == nil {
+		return nil
+	}
+	return fn(e.TextBackend(lease.Token), lease)
 }
 
-func (e *Engine) markTextTokenExpiredForRetry(accessToken string, err error, exhaustedTokens map[string]struct{}) bool {
-	if err == nil || !service.IsAccountTokenExpiredErrorMessage(err.Error()) {
+var streamTextDeltasForTokenRetry = func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+	return e.StreamTextDeltas(ctx, client, request)
+}
+
+func (e *Engine) handleTextAccountErrorForRetry(accessToken string, err error, exhaustedTokens map[string]struct{}, allowRetry bool) bool {
+	if err == nil || e == nil || e.Accounts == nil {
 		return false
 	}
-	exhaustedTokens[accessToken] = struct{}{}
-	if _, shouldRetry := e.Accounts.HandleTokenExpiredOnRequest(accessToken); shouldRetry {
-		return true
+	if allowRetry && service.IsAccountTokenExpiredErrorMessage(err.Error()) {
+		exhaustedTokens[accessToken] = struct{}{}
+		if _, shouldRetry := e.Accounts.HandleTokenExpiredOnRequest(accessToken); shouldRetry {
+			return true
+		}
 	}
 	e.Accounts.ApplyAccountError(accessToken, "text_stream", err)
 	return false
 }
 
-func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, firstClient *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, request ConversationRequest) (<-chan string, <-chan error) {
 	out := make(chan string)
 	errOut := make(chan error, 1)
 	go func() {
 		defer close(out)
 		defer close(errOut)
 		exhaustedTokens := map[string]struct{}{}
-		client := firstClient
 		var lastErr error
 		for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
-			if client == nil {
-				var ok bool
-				client, _, ok = e.textBackendWithRetry(exhaustedTokens)
-				if !ok {
-					break
+			retry := false
+			completed := false
+			err := e.withTextLease(ctx, exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
+				deltas, upstreamErr := streamTextDeltasForTokenRetry(ctx, e, client, request)
+				sent := false
+				for {
+					select {
+					case delta, ok := <-deltas:
+						if !ok {
+							goto textDeltasClosed
+						}
+						sent = true
+						select {
+						case out <- delta:
+						case <-ctx.Done():
+							errOut <- ctx.Err()
+							completed = true
+							return nil
+						}
+					case <-ctx.Done():
+						errOut <- ctx.Err()
+						completed = true
+						return nil
+					}
 				}
-			}
-			deltas, upstreamErr := e.StreamTextDeltas(ctx, client, request)
-			sent := false
-			for delta := range deltas {
-				sent = true
+			textDeltasClosed:
+				var err error
 				select {
-				case out <- delta:
+				case err = <-upstreamErr:
 				case <-ctx.Done():
 					errOut <- ctx.Err()
-					return
+					completed = true
+					return nil
 				}
+				if err == nil {
+					errOut <- nil
+					completed = true
+					return nil
+				}
+				lastErr = err
+				if !e.handleTextAccountErrorForRetry(lease.Token, err, exhaustedTokens, !sent) {
+					errOut <- err
+					completed = true
+					return nil
+				}
+				retry = true
+				return nil
+			})
+			if err != nil {
+				lastErr = err
+				break
 			}
-			err := <-upstreamErr
-			if err == nil {
-				errOut <- nil
+			if completed {
 				return
 			}
-			lastErr = err
-			if sent || !e.markTextTokenExpiredForRetry(client.AccessToken, err, exhaustedTokens) {
-				errOut <- err
-				return
+			if !retry {
+				break
 			}
-			client = nil
 		}
 		if lastErr != nil {
 			errOut <- lastErr
@@ -226,7 +331,7 @@ func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, firstClient
 }
 
 func (e *Engine) collectTextWithTokenRetry(ctx context.Context, request ConversationRequest) (string, error) {
-	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, nil, request)
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, request)
 	var parts []string
 	for delta := range deltas {
 		parts = append(parts, delta)
@@ -238,17 +343,34 @@ func (e *Engine) collectVisionTextWithTokenRetry(ctx context.Context, messages [
 	exhaustedTokens := map[string]struct{}{}
 	var lastErr error
 	for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
-		client, token, ok := e.textBackendWithRetry(exhaustedTokens)
-		if !ok {
-			break
+		var text string
+		retry := false
+		succeeded := false
+		err := e.withTextLease(ctx, exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
+			var collectErr error
+			text, collectErr = e.CollectVisionText(ctx, client, messages, model, images)
+			if collectErr == nil {
+				succeeded = true
+				return nil
+			}
+			lastErr = collectErr
+			if !e.handleTextAccountErrorForRetry(lease.Token, collectErr, exhaustedTokens, true) {
+				return collectErr
+			}
+			retry = true
+			return nil
+		})
+		if err != nil {
+			if lastErr != nil {
+				return "", lastErr
+			}
+			return "", err
 		}
-		text, err := e.CollectVisionText(ctx, client, messages, model, images)
-		if err == nil {
+		if succeeded {
 			return text, nil
 		}
-		lastErr = err
-		if !e.markTextTokenExpiredForRetry(token, err, exhaustedTokens) {
-			return "", err
+		if !retry {
+			break
 		}
 	}
 	if lastErr != nil {
@@ -257,45 +379,73 @@ func (e *Engine) collectVisionTextWithTokenRetry(ctx context.Context, messages [
 	return "", fmt.Errorf("no available text access token")
 }
 
-func (e *Engine) streamVisionDeltasWithTokenRetry(ctx context.Context, firstClient *backend.Client, messages []map[string]any, model string, images []backend.VisionImage) (<-chan string, <-chan error) {
+func (e *Engine) streamVisionDeltasWithTokenRetry(ctx context.Context, messages []map[string]any, model string, images []backend.VisionImage) (<-chan string, <-chan error) {
 	out := make(chan string)
 	errOut := make(chan error, 1)
 	go func() {
 		defer close(out)
 		defer close(errOut)
 		exhaustedTokens := map[string]struct{}{}
-		client := firstClient
 		var lastErr error
 		for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
-			if client == nil {
-				var ok bool
-				client, _, ok = e.textBackendWithRetry(exhaustedTokens)
-				if !ok {
-					break
+			retry := false
+			completed := false
+			err := e.withTextLease(ctx, exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
+				deltas, upstreamErr := client.StreamMultimodalConversation(ctx, messages, model, images)
+				sent := false
+				for {
+					select {
+					case delta, ok := <-deltas:
+						if !ok {
+							goto textDeltasClosed
+						}
+						sent = true
+						select {
+						case out <- delta:
+						case <-ctx.Done():
+							errOut <- ctx.Err()
+							completed = true
+							return nil
+						}
+					case <-ctx.Done():
+						errOut <- ctx.Err()
+						completed = true
+						return nil
+					}
 				}
-			}
-			deltas, upstreamErr := client.StreamMultimodalConversation(ctx, messages, model, images)
-			sent := false
-			for delta := range deltas {
-				sent = true
+			textDeltasClosed:
+				var err error
 				select {
-				case out <- delta:
+				case err = <-upstreamErr:
 				case <-ctx.Done():
 					errOut <- ctx.Err()
-					return
+					completed = true
+					return nil
 				}
+				if err == nil {
+					errOut <- nil
+					completed = true
+					return nil
+				}
+				lastErr = err
+				if !e.handleTextAccountErrorForRetry(lease.Token, err, exhaustedTokens, !sent) {
+					errOut <- err
+					completed = true
+					return nil
+				}
+				retry = true
+				return nil
+			})
+			if err != nil {
+				lastErr = err
+				break
 			}
-			err := <-upstreamErr
-			if err == nil {
-				errOut <- nil
+			if completed {
 				return
 			}
-			lastErr = err
-			if sent || !e.markTextTokenExpiredForRetry(client.AccessToken, err, exhaustedTokens) {
-				errOut <- err
-				return
+			if !retry {
+				break
 			}
-			client = nil
 		}
 		if lastErr != nil {
 			errOut <- lastErr
@@ -317,13 +467,13 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 			if err != nil {
 				return nil, nil, err
 			}
-			items, errCh = e.StreamVisionChatCompletionWithTools(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), messages, model, images, body["tools"], body["tool_choice"])
+			items, errCh = e.StreamVisionChatCompletionWithTools(ctx, messages, model, images, body["tools"], body["tool_choice"])
 		} else {
 			model, messages, err := TextChatParts(body)
 			if err != nil {
 				return nil, nil, err
 			}
-			items, errCh = e.StreamTextChatCompletionWithTools(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), messages, model, body["tools"], body["tool_choice"])
+			items, errCh = e.StreamTextChatCompletionWithTools(ctx, messages, model, body["tools"], body["tool_choice"])
 		}
 		return nil, &StreamResult{Items: items, Err: errCh, Kind: "openai"}, nil
 	}
@@ -345,7 +495,7 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 	if err != nil {
 		return nil, nil, err
 	}
-	text, err := e.collectTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages})
+	text, err := e.collectTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages, Tools: body["tools"], ToolChoice: body["tool_choice"]})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -568,24 +718,24 @@ func maskFencedToolBlocks(text string) string {
 	return b.String()
 }
 
-func (e *Engine) StreamTextChatCompletion(ctx context.Context, client *backend.Client, messages []map[string]any, model string) (<-chan map[string]any, <-chan error) {
-	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, client, ConversationRequest{Model: model, Messages: messages})
+func (e *Engine) StreamTextChatCompletion(ctx context.Context, messages []map[string]any, model string) (<-chan map[string]any, <-chan error) {
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages})
 	return streamChatCompletionEvents(ctx, model, deltas, errCh, nil, nil)
 }
 
-func (e *Engine) StreamTextChatCompletionWithTools(ctx context.Context, client *backend.Client, messages []map[string]any, model string, tools any, choice any) (<-chan map[string]any, <-chan error) {
+func (e *Engine) StreamTextChatCompletionWithTools(ctx context.Context, messages []map[string]any, model string, tools any, choice any) (<-chan map[string]any, <-chan error) {
 	if err := preflightToolChoiceWithoutToolsError(tooladapter.PolicyFromToolChoice(choice), tooladapter.ToolNames(tools)); err != nil {
 		return streamHTTPError(err)
 	}
-	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, client, ConversationRequest{Model: model, Messages: messages})
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages, Tools: tools, ToolChoice: choice})
 	return streamChatCompletionEvents(ctx, model, deltas, errCh, tools, choice)
 }
 
-func (e *Engine) StreamVisionChatCompletion(ctx context.Context, client *backend.Client, messages []map[string]any, model string, images []UploadedImage) (<-chan map[string]any, <-chan error) {
-	return e.StreamVisionChatCompletionWithTools(ctx, client, messages, model, images, nil, nil)
+func (e *Engine) StreamVisionChatCompletion(ctx context.Context, messages []map[string]any, model string, images []UploadedImage) (<-chan map[string]any, <-chan error) {
+	return e.StreamVisionChatCompletionWithTools(ctx, messages, model, images, nil, nil)
 }
 
-func (e *Engine) StreamVisionChatCompletionWithTools(ctx context.Context, client *backend.Client, messages []map[string]any, model string, images []UploadedImage, tools any, choice any) (<-chan map[string]any, <-chan error) {
+func (e *Engine) StreamVisionChatCompletionWithTools(ctx context.Context, messages []map[string]any, model string, images []UploadedImage, tools any, choice any) (<-chan map[string]any, <-chan error) {
 	if err := preflightToolChoiceWithoutToolsError(tooladapter.PolicyFromToolChoice(choice), tooladapter.ToolNames(tools)); err != nil {
 		return streamHTTPError(err)
 	}
@@ -597,7 +747,7 @@ func (e *Engine) StreamVisionChatCompletionWithTools(ctx context.Context, client
 			FileName:    img.Filename,
 		}
 	}
-	deltas, errCh := e.streamVisionDeltasWithTokenRetry(ctx, client, messages, model, visionImages)
+	deltas, errCh := e.streamVisionDeltasWithTokenRetry(ctx, messages, model, visionImages)
 	return streamChatCompletionEvents(ctx, model, deltas, errCh, tools, choice)
 }
 
@@ -1096,7 +1246,7 @@ func (e *Engine) StreamTextResponse(ctx context.Context, body map[string]any) (<
 }
 
 func (e *Engine) StreamTextResponseWithMessages(ctx context.Context, model string, messages []map[string]any) (<-chan map[string]any, <-chan error) {
-	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), ConversationRequest{Model: model, Messages: messages})
+	deltas, errCh := e.streamTextDeltasWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages})
 	return streamTextResponseEvents(ctx, model, deltas, errCh)
 }
 
@@ -1405,7 +1555,7 @@ func (e *Engine) HandleMessages(ctx context.Context, body map[string]any) (map[s
 		items, errCh := e.StreamAnthropicEvents(ctx, request)
 		return nil, &StreamResult{Items: items, Err: errCh, Kind: "anthropic"}, nil
 	}
-	items, errCh := e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), request.Messages, request.Model)
+	items, errCh := e.StreamTextChatCompletion(ctx, request.Messages, request.Model)
 	text := CollectChatContent(items)
 	if err := <-errCh; err != nil {
 		return nil, nil, err
@@ -1629,7 +1779,7 @@ func ContentBlocksWithChoice(text string, tools any, choice any) ([]map[string]a
 }
 
 var streamTextChatCompletionForAnthropic = func(ctx context.Context, e *Engine, request MessageRequest) (<-chan map[string]any, <-chan error) {
-	return e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), request.Messages, request.Model)
+	return e.StreamTextChatCompletion(ctx, request.Messages, request.Model)
 }
 
 func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageRequest) (<-chan map[string]any, <-chan error) {

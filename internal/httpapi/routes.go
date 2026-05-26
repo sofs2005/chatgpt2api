@@ -1220,6 +1220,60 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		result := a.accounts.RefreshAccounts(r.Context(), tokens)
 		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)
+	case r.URL.Path == "/api/accounts/upstream-actions" && r.Method == http.MethodPost:
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		tokens := util.AsStringSlice(body["access_tokens"])
+		accountIDs := util.AsStringSlice(body["account_ids"])
+		if len(tokens) == 0 && len(accountIDs) > 0 {
+			tokens = a.accounts.ListTokensByIDs(accountIDs)
+		}
+		if len(tokens) == 0 {
+			if len(accountIDs) > 0 {
+				util.WriteError(w, http.StatusNotFound, "account not found")
+				return
+			}
+			util.WriteError(w, http.StatusBadRequest, "access_tokens or account_ids is required")
+			return
+		}
+		options := service.UpstreamAccountActionOptions{
+			DisableMemory:     util.ToBool(body["disable_memory"]),
+			HideConversations: util.ToBool(body["hide_conversations"]),
+			DeleteFiles:       util.ToBool(body["delete_files"]),
+			FilePageLimit:     util.ToInt(body["file_page_limit"], 100),
+		}
+		if !options.DisableMemory && !options.HideConversations && !options.DeleteFiles {
+			util.WriteError(w, http.StatusBadRequest, "at least one upstream action is required")
+			return
+		}
+		result := a.accounts.RunUpstreamAccountActions(r.Context(), tokens, options)
+		a.redactAccountPayloadForIdentity(identity, result)
+		util.WriteJSON(w, http.StatusOK, result)
+	case r.URL.Path == "/api/accounts/toggle-enabled" && r.Method == http.MethodPost:
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		accountIDs := util.AsStringSlice(body["account_ids"])
+		if accountID := util.Clean(body["account_id"]); accountID != "" {
+			accountIDs = append(accountIDs, accountID)
+		}
+		if len(accountIDs) == 0 {
+			util.WriteError(w, http.StatusBadRequest, "account_id or account_ids is required")
+			return
+		}
+		enabledRaw, ok := body["enabled"]
+		if !ok {
+			util.WriteError(w, http.StatusBadRequest, "enabled is required")
+			return
+		}
+		result := a.accounts.SetAccountsEnabledByIDs(accountIDs, util.ToBool(enabledRaw))
+		a.redactAccountPayloadForIdentity(identity, result)
+		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts/update" && r.Method == http.MethodPost:
 		body, _ := readJSONMap(r)
 		token := util.Clean(body["access_token"])

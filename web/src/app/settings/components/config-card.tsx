@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { testProxy, type AccountScheduleMode, type ProxyTestResult } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 import { useSettingsStore } from "../store";
@@ -30,6 +30,10 @@ import { SettingsCard, settingsInputClassName } from "./settings-ui";
 
 const configSectionClassName = "flex flex-col gap-3";
 const configFieldClassName = "min-w-0 gap-1.5";
+
+function toAccountScheduleMode(value: string): AccountScheduleMode {
+  return value === "fill_first" ? "fill_first" : "load_balance";
+}
 
 function ConfigTip({ content }: { content: string }) {
   return (
@@ -183,6 +187,12 @@ export function ConfigCard() {
   );
   const setAutoRemoveRateLimitedAccounts = useSettingsStore(
     (state) => state.setAutoRemoveRateLimitedAccounts,
+  );
+  const setTextAccountScheduleMode = useSettingsStore(
+    (state) => state.setTextAccountScheduleMode,
+  );
+  const setImageAccountScheduleMode = useSettingsStore(
+    (state) => state.setImageAccountScheduleMode,
   );
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
@@ -521,6 +531,59 @@ export function ConfigCard() {
               onCheckedChange={setRegistrationEnabled}
               label="开放账号注册"
             />
+          </div>
+        </section>
+
+        <section className={configSectionClassName}>
+          <SectionHeading
+            title="账号调度"
+            tip="负载均衡会按当前策略从空闲账号中选择；填充优先会尽量持续使用当前账号，直到出错、无额度或忙碌后再切换。"
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-text-account-schedule-mode">
+                LLM 调度模式
+              </ConfigFieldLabel>
+              <Select
+                value={String(config?.text_account_schedule_mode || "load_balance")}
+                onValueChange={(value) =>
+                  setTextAccountScheduleMode(toAccountScheduleMode(value))
+                }
+              >
+                <SelectTrigger
+                  id="settings-text-account-schedule-mode"
+                  className={settingsInputClassName}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="load_balance">负载均衡</SelectItem>
+                  <SelectItem value="fill_first">填充优先</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-account-schedule-mode">
+                生图调度模式
+              </ConfigFieldLabel>
+              <Select
+                value={String(config?.image_account_schedule_mode || "load_balance")}
+                onValueChange={(value) =>
+                  setImageAccountScheduleMode(toAccountScheduleMode(value))
+                }
+              >
+                <SelectTrigger
+                  id="settings-image-account-schedule-mode"
+                  className={settingsInputClassName}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="load_balance">负载均衡</SelectItem>
+                  <SelectItem value="fill_first">填充优先</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
           </div>
         </section>
 

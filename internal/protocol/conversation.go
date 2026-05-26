@@ -64,6 +64,8 @@ type ConversationRequest struct {
 	Model                   string
 	Prompt                  string
 	Messages                []map[string]any
+	Tools                   any
+	ToolChoice              any
 	Images                  []string
 	InputImageMask          string
 	N                       int
@@ -366,7 +368,7 @@ func (e *Engine) StreamTextDeltas(ctx context.Context, client *backend.Client, r
 	go func() {
 		defer close(out)
 		defer close(errCh)
-		events, convErr := e.ConversationEvents(ctx, client, request.Messages, request.Model, request.Prompt)
+		events, convErr := e.ConversationEvents(ctx, client, request.Messages, request.Model, request.Prompt, request.Tools, request.ToolChoice)
 		for event := range events {
 			if event["type"] != "conversation.delta" {
 				continue
@@ -409,7 +411,7 @@ func (e *Engine) CollectVisionText(ctx context.Context, client *backend.Client, 
 	return strings.Join(parts, ""), <-errCh
 }
 
-func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client, messages []map[string]any, model, prompt string) (<-chan ConversationEvent, <-chan error) {
+func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client, messages []map[string]any, model, prompt string, tools any, choice any) (<-chan ConversationEvent, <-chan error) {
 	out := make(chan ConversationEvent)
 	errCh := make(chan error, 1)
 	go func() {
@@ -421,7 +423,7 @@ func (e *Engine) ConversationEvents(ctx context.Context, client *backend.Client,
 		}
 		historyText := AssistantHistoryText(normalized)
 		historyMessages := AssistantHistoryMessages(normalized)
-		payloads, upstreamErr := client.StreamConversation(ctx, normalized, model, prompt)
+		payloads, upstreamErr := client.StreamConversation(ctx, normalized, model, prompt, tools, choice)
 		iterErr := IterConversationPayloads(ctx, payloads, historyText, historyMessages, out)
 		upErr := <-upstreamErr
 		if iterErr != nil {
@@ -582,147 +584,170 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 		preferredToken = session.AccessToken
 	}
 	for {
-		token, err := e.nextImageAccessToken(ctx, preferredToken)
+		lease, err := e.nextImageAccessLease(ctx, preferredToken)
 		if err != nil {
 			result.lastError = err.Error()
 			result.err = NewImageGenerationError(err.Error())
 			return result
 		}
-		useSession := hasSession && token == preferredToken
-		requestForToken := request
-		if useSession {
-			requestForToken.UpstreamConversationID = session.UpstreamConversationID
-			requestForToken.UpstreamParentMessageID = session.UpstreamParentMessageID
-		} else {
-			if hasSession {
+		retry := func() bool {
+			defer lease.Release()
+			token := lease.Token
+			useSession := hasSession && token == preferredToken
+			requestForToken := request
+			if useSession {
+				requestForToken.UpstreamConversationID = session.UpstreamConversationID
+				requestForToken.UpstreamParentMessageID = session.UpstreamParentMessageID
+			} else {
+				if hasSession {
+					e.invalidateImageConversationSession(request)
+					hasSession = false
+					preferredToken = ""
+				}
+				requestForToken.UpstreamConversationID = ""
+				requestForToken.UpstreamParentMessageID = ""
+				if requestForToken.FallbackReferenceImage != "" {
+					requestForToken.Images = append(append([]string(nil), request.Images...), requestForToken.FallbackReferenceImage)
+				}
+			}
+			emittedForToken := false
+			returnedMessage := false
+			returnedResult := false
+			rateLimitedForToken := false
+			rateLimitMessage := ""
+			lastConversationID := ""
+			lastMessageID := ""
+			client := e.newImageClient(token)
+			outputs, imageErr := e.StreamImageOutputs(ctx, client, requestForToken, index, request.N)
+			for output := range outputs {
+				if output.ConversationID != "" {
+					lastConversationID = output.ConversationID
+				}
+				if output.MessageID != "" {
+					lastMessageID = output.MessageID
+				}
+				if output.Kind == "message" && service.IsAccountRateLimitedErrorMessage(output.Text) {
+					rateLimitedForToken = true
+					rateLimitMessage = output.Text
+					result.lastError = output.Text
+					continue
+				}
+				if output.Kind == "message" && request.MessageAsError {
+					returnedMessage = true
+					result.lastError = firstNonEmpty(output.Text, "Image generation returned a text response instead of image data.")
+					if useSession {
+						continue
+					}
+					if e.Accounts != nil {
+						e.Accounts.MarkImageResult(token, false)
+					}
+					result.err = &ImageGenerationError{Message: result.lastError, StatusCode: 400, Type: "invalid_request_error", Code: "image_generation_text_response"}
+					return false
+				}
+				if output.Kind == "result" && request.ChargeImageOutput != nil && !output.ChargeHandled {
+					if err := request.ChargeImageOutput(index); err != nil {
+						if e.Accounts != nil {
+							e.Accounts.MarkImageResult(token, false)
+						}
+						var billingErr service.BillingLimitError
+						if errors.As(err, &billingErr) {
+							result.err = billingErr
+							result.lastError = billingErr.Error()
+						} else {
+							result.err = NewImageGenerationError(err.Error())
+							result.lastError = err.Error()
+						}
+						return false
+					}
+				}
+				result.emitted = true
+				emittedForToken = true
+				returnedMessage = output.Kind == "message"
+				returnedResult = returnedResult || output.Kind == "result"
+				select {
+				case out <- output:
+				case <-ctx.Done():
+					if e.Accounts != nil {
+						e.Accounts.MarkImageResult(token, false)
+					}
+					result.err = ctx.Err()
+					result.lastError = ctx.Err().Error()
+					return false
+				}
+			}
+			err = <-imageErr
+			if err == nil {
+				if rateLimitedForToken {
+					if e.Accounts != nil {
+						e.Accounts.MarkImageResult(token, false)
+						e.Accounts.ApplyAccountErrorMessage(token, "image_stream", rateLimitMessage)
+					}
+					if useSession {
+						e.invalidateImageConversationSession(request)
+						hasSession = false
+						preferredToken = ""
+					}
+					return true
+				}
+				if returnedMessage || !returnedResult {
+					if e.Accounts != nil {
+						e.Accounts.MarkImageResult(token, false)
+					}
+					if useSession {
+						e.invalidateImageConversationSession(request)
+						hasSession = false
+						preferredToken = ""
+						return true
+					}
+					result.returnedMessage = returnedMessage || !returnedResult
+					return false
+				}
+				if e.Accounts != nil {
+					e.Accounts.MarkImageResult(token, true)
+				}
+				e.bindImageConversationSession(request, token, lastConversationID, lastMessageID)
+				return false
+			}
+			var billingErr service.BillingLimitError
+			if errors.As(err, &billingErr) {
+				if e.Accounts != nil {
+					e.Accounts.MarkImageResult(token, false)
+				}
+				result.err = billingErr
+				result.lastError = billingErr.Error()
+				return false
+			}
+			if e.Accounts != nil {
+				e.Accounts.MarkImageResult(token, false)
+			}
+			result.lastError = err.Error()
+			if useSession {
 				e.invalidateImageConversationSession(request)
 				hasSession = false
 				preferredToken = ""
-			}
-			requestForToken.UpstreamConversationID = ""
-			requestForToken.UpstreamParentMessageID = ""
-			if requestForToken.FallbackReferenceImage != "" {
-				requestForToken.Images = append(append([]string(nil), request.Images...), requestForToken.FallbackReferenceImage)
-			}
-		}
-		emittedForToken := false
-		returnedMessage := false
-		returnedResult := false
-		rateLimitedForToken := false
-		rateLimitMessage := ""
-		lastConversationID := ""
-		lastMessageID := ""
-		client := e.newImageClient(token)
-		outputs, imageErr := e.StreamImageOutputs(ctx, client, requestForToken, index, request.N)
-		for output := range outputs {
-			if output.ConversationID != "" {
-				lastConversationID = output.ConversationID
-			}
-			if output.MessageID != "" {
-				lastMessageID = output.MessageID
-			}
-			if output.Kind == "message" && service.IsAccountRateLimitedErrorMessage(output.Text) {
-				rateLimitedForToken = true
-				rateLimitMessage = output.Text
-				result.lastError = output.Text
-				continue
-			}
-			if output.Kind == "message" && request.MessageAsError {
-				returnedMessage = true
-				result.lastError = firstNonEmpty(output.Text, "Image generation returned a text response instead of image data.")
-				if useSession {
-					continue
-				}
-				if e.Accounts != nil {
-					e.Accounts.MarkImageResult(token, false)
-				}
-				result.err = &ImageGenerationError{Message: result.lastError, StatusCode: 400, Type: "invalid_request_error", Code: "image_generation_text_response"}
-				return result
-			}
-			if output.Kind == "result" && request.ChargeImageOutput != nil && !output.ChargeHandled {
-				if err := request.ChargeImageOutput(index); err != nil {
-					var billingErr service.BillingLimitError
-					if errors.As(err, &billingErr) {
-						result.err = billingErr
-						result.lastError = billingErr.Error()
-					} else {
-						result.err = NewImageGenerationError(err.Error())
-						result.lastError = err.Error()
-					}
-					return result
-				}
-			}
-			result.emitted = true
-			emittedForToken = true
-			returnedMessage = output.Kind == "message"
-			returnedResult = returnedResult || output.Kind == "result"
-			out <- output
-		}
-		err = <-imageErr
-		if err == nil {
-			if rateLimitedForToken {
-				if e.Accounts != nil {
-					e.Accounts.MarkImageResult(token, false)
-					e.Accounts.ApplyAccountErrorMessage(token, "image_stream", rateLimitMessage)
-				}
-				if useSession {
-					e.invalidateImageConversationSession(request)
-					hasSession = false
-					preferredToken = ""
-				}
-				continue
-			}
-			if returnedMessage || !returnedResult {
-				if e.Accounts != nil {
-					e.Accounts.MarkImageResult(token, false)
-				}
-				if useSession {
-					e.invalidateImageConversationSession(request)
-					hasSession = false
-					preferredToken = ""
-					continue
-				}
-				result.returnedMessage = returnedMessage || !returnedResult
-				return result
+				return true
 			}
 			if e.Accounts != nil {
-				e.Accounts.MarkImageResult(token, true)
-			}
-			e.bindImageConversationSession(request, token, lastConversationID, lastMessageID)
-			return result
-		}
-		var billingErr service.BillingLimitError
-		if errors.As(err, &billingErr) {
-			result.err = billingErr
-			result.lastError = billingErr.Error()
-			return result
-		}
-		if e.Accounts != nil {
-			e.Accounts.MarkImageResult(token, false)
-		}
-		result.lastError = err.Error()
-		if useSession {
-			e.invalidateImageConversationSession(request)
-			hasSession = false
-			preferredToken = ""
-			continue
-		}
-		if e.Accounts != nil {
-			if normalized, handled := e.Accounts.ApplyAccountErrorMessage(token, "image_stream", result.lastError); handled {
-				result.lastError = normalized
-				if service.IsAccountRateLimitedErrorMessage(err.Error()) || !emittedForToken {
-					continue
+				if normalized, handled := e.Accounts.ApplyAccountErrorMessage(token, "image_stream", result.lastError); handled {
+					result.lastError = normalized
+					if service.IsAccountRateLimitedErrorMessage(err.Error()) || !emittedForToken {
+						return true
+					}
 				}
 			}
-		}
-		if !emittedForToken && IsTokenInvalidError(result.lastError) {
+			if !emittedForToken && IsTokenInvalidError(result.lastError) {
+				return true
+			}
+			if !returnedResult && isTransientImageStreamErrorMessage(result.lastError) && transientAttempts < maxTransientImageStreamAttempts {
+				transientAttempts++
+				return true
+			}
+			result.err = NewImageGenerationError(imageStreamErrorMessage(result.lastError))
+			return false
+		}()
+		if retry {
 			continue
 		}
-		if !returnedResult && isTransientImageStreamErrorMessage(result.lastError) && transientAttempts < maxTransientImageStreamAttempts {
-			transientAttempts++
-			continue
-		}
-		result.err = NewImageGenerationError(imageStreamErrorMessage(result.lastError))
 		return result
 	}
 }
@@ -734,22 +759,34 @@ func (e *Engine) StreamImageOutputs(ctx context.Context, client *backend.Client,
 	return e.StreamResponsesImageOutputs(ctx, client, request, index, total)
 }
 
-func (e *Engine) nextImageAccessToken(ctx context.Context, preferredToken string) (string, error) {
-	if e.ImageTokenProvider != nil {
-		return e.ImageTokenProvider(ctx)
-	}
-	if e.Accounts == nil {
-		return "", fmt.Errorf("no account service configured")
-	}
-	preferredToken = strings.TrimSpace(preferredToken)
-	if preferredToken != "" {
-		if token, err := e.Accounts.GetAvailableAccessTokenFor(ctx, func(account map[string]any) bool {
-			return util.Clean(account["access_token"]) == preferredToken
-		}); err == nil && token != "" {
-			return token, nil
+func (e *Engine) nextImageAccessLease(ctx context.Context, preferredToken string) (service.AccountLease, error) {
+	if e.Accounts != nil {
+		preferredToken = strings.TrimSpace(preferredToken)
+		if preferredToken != "" {
+			lease, err := e.Accounts.GetAvailableImageAccessTokenFor(ctx, func(account map[string]any) bool {
+				return util.Clean(account["access_token"]) == preferredToken
+			})
+			if err == nil && lease.Token != "" {
+				return lease, nil
+			}
+			lease.Release()
+		}
+		lease, err := e.Accounts.GetAvailableImageAccessToken(ctx)
+		if err == nil {
+			return lease, nil
+		}
+		if e.ImageTokenProvider == nil || len(e.Accounts.ListAccounts()) > 0 {
+			return service.AccountLease{}, err
 		}
 	}
-	return e.Accounts.GetAvailableAccessTokenFor(ctx, nil)
+	if e.ImageTokenProvider != nil {
+		token, err := e.ImageTokenProvider(ctx)
+		if err != nil {
+			return service.AccountLease{}, err
+		}
+		return service.AccountLease{Token: token}, nil
+	}
+	return service.AccountLease{}, fmt.Errorf("no account service configured")
 }
 
 func (e *Engine) activeImageConversationSession(request ConversationRequest) (service.ImageConversationSession, bool) {

@@ -14,10 +14,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"chatgpt2api/internal/backend"
 	"chatgpt2api/internal/service"
@@ -805,6 +807,17 @@ func TestIsTransientImageStreamErrorMessage(t *testing.T) {
 	}
 }
 
+func waitForImageWorkerStarts(started <-chan struct{}, want int) bool {
+	for i := 0; i < want; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			return false
+		}
+	}
+	return true
+}
+
 func TestStreamImageOutputsWithPoolRunsRequestedImagesConcurrently(t *testing.T) {
 	engine := &Engine{
 		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
@@ -814,7 +827,11 @@ func TestStreamImageOutputsWithPoolRunsRequestedImagesConcurrently(t *testing.T)
 	var mu sync.Mutex
 	started := 0
 	maxActive := 0
+	workerStarted := make(chan struct{}, 4)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
 	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
 		out := make(chan ImageOutput)
 		errCh := make(chan error, 1)
@@ -827,6 +844,7 @@ func TestStreamImageOutputsWithPoolRunsRequestedImagesConcurrently(t *testing.T)
 				maxActive = started
 			}
 			mu.Unlock()
+			workerStarted <- struct{}{}
 			<-release
 			out <- ImageOutput{
 				Kind:    "result",
@@ -849,7 +867,9 @@ func TestStreamImageOutputsWithPoolRunsRequestedImagesConcurrently(t *testing.T)
 		N:     4,
 	})
 
-	time.Sleep(120 * time.Millisecond)
+	if !waitForImageWorkerStarts(workerStarted, 4) {
+		t.Fatalf("timed out waiting for 4 image workers to start")
+	}
 	mu.Lock()
 	gotActive := maxActive
 	mu.Unlock()
@@ -857,7 +877,7 @@ func TestStreamImageOutputsWithPoolRunsRequestedImagesConcurrently(t *testing.T)
 		t.Fatalf("max concurrent image workers = %d, want 4", gotActive)
 	}
 
-	close(release)
+	closeRelease()
 	for range outputs {
 	}
 	if err := <-errCh; err != nil {
@@ -874,7 +894,11 @@ func TestStreamImageOutputsWithPoolHonorsImageOutputSlotAcquirer(t *testing.T) {
 	var mu sync.Mutex
 	active := 0
 	maxActive := 0
+	workerStarted := make(chan struct{}, 3)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
 	slots := make(chan struct{}, 2)
 	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
 		out := make(chan ImageOutput)
@@ -888,6 +912,7 @@ func TestStreamImageOutputsWithPoolHonorsImageOutputSlotAcquirer(t *testing.T) {
 				maxActive = active
 			}
 			mu.Unlock()
+			workerStarted <- struct{}{}
 			<-release
 			out <- ImageOutput{
 				Kind:    "result",
@@ -918,7 +943,9 @@ func TestStreamImageOutputsWithPoolHonorsImageOutputSlotAcquirer(t *testing.T) {
 		},
 	})
 
-	time.Sleep(120 * time.Millisecond)
+	if !waitForImageWorkerStarts(workerStarted, 2) {
+		t.Fatalf("timed out waiting for 2 image workers to start")
+	}
 	mu.Lock()
 	gotActive := maxActive
 	mu.Unlock()
@@ -926,12 +953,248 @@ func TestStreamImageOutputsWithPoolHonorsImageOutputSlotAcquirer(t *testing.T) {
 		t.Fatalf("max concurrent image workers = %d, want 2", gotActive)
 	}
 
-	close(release)
+	closeRelease()
 	for range outputs {
 	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("StreamImageOutputsWithPool() err = %v", err)
 	}
+}
+
+func TestStreamImageOutputsWithPoolHoldsImageLeaseDuringUpstream(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1")
+	started := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput)
+		errCh := make(chan error, 1)
+		go func() {
+			defer close(out)
+			defer close(errCh)
+			close(started)
+			<-releaseUpstream
+			out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: []map[string]any{{"url": imageURLForIndex(index)}}}
+			errCh <- nil
+		}()
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Model: "gpt-image-2", N: 1})
+	done := make(chan error, 1)
+	go func() {
+		for range outputs {
+		}
+		done <- <-errCh
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not start")
+	}
+	if _, err := accounts.AcquireTextAccessToken(nil); err == nil {
+		t.Fatal("expected text lease acquire to fail while image lease is held")
+	}
+	close(releaseUpstream)
+	if err := <-done; err != nil {
+		t.Fatalf("StreamImageOutputsWithPool() err = %v", err)
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after image stream release error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestStreamImageOutputsWithPoolReleasesImageLeaseOnError(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1")
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput)
+		errCh := make(chan error, 1)
+		close(out)
+		errCh <- errors.New("upstream boom")
+		close(errCh)
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Model: "gpt-image-2", N: 1})
+	for range outputs {
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("StreamImageOutputsWithPool() err = nil, want upstream error")
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after image error release error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestStreamImageOutputsWithPoolPreferredImageLeaseFallsBackWhenBusy(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "preferred-token", "fallback-token")
+	engine.ImageConversationSessions = service.NewImageConversationSessionService(filepath.Join(t.TempDir(), "sessions.json"))
+	engine.ImageConversationSessions.Bind(service.ImageConversationSession{
+		OwnerID:                 "owner-1",
+		FrontendConversationID:  "front-1",
+		AccessToken:             "preferred-token",
+		UpstreamConversationID:  "conv-1",
+		UpstreamParentMessageID: "msg-1",
+	})
+	preferredLease, err := accounts.AcquireTextAccessToken(map[string]struct{}{"fallback-token": {}})
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken(preferred) error = %v", err)
+	}
+	defer preferredLease.Release()
+
+	usedToken := ""
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		usedToken = client.AccessToken
+		if request.UpstreamConversationID != "" || request.UpstreamParentMessageID != "" {
+			t.Errorf("fallback request used preferred session pointers %q/%q", request.UpstreamConversationID, request.UpstreamParentMessageID)
+		}
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: []map[string]any{{"url": imageURLForIndex(index)}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Model: "gpt-image-2", N: 1, OwnerID: "owner-1", FrontendConversationID: "front-1"})
+	for range outputs {
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamImageOutputsWithPool() err = %v", err)
+	}
+	if usedToken != "fallback-token" {
+		t.Fatalf("used token = %q, want fallback-token", usedToken)
+	}
+}
+
+func TestStreamImageOutputsWithPoolChargeFailureReleasesImageReservation(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1")
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: []map[string]any{{"url": imageURLForIndex(index)}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{
+		Model:             "gpt-image-2",
+		N:                 1,
+		ChargeImageOutput: func(int) error { return errors.New("billing denied") },
+	})
+	for range outputs {
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("StreamImageOutputsWithPool() err = nil, want billing error")
+	}
+	lease, err := accounts.GetAvailableImageAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() after charge failure error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestStreamImageOutputsWithPoolCanceledSendReleasesImageReservation(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1")
+	upstreamSent := make(chan struct{})
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: []map[string]any{{"url": imageURLForIndex(index)}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		close(upstreamSent)
+		return out, errCh
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	outputs, errCh := engine.StreamImageOutputsWithPool(ctx, ConversationRequest{Model: "gpt-image-2", N: 1})
+	select {
+	case <-upstreamSent:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("upstream did not send output")
+	}
+	cancel()
+	if err := <-errCh; err == nil {
+		t.Fatal("StreamImageOutputsWithPool() err = nil, want context cancellation")
+	}
+	for range outputs {
+	}
+	lease, err := accounts.GetAvailableImageAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() after canceled send error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestStreamImageOutputsWithPoolDoesNotUseProviderWhenAccountServiceHasNoLease(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1")
+	busyLease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() error = %v", err)
+	}
+	defer busyLease.Release()
+	providerCalled := false
+	engine.ImageTokenProvider = func(context.Context) (string, error) {
+		providerCalled = true
+		return "provider-token", nil
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Model: "gpt-image-2", N: 1})
+	for range outputs {
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("StreamImageOutputsWithPool() err = nil, want no available account error")
+	}
+	if providerCalled {
+		t.Fatal("ImageTokenProvider was called while AccountService was configured")
+	}
+}
+
+func newImageLeaseTestEngine(t *testing.T, tokens ...string) (*Engine, *service.AccountService) {
+	t.Helper()
+	engine, accounts := newTextLeaseTestEngine(t, tokens...)
+	for _, token := range tokens {
+		accounts.UpdateAccount(token, map[string]any{"status": "正常", "quota": 5, "type": "Plus"})
+	}
+	server := newImageLeaseAccountServer(t)
+	t.Cleanup(server.Close)
+	setAccountServiceRemoteBaseURL(t, accounts, server.URL)
+	return engine, accounts
+}
+
+func newImageLeaseAccountServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"email":"user@example.test","id":"user-1"}`))
+		case "/backend-api/conversation/init":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"default_model_slug":"gpt-5","limits_progress":[{"feature_name":"image_gen","remaining":5,"reset_after":"2026-05-20T00:00:00Z"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func setAccountServiceRemoteBaseURL(t *testing.T, accounts *service.AccountService, baseURL string) {
+	t.Helper()
+	field := reflect.ValueOf(accounts).Elem().FieldByName("remoteBaseURL")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetString(baseURL)
 }
 
 func TestStreamImageOutputsWithPoolDoesNotRotateOnGenericUnauthorized(t *testing.T) {

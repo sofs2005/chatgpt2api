@@ -19,7 +19,7 @@ func TestNormalizeAPIPermissionsMigratesCreationTaskPermissions(t *testing.T) {
 	}
 }
 
-func TestAccountPoolPermissionsAreExplicit(t *testing.T) {
+func TestAPIPermissionsAccountPoolAreExplicit(t *testing.T) {
 	readOnly := PermissionSet{APIPermissions: []string{APIPermissionKey("GET", "/api/accounts")}}
 	if !HasAPIPermission(readOnly, "GET", "/api/accounts") {
 		t.Fatalf("read-only account permission missing account list")
@@ -30,13 +30,21 @@ func TestAccountPoolPermissionsAreExplicit(t *testing.T) {
 	if HasAPIPermission(readOnly, "POST", "/api/accounts/refresh") {
 		t.Fatalf("account list permission should not allow refresh")
 	}
+	if HasAPIPermission(readOnly, "POST", "/api/accounts/upstream-actions") {
+		t.Fatalf("account list permission should not allow upstream actions")
+	}
+	if HasAPIPermission(readOnly, "POST", "/api/accounts/toggle-enabled") {
+		t.Fatalf("account list permission should not allow toggling enabled state")
+	}
 
 	operators := PermissionSet{APIPermissions: NormalizeAPIPermissions([]string{
 		APIPermissionKey("GET", "/api/accounts/tokens"),
 		APIPermissionKey("POST", "/api/accounts"),
 		APIPermissionKey("POST", "/api/accounts/session"),
 		APIPermissionKey("POST", "/api/accounts/refresh"),
+		APIPermissionKey("POST", "/api/accounts/upstream-actions"),
 		APIPermissionKey("POST", "/api/accounts/update"),
+		APIPermissionKey("POST", "/api/accounts/toggle-enabled"),
 		APIPermissionKey("DELETE", "/api/accounts"),
 	})}
 	for _, tc := range []struct {
@@ -47,7 +55,9 @@ func TestAccountPoolPermissionsAreExplicit(t *testing.T) {
 		{"POST", "/api/accounts"},
 		{"POST", "/api/accounts/session"},
 		{"POST", "/api/accounts/refresh"},
+		{"POST", "/api/accounts/upstream-actions"},
 		{"POST", "/api/accounts/update"},
+		{"POST", "/api/accounts/toggle-enabled"},
 		{"DELETE", "/api/accounts"},
 	} {
 		if !HasAPIPermission(operators, tc.method, tc.path) {

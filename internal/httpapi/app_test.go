@@ -1769,6 +1769,63 @@ func TestRBACPermissionsGateManagementAPIs(t *testing.T) {
 	}
 }
 
+func TestAccountToggleEnabledEndpoint(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	app.accounts.AddAccounts([]string{"token-1", "token-2"})
+	app.accounts.UpdateAccount("token-1", map[string]any{"status": "正常"})
+	app.accounts.UpdateAccount("token-2", map[string]any{"status": "限流"})
+
+	accounts := app.accounts.ListAccounts()
+	account1 := findHTTPItem(accounts, util.SHA1Short("token-1", 16))
+	account2 := findHTTPItem(accounts, util.SHA1Short("token-2", 16))
+	if account1 == nil || account2 == nil {
+		t.Fatalf("created accounts missing: %#v", accounts)
+	}
+	account1ID := util.Clean(account1["id"])
+	account2ID := util.Clean(account2["id"])
+
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/toggle-enabled", strings.NewReader(`{"account_ids":["`+account1ID+`","`+account2ID+`"],"enabled":false}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("disable accounts status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("disable accounts json: %v", err)
+	}
+	if util.ToInt(payload["updated"], -1) != 2 || util.ToInt(payload["skipped"], -1) != 0 {
+		t.Fatalf("disable result = %#v", payload)
+	}
+	items := logItems(payload)
+	updated2 := findHTTPItem(items, account2ID)
+	if updated2 == nil || updated2["status"] != "限流" || updated2["enabled"] != false {
+		t.Fatalf("disabled token-2 item = %#v in %#v", updated2, payload)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/accounts/toggle-enabled", strings.NewReader(`{"account_id":"`+account2ID+`","enabled":true}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("enable account status = %d body = %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("enable account json: %v", err)
+	}
+	if util.ToInt(payload["updated"], -1) != 1 || util.ToInt(payload["skipped"], -1) != 0 {
+		t.Fatalf("enable result = %#v", payload)
+	}
+	items = logItems(payload)
+	updated2 = findHTTPItem(items, account2ID)
+	if updated2 == nil || updated2["status"] != "限流" || updated2["enabled"] != true {
+		t.Fatalf("enabled token-2 item = %#v in %#v", updated2, payload)
+	}
+}
+
 func TestRedactAccountPayloadCoversRefreshResults(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()

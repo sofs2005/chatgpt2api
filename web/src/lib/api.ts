@@ -148,6 +148,7 @@ export type Account = {
   token_preview?: string;
   type: AccountType;
   status: AccountStatus;
+  enabled: boolean;
   quota: number;
   imageQuotaUnknown?: boolean;
   email?: string | null;
@@ -176,6 +177,7 @@ type AccountMutationResponse = {
   items: Account[];
   added?: number;
   skipped?: number;
+  updated?: number;
   removed?: number;
   refreshed?: number;
   session_refreshed?: number;
@@ -860,6 +862,13 @@ export async function refreshAccounts(accountIds: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
     body: { account_ids: accountIds },
+  });
+}
+
+export async function toggleAccountsEnabled(accountIds: string[], enabled: boolean) {
+  return httpRequest<AccountMutationResponse>("/api/accounts/toggle-enabled", {
+    method: "POST",
+    body: { account_ids: accountIds, enabled },
   });
 }
 

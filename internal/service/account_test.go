@@ -1400,6 +1400,280 @@ func TestUpdateAccountFromSessionImportAllowsOldLeaseToReleaseMigratedBusyToken(
 	}
 }
 
+func TestSetAccountsEnabledByIDsDisablesSchedulingWithoutChangingStatus(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "type": "Plus", "quota": 5})
+
+	id := accountIDFromToken("token-1")
+	result := accounts.SetAccountsEnabledByIDs([]string{id}, false)
+	if result["updated"] != 1 || result["skipped"] != 0 {
+		t.Fatalf("disable result = %#v, want updated=1 skipped=0", result)
+	}
+
+	account := accounts.GetAccount("token-1")
+	if account["status"] != "正常" {
+		t.Fatalf("status after disable = %#v, want 正常", account["status"])
+	}
+	if account["enabled"] != false {
+		t.Fatalf("enabled after disable = %#v, want false", account["enabled"])
+	}
+	if IsImageAccountAvailable(account) {
+		t.Fatal("disabled account should not be available for image scheduling")
+	}
+	if _, err := accounts.AcquireTextAccessToken(nil); err == nil {
+		t.Fatal("disabled account should not be available for text scheduling")
+	}
+
+	result = accounts.SetAccountsEnabledByIDs([]string{id}, true)
+	if result["updated"] != 1 || result["skipped"] != 0 {
+		t.Fatalf("enable result = %#v, want updated=1 skipped=0", result)
+	}
+
+	account = accounts.GetAccount("token-1")
+	if account["status"] != "正常" {
+		t.Fatalf("status after enable = %#v, want 正常", account["status"])
+	}
+	if account["enabled"] != true {
+		t.Fatalf("enabled after enable = %#v, want true", account["enabled"])
+	}
+	if !IsImageAccountAvailable(account) {
+		t.Fatal("enabled account should be available for image scheduling")
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() after enable error = %v", err)
+	}
+	lease.Release()
+}
+
+func TestSetAccountsEnabledByIDsIsIdempotent(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1", "token-2"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "type": "Plus", "quota": 5})
+	accounts.UpdateAccount("token-2", map[string]any{"status": "正常", "type": "Plus", "quota": 5, "enabled": false})
+
+	result := accounts.SetAccountsEnabledByIDs([]string{accountIDFromToken("token-1"), accountIDFromToken("token-2")}, false)
+	if result["updated"] != 1 || result["skipped"] != 1 {
+		t.Fatalf("batch disable result = %#v, want updated=1 skipped=1", result)
+	}
+
+	result = accounts.SetAccountsEnabledByIDs([]string{accountIDFromToken("token-1"), accountIDFromToken("token-2")}, false)
+	if result["updated"] != 0 || result["skipped"] != 2 {
+		t.Fatalf("repeat disable result = %#v, want updated=0 skipped=2", result)
+	}
+
+	result = accounts.SetAccountsEnabledByIDs([]string{accountIDFromToken("token-1"), accountIDFromToken("token-2")}, true)
+	if result["updated"] != 2 || result["skipped"] != 0 {
+		t.Fatalf("batch enable result = %#v, want updated=2 skipped=0", result)
+	}
+
+	result = accounts.SetAccountsEnabledByIDs([]string{accountIDFromToken("token-1"), accountIDFromToken("token-2")}, true)
+	if result["updated"] != 0 || result["skipped"] != 2 {
+		t.Fatalf("repeat enable result = %#v, want updated=0 skipped=2", result)
+	}
+}
+
+func TestLegacyDisabledStatusRemainsUnschedulableAndPubliclyDisabled(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.mu.Lock()
+	accounts.items = []map[string]any{{
+		"access_token":        "legacy-token",
+		"type":                "Plus",
+		"status":              "禁用",
+		"quota":               5,
+		"image_quota_unknown": false,
+		"limits_progress":     []any{},
+		"chatgpt_account_id":  nil,
+		"default_model_slug":  nil,
+		"restore_at":          nil,
+		"success":             0,
+		"fail":                0,
+	}}
+	accounts.mu.Unlock()
+
+	account := accounts.GetAccount("legacy-token")
+	if IsImageAccountAvailable(account) {
+		t.Fatal("legacy status=禁用 account should not be available for image scheduling")
+	}
+	if _, err := accounts.AcquireTextAccessToken(nil); err == nil {
+		t.Fatal("legacy status=禁用 account should not be available for text scheduling")
+	}
+
+	items := accounts.ListAccounts()
+	if len(items) != 1 {
+		t.Fatalf("ListAccounts() length = %d, want 1", len(items))
+	}
+	if items[0]["enabled"] != false {
+		t.Fatalf("public enabled for legacy disabled account = %#v, want false", items[0]["enabled"])
+	}
+	if items[0]["status"] != "禁用" {
+		t.Fatalf("public status for legacy disabled account = %#v, want 禁用", items[0]["status"])
+	}
+}
+
+func TestAddAccountsDefaultsToEnabledAndListsIt(t *testing.T) {
+	accounts := newTestAccountService(t)
+	result := accounts.AddAccounts([]string{"token-1"})
+	if result["added"] != 1 || result["skipped"] != 0 {
+		t.Fatalf("AddAccounts() = %#v, want added=1 skipped=0", result)
+	}
+
+	account := accounts.GetAccount("token-1")
+	if account["enabled"] != true {
+		t.Fatalf("enabled after add = %#v, want true", account["enabled"])
+	}
+	items := accounts.ListAccounts()
+	if len(items) != 1 {
+		t.Fatalf("ListAccounts() length = %d, want 1", len(items))
+	}
+	if items[0]["enabled"] != true {
+		t.Fatalf("public enabled after add = %#v, want true", items[0]["enabled"])
+	}
+}
+
+func TestLoadAccountsDoesNotPersistEnabledForLegacyRecord(t *testing.T) {
+	backend := &accountStorageSpy{accounts: []map[string]any{{
+		"access_token":        "legacy-token",
+		"type":                "Plus",
+		"status":              "禁用",
+		"quota":               5,
+		"image_quota_unknown": false,
+	}}}
+
+	accounts := NewAccountService(backend, testAccountConfig{}, nil, NewLogService())
+	if backend.saveCount != 0 {
+		t.Fatalf("NewAccountService() saved legacy account %d times, want 0", backend.saveCount)
+	}
+	account := accounts.GetAccount("legacy-token")
+	if _, ok := account["enabled"]; ok {
+		t.Fatalf("legacy account gained enabled field during load: %#v", account)
+	}
+
+	items := accounts.ListAccounts()
+	if len(items) != 1 {
+		t.Fatalf("ListAccounts() length = %d, want 1", len(items))
+	}
+	if items[0]["enabled"] != false {
+		t.Fatalf("public enabled for legacy account = %#v, want false", items[0]["enabled"])
+	}
+	if backend.saveCount != 0 {
+		t.Fatalf("ListAccounts() saved legacy account %d times, want 0", backend.saveCount)
+	}
+}
+
+func TestExplicitEnabledOverridesLegacyDisabledStatus(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.mu.Lock()
+	accounts.items = []map[string]any{{
+		"access_token":        "legacy-enabled-token",
+		"enabled":             true,
+		"type":                "Plus",
+		"status":              "禁用",
+		"quota":               5,
+		"image_quota_unknown": false,
+	}}
+	accounts.mu.Unlock()
+
+	account := accounts.GetAccount("legacy-enabled-token")
+	if !IsImageAccountAvailable(account) {
+		t.Fatal("explicit enabled=true account should be available for image scheduling even with legacy status=禁用")
+	}
+	lease, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() error = %v", err)
+	}
+	if lease.Token != "legacy-enabled-token" {
+		lease.Release()
+		t.Fatalf("text lease token = %q, want legacy-enabled-token", lease.Token)
+	}
+	lease.Release()
+
+	items := accounts.ListAccounts()
+	if items[0]["enabled"] != true || items[0]["status"] != "禁用" {
+		t.Fatalf("public account = %#v, want enabled=true with status=禁用 preserved", items[0])
+	}
+}
+
+func TestSetAccountsEnabledByIDsClearsReservationsAndStickyState(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "type": "Plus", "quota": 5})
+	accounts.mu.Lock()
+	accounts.busyTokens["token-1"] = 2
+	accounts.busyTokenAliases["busy-alias"] = "token-1"
+	accounts.busyTokenAliasRefs["busy-alias"] = 1
+	accounts.imageReservations["token-1"] = 1
+	accounts.imageReservationAliases["image-alias"] = "token-1"
+	accounts.imageReservationAliasRefs["image-alias"] = 1
+	accounts.stickyTextToken = "token-1"
+	accounts.stickyImageToken = "token-1"
+	accounts.mu.Unlock()
+
+	result := accounts.SetAccountsEnabledByIDs([]string{accountIDFromToken("token-1")}, false)
+	if result["updated"] != 1 || result["skipped"] != 0 {
+		t.Fatalf("disable result = %#v, want updated=1 skipped=0", result)
+	}
+
+	accounts.mu.Lock()
+	defer accounts.mu.Unlock()
+	if _, ok := accounts.busyTokens["token-1"]; ok {
+		t.Fatalf("busy token not cleared: %#v", accounts.busyTokens)
+	}
+	if _, ok := accounts.busyTokenAliases["busy-alias"]; ok {
+		t.Fatalf("busy alias not cleared: %#v", accounts.busyTokenAliases)
+	}
+	if _, ok := accounts.imageReservations["token-1"]; ok {
+		t.Fatalf("image reservation not cleared: %#v", accounts.imageReservations)
+	}
+	if _, ok := accounts.imageReservationAliases["image-alias"]; ok {
+		t.Fatalf("image alias not cleared: %#v", accounts.imageReservationAliases)
+	}
+	if accounts.stickyTextToken != "" || accounts.stickyImageToken != "" {
+		t.Fatalf("sticky tokens = text %q image %q, want cleared", accounts.stickyTextToken, accounts.stickyImageToken)
+	}
+}
+
+type accountStorageSpy struct {
+	accounts  []map[string]any
+	saveCount int
+	saved     []map[string]any
+}
+
+func (s *accountStorageSpy) LoadAccounts() ([]map[string]any, error) {
+	return copyAccountItems(s.accounts), nil
+}
+
+func (s *accountStorageSpy) SaveAccounts(accounts []map[string]any) error {
+	s.saveCount++
+	s.saved = copyAccountItems(accounts)
+	return nil
+}
+
+func (s *accountStorageSpy) LoadAuthKeys() ([]map[string]any, error) {
+	return nil, nil
+}
+
+func (s *accountStorageSpy) SaveAuthKeys([]map[string]any) error {
+	return nil
+}
+
+func (s *accountStorageSpy) HealthCheck() map[string]any {
+	return map[string]any{"status": "ok"}
+}
+
+func (s *accountStorageSpy) Info() map[string]any {
+	return map[string]any{}
+}
+
+func copyAccountItems(items []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, util.CopyMap(item))
+	}
+	return out
+}
+
 func newTestAccountService(t *testing.T) *AccountService {
 	t.Helper()
 	return newTestAccountServiceWithConfig(t, testAccountConfig{})

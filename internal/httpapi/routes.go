@@ -1252,6 +1252,28 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		result := a.accounts.RunUpstreamAccountActions(r.Context(), tokens, options)
 		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)
+	case r.URL.Path == "/api/accounts/toggle-enabled" && r.Method == http.MethodPost:
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		accountIDs := util.AsStringSlice(body["account_ids"])
+		if accountID := util.Clean(body["account_id"]); accountID != "" {
+			accountIDs = append(accountIDs, accountID)
+		}
+		if len(accountIDs) == 0 {
+			util.WriteError(w, http.StatusBadRequest, "account_id or account_ids is required")
+			return
+		}
+		enabledRaw, ok := body["enabled"]
+		if !ok {
+			util.WriteError(w, http.StatusBadRequest, "enabled is required")
+			return
+		}
+		result := a.accounts.SetAccountsEnabledByIDs(accountIDs, util.ToBool(enabledRaw))
+		a.redactAccountPayloadForIdentity(identity, result)
+		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts/update" && r.Method == http.MethodPost:
 		body, _ := readJSONMap(r)
 		token := util.Clean(body["access_token"])

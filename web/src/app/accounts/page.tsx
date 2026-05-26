@@ -13,6 +13,8 @@ import {
   Download,
   LoaderCircle,
   Pencil,
+  Power,
+  PowerOff,
   RefreshCw,
   Search,
   ServerCog,
@@ -35,6 +37,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -49,6 +52,7 @@ import {
   fetchAccounts,
   refreshAccounts,
   runUpstreamAccountActions,
+  toggleAccountsEnabled,
   updateAccount,
   type Account,
   type AccountStatus,
@@ -81,6 +85,10 @@ const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = 
   { label: "过期待刷新", value: "过期待刷新" },
   { label: "禁用", value: "禁用" },
 ];
+
+const editableAccountStatusOptions = accountStatusOptions.filter(
+  (option): option is { label: string; value: AccountStatus } => option.value !== "all" && option.value !== "禁用",
+);
 
 const statusMeta: Record<
   AccountStatus,
@@ -188,7 +196,7 @@ function formatRestoreAt(value?: string | null) {
 }
 
 function formatQuotaSummary(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status === "正常");
+  const availableAccounts = accounts.filter((account) => account.enabled !== false && account.status === "正常");
   if (availableAccounts.some(isUnlimitedImageQuotaAccount)) {
     return "∞";
   }
@@ -249,6 +257,7 @@ function normalizeAccounts(items: Account[] | null | undefined): Account[] {
       item.type === "Free"
         ? item.type
         : "Free",
+    enabled: typeof item.enabled === "boolean" ? item.enabled : item.status !== "禁用",
   }));
 }
 
@@ -271,7 +280,9 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const [isUpdating, setIsUpdating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isRunningUpstreamActions, setIsRunningUpstreamActions] = useState(false);
+  const [isTogglingEnabled, setIsTogglingEnabled] = useState(false);
   const [refreshingAccountIds, setRefreshingAccountIds] = useState<string[]>([]);
+  const [togglingAccountIds, setTogglingAccountIds] = useState<string[]>([]);
   const [upstreamActionDialogOpen, setUpstreamActionDialogOpen] = useState(false);
   const [upstreamActionTargetIds, setUpstreamActionTargetIds] = useState<string[]>([]);
   const [upstreamActionDisableMemory, setUpstreamActionDisableMemory] = useState(true);
@@ -284,6 +295,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const canImportAccounts = canImportTokenAccounts || canImportSessionAccounts;
   const canRefreshAccounts = hasAPIPermission(session, "POST", "/api/accounts/refresh");
   const canRunUpstreamActions = hasAPIPermission(session, "POST", "/api/accounts/upstream-actions");
+  const canToggleAccountEnabled = hasAPIPermission(session, "POST", "/api/accounts/toggle-enabled");
   const canUpdateAccount = hasAPIPermission(session, "POST", "/api/accounts/update");
   const canDeleteAccounts = hasAPIPermission(session, "DELETE", "/api/accounts");
   const canExportTokens = hasAPIPermission(session, "GET", "/api/accounts/tokens");
@@ -342,10 +354,10 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
 
   const summary = useMemo(() => {
     const total = accounts.length;
-    const active = accounts.filter((item) => item.status === "正常").length;
+    const active = accounts.filter((item) => item.enabled !== false && item.status === "正常").length;
     const limited = accounts.filter((item) => item.status === "限流").length;
     const abnormal = accounts.filter((item) => item.status === "异常").length;
-    const disabled = accounts.filter((item) => item.status === "禁用").length;
+    const disabled = accounts.filter((item) => item.enabled === false).length;
     const quota = formatQuotaSummary(accounts);
 
     return { total, active, limited, abnormal, disabled, quota };
@@ -361,6 +373,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   }, [accounts]);
 
   const refreshingAccountIdSet = useMemo(() => new Set(refreshingAccountIds), [refreshingAccountIds]);
+  const togglingAccountIdSet = useMemo(() => new Set(togglingAccountIds), [togglingAccountIds]);
   const upstreamActionFilePageLimitValue = useMemo(() => {
     const value = Number.parseInt(upstreamActionFilePageLimit, 10);
     return Number.isFinite(value) && value > 0 ? value : 100;
@@ -434,6 +447,32 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
     } finally {
       setIsRefreshing(false);
       setRefreshingAccountIds([]);
+    }
+  };
+
+  const handleToggleAccountsEnabled = async (accountIds: string[], enabled: boolean) => {
+    if (!canToggleAccountEnabled) {
+      toast.error("没有启停账号权限");
+      return;
+    }
+    const targetIds = Array.from(new Set(accountIds.map((id) => id.trim()).filter(Boolean)));
+    if (targetIds.length === 0) {
+      toast.error("请先选择账号");
+      return;
+    }
+
+    setIsTogglingEnabled(true);
+    setTogglingAccountIds(targetIds);
+    try {
+      const data = await toggleAccountsEnabled(targetIds, enabled);
+      applyAccountItems(data.items);
+      toast.success(`${enabled ? "启用" : "禁用"} ${data.updated ?? 0} 个账号`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${enabled ? "启用" : "禁用"}账号失败`;
+      toast.error(message);
+    } finally {
+      setIsTogglingEnabled(false);
+      setTogglingAccountIds([]);
     }
   };
 
@@ -546,7 +585,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
     }
     setEditingAccount(account);
     setEditType(account.type);
-    setEditStatus(account.status);
+    setEditStatus(account.status === "禁用" ? "正常" : account.status);
     setEditQuota(String(account.quota));
   };
 
@@ -591,10 +630,18 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
     const status = statusMeta[account.status];
     const StatusIcon = status.icon;
     return (
-      <Badge variant={status.badge} className="inline-flex items-center gap-1 rounded-md px-2 py-1">
-        <StatusIcon className="size-3.5" />
-        {account.status}
-      </Badge>
+      <>
+        <Badge variant={status.badge} className="inline-flex items-center gap-1 rounded-md px-2 py-1">
+          <StatusIcon className="size-3.5" />
+          {account.status}
+        </Badge>
+        {account.enabled === false ? (
+          <Badge variant="secondary" className="inline-flex items-center gap-1 rounded-md px-2 py-1">
+            <Ban className="size-3.5" />
+            已禁用
+          </Badge>
+        ) : null}
+      </>
     );
   };
 
@@ -638,8 +685,30 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
 
   const renderAccountActions = (account: Account, className?: string) => {
     const rowRefreshing = refreshingAccountIdSet.has(account.id);
+    const rowTogglingEnabled = togglingAccountIdSet.has(account.id);
+    const nextEnabled = account.enabled === false;
     return (
       <div className={cn("flex items-center gap-1 text-muted-foreground", className)}>
+        {canToggleAccountEnabled ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8 rounded-lg hover:bg-muted hover:text-foreground"
+            onClick={() => void handleToggleAccountsEnabled([account.id], nextEnabled)}
+            disabled={isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
+            aria-label={nextEnabled ? "启用账号" : "禁用账号"}
+            title={nextEnabled ? "启用账号" : "禁用账号"}
+          >
+            {rowTogglingEnabled ? (
+              <LoaderCircle className="size-4 animate-spin" />
+            ) : nextEnabled ? (
+              <Power className="size-4" />
+            ) : (
+              <PowerOff className="size-4" />
+            )}
+          </Button>
+        ) : null}
         {canUpdateAccount ? (
           <Button
             type="button"
@@ -647,7 +716,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             size="icon"
             className="size-8 rounded-lg hover:bg-muted hover:text-foreground"
             onClick={() => openEditDialog(account)}
-            disabled={isUpdating || isRunningUpstreamActions}
+            disabled={isUpdating || isRunningUpstreamActions || isTogglingEnabled}
             aria-label="编辑账号"
             title="编辑账号"
           >
@@ -661,7 +730,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             size="icon"
             className="size-8 rounded-lg hover:bg-muted hover:text-foreground"
             onClick={() => void handleRefreshAccounts([account.id])}
-            disabled={isRefreshing || isRunningUpstreamActions}
+            disabled={isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
             aria-label="刷新账号信息和额度"
             title="刷新账号信息和额度"
           >
@@ -675,7 +744,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             size="icon"
             className="size-8 rounded-lg text-rose-500 hover:bg-rose-50 hover:text-rose-600"
             onClick={() => void handleDeleteAccounts([account.id])}
-            disabled={isDeleting || isRunningUpstreamActions}
+            disabled={isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
             aria-label="删除账号"
             title="删除账号"
           >
@@ -697,7 +766,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
               variant="outline"
               className="h-10 rounded-lg"
               onClick={() => void loadAccounts()}
-              disabled={isLoading || isRefreshing || isDeleting || isRunningUpstreamActions}
+              disabled={isLoading || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
             >
               <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
               刷新
@@ -707,7 +776,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                 variant="outline"
                 className="h-10 rounded-lg"
                 onClick={() => void handleRefreshAccounts(accounts.map((item) => item.id))}
-                disabled={isLoading || isRefreshing || isDeleting || isRunningUpstreamActions || accounts.length === 0}
+                disabled={isLoading || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled || accounts.length === 0}
               >
                 <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
                 一键刷新额度
@@ -715,7 +784,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             ) : null}
             {canImportAccounts ? (
               <AccountImportDialog
-                disabled={isLoading || isRefreshing || isDeleting || isRunningUpstreamActions}
+                disabled={isLoading || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
                 canImportTokens={canImportTokenAccounts}
                 canImportSession={canImportSessionAccounts}
                 onImported={(items) => {
@@ -730,7 +799,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                 variant="outline"
                 className="h-10 rounded-lg"
                 onClick={() => void handleExportTokens()}
-                disabled={accounts.length === 0 || isExporting}
+                disabled={accounts.length === 0 || isExporting || isTogglingEnabled}
               >
                 {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
                 导出 Token
@@ -756,13 +825,11 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {accountStatusOptions
-                    .filter((option) => option.value !== "all")
-                    .map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
+                  {editableAccountStatusOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -812,7 +879,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                         file_page_limit: upstreamActionFilePageLimitValue,
                       })
                     }
-                    disabled={isUpdating || isRunningUpstreamActions}
+                    disabled={isUpdating || isRunningUpstreamActions || isTogglingEnabled}
                   >
                     {isRunningUpstreamActions ? <LoaderCircle className="size-4 animate-spin" /> : <ServerCog className="size-4" />}
                     关闭记忆
@@ -829,7 +896,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                         file_page_limit: upstreamActionFilePageLimitValue,
                       })
                     }
-                    disabled={isUpdating || isRunningUpstreamActions}
+                    disabled={isUpdating || isRunningUpstreamActions || isTogglingEnabled}
                   >
                     {isRunningUpstreamActions ? <LoaderCircle className="size-4 animate-spin" /> : <ServerCog className="size-4" />}
                     隐藏历史对话
@@ -846,7 +913,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                         file_page_limit: upstreamActionFilePageLimitValue,
                       })
                     }
-                    disabled={isUpdating || isRunningUpstreamActions}
+                    disabled={isUpdating || isRunningUpstreamActions || isTogglingEnabled}
                   >
                     {isRunningUpstreamActions ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
                     删除附件
@@ -872,7 +939,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
               variant="secondary"
               className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
               onClick={() => setEditingAccount(null)}
-              disabled={isUpdating || isRunningUpstreamActions}
+              disabled={isUpdating || isRunningUpstreamActions || isTogglingEnabled}
             >
               取消
             </Button>
@@ -1105,18 +1172,52 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                     variant="ghost"
                     className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
                     onClick={() => void handleRefreshAccounts(selectedAccountIds)}
-                    disabled={selectedAccountIds.length === 0 || isRefreshing || isRunningUpstreamActions}
+                    disabled={selectedAccountIds.length === 0 || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
                   >
                     {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                     刷新选中
                   </Button>
+                ) : null}
+                {canToggleAccountEnabled ? (
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
+                        disabled={selectedAccountIds.length === 0 || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
+                      >
+                        {isTogglingEnabled ? <LoaderCircle className="size-4 animate-spin" /> : <Power className="size-4" />}
+                        批量启停
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" className="w-36 rounded-xl p-1">
+                      <Button
+                        variant="ghost"
+                        className="h-9 w-full justify-start rounded-lg px-3 text-stone-700"
+                        onClick={() => void handleToggleAccountsEnabled(selectedAccountIds, true)}
+                        disabled={selectedAccountIds.length === 0 || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
+                      >
+                        <Power className="size-4" />
+                        批量启用
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-9 w-full justify-start rounded-lg px-3 text-stone-700"
+                        onClick={() => void handleToggleAccountsEnabled(selectedAccountIds, false)}
+                        disabled={selectedAccountIds.length === 0 || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
+                      >
+                        <PowerOff className="size-4" />
+                        批量禁用
+                      </Button>
+                    </PopoverContent>
+                  </Popover>
                 ) : null}
                 {canRunUpstreamActions ? (
                   <Button
                     variant="ghost"
                     className="h-8 rounded-lg px-3 text-[#1456f0] hover:bg-[#edf4ff] hover:text-[#1456f0]"
                     onClick={() => openUpstreamActionDialog(selectedAccountIds)}
-                    disabled={selectedAccountIds.length === 0 || isRunningUpstreamActions}
+                    disabled={selectedAccountIds.length === 0 || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
                   >
                     {isRunningUpstreamActions ? <LoaderCircle className="size-4 animate-spin" /> : <ServerCog className="size-4" />}
                     上游维护
@@ -1128,7 +1229,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                       variant="ghost"
                       className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
                       onClick={() => void handleDeleteAccounts(abnormalAccountIds)}
-                      disabled={abnormalAccountIds.length === 0 || isDeleting || isRunningUpstreamActions}
+                      disabled={abnormalAccountIds.length === 0 || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
                     >
                       {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
                       移除异常账号
@@ -1137,7 +1238,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                       variant="ghost"
                       className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
                       onClick={() => void handleDeleteAccounts(selectedAccountIds)}
-                      disabled={selectedAccountIds.length === 0 || isDeleting || isRunningUpstreamActions}
+                      disabled={selectedAccountIds.length === 0 || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled}
                     >
                       {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
                       删除所选

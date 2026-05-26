@@ -188,7 +188,7 @@ func (s *AccountService) listRefreshableLimitedTokens(now time.Time) []string {
 	defer s.mu.Unlock()
 	var out []string
 	for _, item := range s.items {
-		if item["status"] != "限流" {
+		if !accountEnabledValue(item) || util.Clean(item["status"]) != "限流" {
 			continue
 		}
 		if restoreAt, ok := parseAccountRestoreAt(item["restore_at"]); ok && restoreAt.After(now) {
@@ -227,7 +227,11 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 			current = map[string]any{}
 			order = append(order, token)
 		}
-		normalized := normalizeAccount(mergeMaps(current, map[string]any{"access_token": token, "type": util.ValueOr(current["type"], "Free")}))
+		updates := map[string]any{"access_token": token, "type": util.ValueOr(current["type"], "Free")}
+		if !ok {
+			updates["enabled"] = true
+		}
+		normalized := normalizeAccount(mergeMaps(current, updates))
 		if normalized != nil {
 			indexed[token] = normalized
 		}
@@ -406,6 +410,48 @@ func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 		})
 	}
 	return map[string]any{"removed": removed, "items": items}
+}
+
+func (s *AccountService) SetAccountsEnabledByIDs(ids []string, enabled bool) map[string]any {
+	targets := cleanAccountIDs(ids)
+	if len(targets) == 0 {
+		return map[string]any{"updated": 0, "skipped": 0, "items": s.ListAccounts()}
+	}
+
+	s.mu.Lock()
+	updated, skipped := 0, 0
+	seen := map[string]struct{}{}
+	changed := false
+	for _, item := range s.items {
+		token := util.Clean(item["access_token"])
+		if token == "" {
+			continue
+		}
+		id := accountIDFromToken(token)
+		if _, ok := targets[id]; !ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if accountEnabledValue(item) == enabled {
+			skipped++
+			continue
+		}
+		item["enabled"] = enabled
+		if !enabled {
+			s.clearImageReservationLocked(token)
+			s.clearBusyTokenLocked(token)
+			s.clearStickyLocked(token, true, true)
+		}
+		updated++
+		changed = true
+	}
+	skipped += len(targets) - len(seen)
+	if changed {
+		_ = s.saveLocked()
+	}
+	items := publicAccounts(s.items)
+	s.mu.Unlock()
+	return map[string]any{"updated": updated, "skipped": skipped, "items": items}
 }
 
 func (s *AccountService) RemoveToken(token string) bool {
@@ -603,8 +649,7 @@ func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken
 func (s *AccountService) filterNonFreeLocked() []map[string]any {
 	var out []map[string]any
 	for _, item := range s.items {
-		status := util.Clean(item["status"])
-		if status == "禁用" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
+		if !isAccountAvailableForScheduling(item) {
 			continue
 		}
 		if IsPaidImageAccount(item) {
@@ -617,8 +662,7 @@ func (s *AccountService) filterNonFreeLocked() []map[string]any {
 func (s *AccountService) filterFreeLocked() []map[string]any {
 	var out []map[string]any
 	for _, item := range s.items {
-		status := util.Clean(item["status"])
-		if status == "禁用" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
+		if !isAccountAvailableForScheduling(item) {
 			continue
 		}
 		if !IsPaidImageAccount(item) {
@@ -661,8 +705,55 @@ func (s *AccountService) textCandidatesByPaidLocked(paid bool, exhaustedTokens m
 }
 
 func (s *AccountService) isTextAccountAvailableLocked(item map[string]any) bool {
-	status := util.Clean(item["status"])
-	return status != "禁用" && status != "异常" && status != "限流" && status != "刷新中" && status != "过期待刷新"
+	return isAccountAvailableForScheduling(item)
+}
+
+func accountEnabledValue(account map[string]any) bool {
+	enabled, _ := accountEnabledState(account)
+	return enabled
+}
+
+func accountEnabledState(account map[string]any) (bool, bool) {
+	if account == nil {
+		return false, false
+	}
+	value, ok := account["enabled"]
+	if !ok || value == nil {
+		return util.Clean(account["status"]) != "禁用", false
+	}
+	switch enabled := value.(type) {
+	case bool:
+		return enabled, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(enabled)) {
+		case "1", "true", "yes", "on":
+			return true, true
+		default:
+			return false, true
+		}
+	default:
+		return util.ToInt(value, 0) != 0, true
+	}
+}
+
+func isAccountAvailableForScheduling(account map[string]any) bool {
+	if account == nil {
+		return false
+	}
+	enabled, hasEnabled := accountEnabledState(account)
+	if !enabled {
+		return false
+	}
+	status := util.Clean(account["status"])
+	if !hasEnabled && status == "禁用" {
+		return false
+	}
+	switch status {
+	case "异常", "限流", "刷新中", "过期待刷新":
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *AccountService) selectTextLeaseLocked(candidates []map[string]any) (AccountLease, error) {
@@ -1989,8 +2080,15 @@ func IsImageAccountAvailable(account map[string]any) bool {
 	if account == nil {
 		return false
 	}
+	enabled, hasEnabled := accountEnabledState(account)
+	if !enabled {
+		return false
+	}
 	status := util.Clean(account["status"])
-	if status == "禁用" || status == "限流" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
+	if !hasEnabled && status == "禁用" {
+		return false
+	}
+	if status == "限流" || status == "异常" || status == "刷新中" || status == "过期待刷新" {
 		return false
 	}
 	if util.ToBool(account["image_quota_unknown"]) {
@@ -2120,6 +2218,7 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			"access_token":       token,
 			"type":               util.ValueOr(account["type"], "Free"),
 			"status":             util.ValueOr(account["status"], "正常"),
+			"enabled":            accountEnabledValue(account),
 			"quota":              util.ValueOr(account["quota"], 0),
 			"imageQuotaUnknown":  util.ToBool(account["image_quota_unknown"]),
 			"email":              account["email"],

@@ -283,6 +283,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const [isTogglingEnabled, setIsTogglingEnabled] = useState(false);
   const [refreshingAccountIds, setRefreshingAccountIds] = useState<string[]>([]);
   const [togglingAccountIds, setTogglingAccountIds] = useState<string[]>([]);
+  const [refreshAllDialogOpen, setRefreshAllDialogOpen] = useState(false);
   const [upstreamActionDialogOpen, setUpstreamActionDialogOpen] = useState(false);
   const [upstreamActionTargetIds, setUpstreamActionTargetIds] = useState<string[]>([]);
   const [upstreamActionDisableMemory, setUpstreamActionDisableMemory] = useState(true);
@@ -775,7 +776,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
               <Button
                 variant="outline"
                 className="h-10 rounded-lg"
-                onClick={() => void handleRefreshAccounts(accounts.map((item) => item.id))}
+                onClick={() => setRefreshAllDialogOpen(true)}
                 disabled={isLoading || isRefreshing || isDeleting || isRunningUpstreamActions || isTogglingEnabled || accounts.length === 0}
               >
                 <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -808,6 +809,39 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
           </>
         }
       />
+
+      <Dialog open={refreshAllDialogOpen} onOpenChange={setRefreshAllDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>确认刷新全部账号额度？</DialogTitle>
+            <DialogDescription>
+              将刷新全部 {accounts.length} 个账号的额度状态，可能需要一些时间。请确认不是误触后再继续。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setRefreshAllDialogOpen(false)}>
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                setRefreshAllDialogOpen(false);
+                void handleRefreshAccounts(accounts.map((item) => item.id));
+              }}
+              disabled={
+                isLoading ||
+                isRefreshing ||
+                isDeleting ||
+                isRunningUpstreamActions ||
+                isTogglingEnabled ||
+                accounts.length === 0
+              }
+            >
+              确认刷新
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">

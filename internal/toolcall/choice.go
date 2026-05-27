@@ -10,7 +10,7 @@ func PolicyFromToolChoice(choice any) ChoicePolicy {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case ChoiceNone:
 			return ChoicePolicy{Mode: ChoiceNone}
-		case ChoiceRequired:
+		case ChoiceRequired, "any":
 			return ChoicePolicy{Mode: ChoiceRequired}
 		case ChoiceAuto:
 			return ChoicePolicy{Mode: ChoiceAuto}
@@ -30,7 +30,7 @@ func PolicyFromToolChoice(choice any) ChoicePolicy {
 			if name := strings.TrimSpace(asString(v["name"])); name != "" {
 				return ChoicePolicy{Mode: ChoiceForced, Name: name}
 			}
-		case "any":
+		case "required", "any":
 			return ChoicePolicy{Mode: ChoiceRequired}
 		case "auto":
 			return ChoicePolicy{Mode: ChoiceAuto}

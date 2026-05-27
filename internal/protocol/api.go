@@ -544,11 +544,10 @@ func CompletionResponseWithTools(model, content string, created int64, messages 
 	if len(toolNames) == 0 {
 		return CompletionResponse(model, content, created, messages), nil
 	}
-	calls, visible, err := tooladapter.Parse(content, toolNames, policy)
+	calls, visible, err := parseToolCallsWithCatalog(content, tools, policy)
 	if err != nil {
 		return nil, HTTPError{Status: 400, Message: err.Error()}
 	}
-	calls = tooladapter.NormalizeForSchemas(calls, tools)
 	if len(calls) == 0 {
 		return CompletionResponse(model, visible, created, messages), nil
 	}
@@ -559,6 +558,23 @@ func CompletionResponseWithTools(model, content string, created int64, messages 
 	message["tool_calls"] = tooladapter.FormatOpenAI(calls)
 	choiceMap["finish_reason"] = "tool_calls"
 	return response, nil
+}
+
+func parseToolCallsWithCatalog(text string, tools any, policy tooladapter.ChoicePolicy) ([]tooladapter.ParsedCall, string, error) {
+	catalog := tooladapter.NewBridgeCatalog(tools, policy)
+	if err := catalog.ValidationError(); err != nil {
+		return nil, "", err
+	}
+	allowedNames := catalog.AllowedParseNames()
+	if len(allowedNames) == 0 {
+		allowedNames = tooladapter.ToolNames(tools)
+	}
+	calls, visible, err := tooladapter.ParseWithAliases(text, allowedNames, catalog.BridgeAliases(), policy)
+	if err != nil {
+		return nil, visible, err
+	}
+	calls = tooladapter.NormalizeForSchemas(calls, tools)
+	return calls, visible, nil
 }
 
 func streamChatCompletionEvents(ctx context.Context, model string, deltas <-chan string, upstreamErr <-chan error, tools any, choice any) (<-chan map[string]any, <-chan error) {
@@ -629,7 +645,7 @@ func streamChatCompletionEvents(ctx context.Context, model string, deltas <-chan
 			}
 		}
 		if toolMode {
-			calls, _, err := tooladapter.Parse(current, toolNames, policy)
+			calls, _, err := parseToolCallsWithCatalog(current, tools, policy)
 			if err != nil {
 				errOut <- HTTPError{Status: 400, Message: err.Error()}
 				return
@@ -1761,7 +1777,7 @@ func ContentBlocksWithChoice(text string, tools any, choice any) ([]map[string]a
 		return []map[string]any{{"type": "text", "text": text}}, "end_turn", nil
 	}
 
-	calls, visible, err := tooladapter.Parse(text, toolNames, policy)
+	calls, visible, err := parseToolCallsWithCatalog(text, tools, policy)
 	if err != nil {
 		return nil, "", err
 	}

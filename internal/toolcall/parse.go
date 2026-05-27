@@ -18,10 +18,14 @@ type xmlNode struct {
 }
 
 func Parse(text string, availableNames []string, policy ChoicePolicy) ([]ParsedCall, string, error) {
+	return ParseWithAliases(text, availableNames, nil, policy)
+}
+
+func ParseWithAliases(text string, availableNames []string, aliases map[string]string, policy ChoicePolicy) ([]ParsedCall, string, error) {
 	visible := strings.TrimSpace(StripMarkup(text))
 	ranges := markupRanges(text)
 	if len(ranges) == 0 {
-		return applyPolicy(nil, nil, strings.TrimSpace(text), policy)
+		return applyPolicy(nil, strings.TrimSpace(text), policy)
 	}
 
 	rawCalls := make([]ParsedCall, 0, len(ranges))
@@ -33,8 +37,14 @@ func Parse(text string, availableNames []string, policy ChoicePolicy) ([]ParsedC
 		rawCalls = append(rawCalls, collectCalls(root)...)
 	}
 
-	calls := filterCalls(rawCalls, availableNames)
-	return applyPolicy(calls, rawCalls, visible, policy)
+	if policy.Mode == ChoiceForced {
+		calls := resolveAliases(rawCalls, aliases)
+		return applyPolicy(calls, visible, policy)
+	}
+
+	calls := filterCalls(rawCalls, availableNames, aliases)
+	calls = resolveAliases(calls, aliases)
+	return applyPolicy(calls, visible, policy)
 }
 
 func StripMarkup(text string) string {
@@ -67,7 +77,7 @@ func StreamableText(text string) string {
 	return strings.TrimSpace(text[:idx])
 }
 
-func applyPolicy(calls []ParsedCall, rawCalls []ParsedCall, visible string, policy ChoicePolicy) ([]ParsedCall, string, error) {
+func applyPolicy(calls []ParsedCall, visible string, policy ChoicePolicy) ([]ParsedCall, string, error) {
 	switch policy.Mode {
 	case ChoiceRequired:
 		if len(calls) == 0 {
@@ -75,18 +85,32 @@ func applyPolicy(calls []ParsedCall, rawCalls []ParsedCall, visible string, poli
 		}
 	case ChoiceForced:
 		if policy.Name != "" {
-			for _, call := range rawCalls {
+			for _, call := range calls {
 				if call.Name != policy.Name {
 					return nil, visible, errors.New("tool_choice forced " + policy.Name + " but model produced " + call.Name)
 				}
 			}
-			calls = filterCalls(calls, []string{policy.Name})
 		}
 		if len(calls) == 0 {
 			return nil, visible, errors.New("tool_choice required but no valid tool call was produced")
 		}
 	}
 	return calls, visible, nil
+}
+
+func resolveAliases(calls []ParsedCall, aliases map[string]string) []ParsedCall {
+	if len(aliases) == 0 || len(calls) == 0 {
+		return calls
+	}
+	out := make([]ParsedCall, len(calls))
+	for i, call := range calls {
+		resolved := call.Name
+		if alias, ok := aliases[call.Name]; ok && strings.TrimSpace(alias) != "" {
+			resolved = strings.TrimSpace(alias)
+		}
+		out[i] = ParsedCall{Name: resolved, Input: call.Input}
+	}
+	return out
 }
 
 func collectCalls(root *xmlNode) []ParsedCall {
@@ -113,15 +137,21 @@ func collectCalls(root *xmlNode) []ParsedCall {
 	return calls
 }
 
-func filterCalls(calls []ParsedCall, availableNames []string) []ParsedCall {
-	if len(availableNames) == 0 {
+func filterCalls(calls []ParsedCall, availableNames []string, aliases map[string]string) []ParsedCall {
+	if len(availableNames) == 0 && len(aliases) == 0 {
 		return calls
 	}
-	allowed := make(map[string]struct{}, len(availableNames))
+	allowed := make(map[string]struct{}, len(availableNames)+len(aliases))
 	for _, name := range availableNames {
 		name = strings.TrimSpace(name)
 		if name != "" {
 			allowed[name] = struct{}{}
+		}
+	}
+	for alias := range aliases {
+		alias = strings.TrimSpace(alias)
+		if alias != "" {
+			allowed[alias] = struct{}{}
 		}
 	}
 	out := make([]ParsedCall, 0, len(calls))

@@ -167,7 +167,7 @@ func TestTokenCountMessagesPreservesContentPartsAndPrependsToolPrompt(t *testing
 	if len(messages) != 2 {
 		t.Fatalf("TokenCountMessages() len = %d, want 2: %#v", len(messages), messages)
 	}
-	if messages[0]["role"] != "system" || !strings.Contains(messages[0]["content"].(string), "Tool: read_file") {
+	if messages[0]["role"] != "system" || !strings.Contains(messages[0]["content"].(string), "Bridge-call slots available: bridge-0") {
 		t.Fatalf("system tool prompt not prepended: %#v", messages[0])
 	}
 	if messages[1]["role"] != "user" {

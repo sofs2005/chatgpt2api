@@ -641,6 +641,36 @@ func TestCompletionResponseForcedToolRejectsExtraCall(t *testing.T) {
 	}
 }
 
+func TestCompletionResponseForcedToolAcceptsBridgeSlotAlias(t *testing.T) {
+	tools := []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}},
+		map[string]any{"type": "function", "function": map[string]any{"name": "search"}},
+	}
+	content := `<tool_calls><invoke name="bridge-0"><parameter name="query">go</parameter></invoke></tool_calls>`
+	choice := map[string]any{"type": "function", "function": map[string]any{"name": "search"}}
+
+	response, err := CompletionResponseWithTools("gpt-5", content, 123, nil, tools, choice)
+	if err != nil {
+		t.Fatalf("CompletionResponseWithTools() error = %v", err)
+	}
+	choiceMap := response["choices"].([]map[string]any)[0]
+	if choiceMap["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %#v, want tool_calls", choiceMap["finish_reason"])
+	}
+	message := choiceMap["message"].(map[string]any)
+	toolCalls := message["tool_calls"].([]map[string]any)
+	if len(toolCalls) != 1 {
+		t.Fatalf("tool_calls = %#v, want one entry", toolCalls)
+	}
+	function := toolCalls[0]["function"].(map[string]any)
+	if function["name"] != "search" {
+		t.Fatalf("function name = %#v, want search", function["name"])
+	}
+	if !strings.Contains(function["arguments"].(string), "go") {
+		t.Fatalf("function arguments = %#v, want query payload", function["arguments"])
+	}
+}
+
 func TestCompletionResponseForcedToolErrorsWhenToolMissing(t *testing.T) {
 	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "search"}}}
 	choice := map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}
@@ -999,8 +1029,11 @@ func TestChatPartsInjectToolPromptForTextAndVision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TextChatParts() error = %v", err)
 	}
-	if len(textMessages) == 0 || textMessages[0]["role"] != "system" || !strings.Contains(textMessages[0]["content"].(string), "Tool: read_file") {
+	if len(textMessages) == 0 || textMessages[0]["role"] != "system" || !strings.Contains(textMessages[0]["content"].(string), "Bridge-call slots available: bridge-0") {
 		t.Fatalf("text messages missing tool prompt: %#v", textMessages)
+	}
+	if !strings.Contains(textMessages[0]["content"].(string), "gateway bridge tools") {
+		t.Fatalf("text messages missing bridge instructions: %#v", textMessages[0])
 	}
 
 	imageData := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
@@ -1016,7 +1049,7 @@ func TestChatPartsInjectToolPromptForTextAndVision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VisionChatParts() error = %v", err)
 	}
-	if len(visionMessages) == 0 || visionMessages[0]["role"] != "system" || !strings.Contains(visionMessages[0]["content"].(string), "Tool: read_file") {
+	if len(visionMessages) == 0 || visionMessages[0]["role"] != "system" || !strings.Contains(visionMessages[0]["content"].(string), "Bridge-call slots available: bridge-0") {
 		t.Fatalf("vision messages missing tool prompt: %#v", visionMessages)
 	}
 	if len(images) != 1 || string(images[0].Data) != "png-bytes" {

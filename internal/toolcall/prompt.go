@@ -2,6 +2,8 @@ package toolcall
 
 import (
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -10,46 +12,94 @@ func BuildPrompt(tools any, policy ChoicePolicy) string {
 		return ""
 	}
 
-	metas := toolMetas(tools)
-	if policy.Mode == ChoiceForced && policy.Name != "" {
-		filtered := metas[:0]
-		for _, meta := range metas {
-			if meta.Name == policy.Name {
-				filtered = append(filtered, meta)
-			}
-		}
-		metas = filtered
-	}
-	if len(metas) == 0 {
+	catalog := NewBridgeCatalog(tools, policy)
+	if len(catalog.Tools) == 0 {
 		return ""
 	}
 
-	var b strings.Builder
-	b.WriteString("Use XML tool calls when needed.\n")
-	if policy.Mode == ChoiceRequired || policy.Mode == ChoiceForced {
-		b.WriteString("You must call a tool before answering.\n")
+	lines := []string{
+		"=== MANDATORY TOOL CALL INSTRUCTIONS ===",
+		"These are gateway bridge tools, not native platform tools.",
+		"Use the bridge slot names below when emitting tool calls.",
+		fmt.Sprintf("Bridge-call slots available: %s", strings.Join(catalog.BridgeNames(), ", ")),
+		"XML call example: <tool_calls><invoke name=\"bridge-0\"><parameter name=\"path\"><![CDATA[value]]></parameter></invoke></tool_calls>",
+		"Use the bridge slot list above as authoritative; the example is illustrative.",
 	}
-	b.WriteString("Format: <tool_calls><tool_call><tool_name>NAME</tool_name><parameters>{JSON}</parameters></tool_call></tool_calls>\n")
-	for _, meta := range metas {
-		b.WriteString("Tool: ")
-		b.WriteString(meta.Name)
-		b.WriteByte('\n')
-		if meta.Description != "" {
-			b.WriteString("Description: ")
-			b.WriteString(meta.Description)
-			b.WriteByte('\n')
+
+	switch policy.Mode {
+	case ChoiceRequired:
+		lines = append(lines, "MANDATORY: this turn MUST include at least one tool call")
+	case ChoiceForced:
+		if policy.Name != "" {
+			lines = append(lines, fmt.Sprintf("MANDATORY: this turn MUST call the exact bridge slot \"%s\" for client tool \"%s\"", catalog.BridgeNames()[0], policy.Name))
 		}
-		b.WriteString("<tool_calls><tool_call><tool_name>")
-		b.WriteString(meta.Name)
-		b.WriteString("</tool_name><parameters>")
-		if schemaJSON := compactJSON(meta.Schema); schemaJSON != "" {
-			b.WriteString(schemaJSON)
-		} else {
-			b.WriteString("{}")
-		}
-		b.WriteString("</parameters></tool_call></tool_calls>\n")
 	}
-	return strings.TrimSpace(b.String())
+
+	for _, tool := range catalog.Tools {
+		line := fmt.Sprintf("- %s: %s", tool.BridgeName, strings.TrimSpace(tool.Description))
+		if hint := compactParameterHint(tool.Schema); hint != "" {
+			if tool.Description != "" {
+				line += " "
+			}
+			line += hint
+		}
+		lines = append(lines, strings.TrimSpace(line))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func compactParameterHint(schema any) string {
+	m, ok := schema.(map[string]any)
+	if !ok || len(m) == 0 {
+		return ""
+	}
+
+	props, _ := m["properties"].(map[string]any)
+	keys := sortedMapKeys(props)
+	if len(keys) == 0 {
+		return ""
+	}
+
+	hint := "input keys: " + strings.Join(keys, ", ")
+	if required := sortedStringValues(m["required"]); len(required) > 0 {
+		hint += "; required: " + strings.Join(required, ", ")
+	}
+	return hint
+}
+
+func sortedMapKeys(m map[string]any) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedStringValues(v any) []string {
+	var values []string
+	switch items := v.(type) {
+	case []string:
+		values = append(values, items...)
+	case []any:
+		values = make([]string, 0, len(items))
+		for _, item := range items {
+			if s, ok := item.(string); ok && s != "" {
+				values = append(values, s)
+			}
+		}
+	default:
+		return nil
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Strings(values)
+	return values
 }
 
 func ExtractToolMeta(tool map[string]any) (string, string, any) {

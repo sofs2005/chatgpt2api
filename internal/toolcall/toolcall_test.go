@@ -279,6 +279,25 @@ func TestPolicyFromToolChoice(t *testing.T) {
 			want:   ChoicePolicy{Mode: ChoiceRequired},
 		},
 		{
+			name:   "any string",
+			choice: "any",
+			want:   ChoicePolicy{Mode: ChoiceRequired},
+		},
+		{
+			name: "openai required object",
+			choice: map[string]any{
+				"type": "required",
+			},
+			want: ChoicePolicy{Mode: ChoiceRequired},
+		},
+		{
+			name: "uppercase required object",
+			choice: map[string]any{
+				"type": "REQUIRED",
+			},
+			want: ChoicePolicy{Mode: ChoiceRequired},
+		},
+		{
 			name:   "uppercase none string",
 			choice: "NONE",
 			want:   ChoicePolicy{Mode: ChoiceNone},
@@ -294,7 +313,94 @@ func TestPolicyFromToolChoice(t *testing.T) {
 	}
 }
 
-func TestBuildPromptIncludesCompactToolSpec(t *testing.T) {
+func TestBridgeCatalogMapsSlotsToOriginalToolNames(t *testing.T) {
+	tools := []map[string]any{
+		{"type": "function", "function": map[string]any{"name": "read_file", "description": "Read a file", "parameters": map[string]any{"type": "object"}}},
+		{"type": "function", "function": map[string]any{"name": "search", "description": "Search docs", "parameters": map[string]any{"type": "object"}}},
+	}
+
+	catalog := NewBridgeCatalog(tools, ChoicePolicy{Mode: ChoiceAuto})
+
+	if got := catalog.BridgeNames(); !reflect.DeepEqual(got, []string{"bridge-0", "bridge-1"}) {
+		t.Fatalf("BridgeNames() = %#v", got)
+	}
+	if got := catalog.OriginalName("bridge-1"); got != "search" {
+		t.Fatalf("OriginalName(bridge-1) = %q, want search", got)
+	}
+	if got := catalog.AllowedParseNames(); !reflect.DeepEqual(got, []string{"bridge-0", "bridge-1", "read_file", "search"}) {
+		t.Fatalf("AllowedParseNames() = %#v", got)
+	}
+}
+
+func TestBridgeCatalogForcedToolKeepsOnlyForcedSlot(t *testing.T) {
+	tools := []map[string]any{
+		{"type": "function", "function": map[string]any{"name": "read_file", "description": "Read a file", "parameters": map[string]any{"type": "object"}}},
+		{"type": "function", "function": map[string]any{"name": "search", "description": "Search docs", "parameters": map[string]any{"type": "object"}}},
+	}
+
+	catalog := NewBridgeCatalog(tools, ChoicePolicy{Mode: ChoiceForced, Name: "search"})
+
+	if got := catalog.BridgeNames(); !reflect.DeepEqual(got, []string{"bridge-0"}) {
+		t.Fatalf("BridgeNames() = %#v", got)
+	}
+	if got := catalog.OriginalName("bridge-0"); got != "search" {
+		t.Fatalf("OriginalName(bridge-0) = %q, want search", got)
+	}
+}
+
+func TestBridgeCatalogReportsMissingForcedTool(t *testing.T) {
+	tools := []map[string]any{
+		{"type": "function", "function": map[string]any{"name": "read_file", "description": "Read a file", "parameters": map[string]any{"type": "object"}}},
+		{"type": "function", "function": map[string]any{"name": "search", "description": "Search docs", "parameters": map[string]any{"type": "object"}}},
+	}
+
+	catalog := NewBridgeCatalog(tools, ChoicePolicy{Mode: ChoiceForced, Name: "write_file"})
+
+	if catalog.MissingForcedName != "write_file" {
+		t.Fatalf("MissingForcedName = %q, want write_file", catalog.MissingForcedName)
+	}
+	if err := catalog.ValidationError(); err == nil || err.Error() != "tool_choice forced write_file but no matching tool was found" {
+		t.Fatalf("ValidationError() = %v", err)
+	}
+}
+
+func TestBridgeCatalogAvoidsBridgeNameCollisions(t *testing.T) {
+	tools := []map[string]any{
+		{"type": "function", "function": map[string]any{"name": "bridge-0", "parameters": map[string]any{"type": "object"}}},
+		{"type": "function", "function": map[string]any{"name": "search", "parameters": map[string]any{"type": "object"}}},
+	}
+
+	catalog := NewBridgeCatalog(tools, ChoicePolicy{Mode: ChoiceAuto})
+
+	if got := catalog.BridgeNames(); !reflect.DeepEqual(got, []string{"bridge-0-slot", "bridge-1"}) {
+		t.Fatalf("BridgeNames() = %#v", got)
+	}
+	if got := catalog.AllowedParseNames(); !reflect.DeepEqual(got, []string{"bridge-0-slot", "bridge-1", "bridge-0", "search"}) {
+		t.Fatalf("AllowedParseNames() = %#v", got)
+	}
+
+	resolved := catalog.ResolveCalls([]ParsedCall{{Name: "bridge-0-slot", Input: map[string]any{"path": "a.go"}}})
+	if resolved[0].Name != "bridge-0" {
+		t.Fatalf("resolved name = %q, want bridge-0", resolved[0].Name)
+	}
+}
+
+func TestResolveBridgeCallsRestoresOriginalToolName(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file", "parameters": map[string]any{"type": "object"}}}}
+	catalog := NewBridgeCatalog(tools, ChoicePolicy{Mode: ChoiceAuto})
+	calls := []ParsedCall{{Name: "bridge-0", Input: map[string]any{"path": "a.go"}}}
+
+	resolved := catalog.ResolveCalls(calls)
+
+	if resolved[0].Name != "read_file" {
+		t.Fatalf("resolved name = %q, want read_file", resolved[0].Name)
+	}
+	if got := resolved[0].Input["path"]; got != "a.go" {
+		t.Fatalf("path = %#v, want a.go", got)
+	}
+}
+
+func TestBuildPromptIncludesBridgeToolInstructions(t *testing.T) {
 	tools := []map[string]any{
 		{
 			"type": "function",
@@ -306,19 +412,72 @@ func TestBuildPromptIncludesCompactToolSpec(t *testing.T) {
 					"properties": map[string]any{
 						"path": map[string]any{"type": "string"},
 					},
+					"required": []any{"path"},
 				},
 			},
 		},
 	}
 
 	prompt := BuildPrompt(tools, ChoicePolicy{Mode: ChoiceRequired})
-	for _, want := range []string{"Tool: read_file", "Description: Read a file", "<tool_calls>", "<parameters>"} {
+
+	for _, want := range []string{
+		"=== MANDATORY TOOL CALL INSTRUCTIONS ===",
+		"gateway bridge tools",
+		"Bridge-call slots available: bridge-0",
+		`<tool_calls><invoke name="bridge-0">`,
+		`<parameter name="path"><![CDATA[value]]></parameter>`,
+		"MANDATORY: this turn MUST include at least one tool call",
+		"- bridge-0: Read a file input keys: path; required: path",
+	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("BuildPrompt() missing %q in %q", want, prompt)
 		}
 	}
-	if strings.Contains(strings.ToLower(prompt), "few-shot") {
-		t.Fatalf("BuildPrompt() should stay compact, got %q", prompt)
+	if strings.Contains(prompt, "Tool: read_file") {
+		t.Fatalf("BuildPrompt() leaked legacy tool block: %q", prompt)
+	}
+}
+
+func TestBuildPromptForcedToolMentionsExactBridgeSlotAndOriginalName(t *testing.T) {
+	tools := []map[string]any{
+		{"type": "function", "function": map[string]any{"name": "read_file", "description": "Read a file", "parameters": map[string]any{"type": "object"}}},
+		{"type": "function", "function": map[string]any{"name": "search", "description": "Search docs", "parameters": map[string]any{"type": "object"}}},
+	}
+
+	prompt := BuildPrompt(tools, ChoicePolicy{Mode: ChoiceForced, Name: "search"})
+
+	for _, want := range []string{
+		`MUST call the exact bridge slot "bridge-0" for client tool "search"`,
+		"Bridge-call slots available: bridge-0",
+		"- bridge-0: Search docs",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("BuildPrompt() missing %q in %q", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "bridge-1") || strings.Contains(prompt, "Read a file") {
+		t.Fatalf("forced prompt exposed non-forced tools: %q", prompt)
+	}
+}
+
+func TestBuildPromptForcedToolUsesBridgeZeroWhenOriginalNameCollides(t *testing.T) {
+	tools := []map[string]any{
+		{"type": "function", "function": map[string]any{"name": "bridge-0", "description": "Reserved name", "parameters": map[string]any{"type": "object"}}},
+	}
+
+	prompt := BuildPrompt(tools, ChoicePolicy{Mode: ChoiceForced, Name: "bridge-0"})
+
+	for _, want := range []string{
+		`MUST call the exact bridge slot "bridge-0" for client tool "bridge-0"`,
+		"Bridge-call slots available: bridge-0",
+		"- bridge-0: Reserved name",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("BuildPrompt() missing %q in %q", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "bridge-0-slot") {
+		t.Fatalf("forced prompt used a fallback slot name: %q", prompt)
 	}
 }
 

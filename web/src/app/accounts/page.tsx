@@ -349,6 +349,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const safePage = Math.min(page, pageCount);
   const startIndex = (safePage - 1) * Number(pageSize);
   const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
+  const currentRowStartNumber = startIndex + 1;
   const allCurrentSelected =
     currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.id));
   const showInitialEmptyState = !isLoading && accounts.length === 0;
@@ -1303,7 +1304,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             ) : (
               <>
                 <div className="hidden overflow-x-auto md:block">
-                  <Table className="min-w-[940px]">
+                  <Table className="min-w-[980px]">
                     <TableHeader>
                       <TableRow>
                         <TableHead className="w-12">
@@ -1313,7 +1314,8 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                             aria-label="选择当前页账号"
                           />
                         </TableHead>
-                        <TableHead className="w-[34%]">账号</TableHead>
+                        <TableHead className="w-16 text-center">序号</TableHead>
+                        <TableHead className="w-[32%]">账号</TableHead>
                         <TableHead className="w-48">状态 / 类型</TableHead>
                         <TableHead className="w-32">额度</TableHead>
                         <TableHead className="w-44">恢复时间</TableHead>
@@ -1322,7 +1324,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {currentRows.map((account) => (
+                      {currentRows.map((account, rowIndex) => (
                         <TableRow key={account.id} className="text-sm text-muted-foreground">
                           <TableCell>
                             <Checkbox
@@ -1330,6 +1332,9 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                               onCheckedChange={(checked) => toggleAccountSelection(account.id, Boolean(checked))}
                               aria-label="选择账号"
                             />
+                          </TableCell>
+                          <TableCell className="text-center font-medium text-foreground">
+                            {currentRowStartNumber + rowIndex}
                           </TableCell>
                           <TableCell>
                             <div className="flex min-w-0 flex-col gap-1.5">
@@ -1370,9 +1375,12 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
 
                 {currentRows.length > 0 ? (
                   <div className="flex flex-col gap-3 p-3 md:hidden">
-                    {currentRows.map((account) => (
+                    {currentRows.map((account, rowIndex) => (
                       <div key={account.id} className="rounded-[14px] border border-stone-100 bg-white p-3 shadow-[0_4px_14px_rgba(24,40,72,0.05)]">
                         <div className="flex items-start gap-3">
+                          <div className="mt-1 rounded-md bg-stone-100 px-2 py-1 text-xs font-medium text-stone-600">
+                            {currentRowStartNumber + rowIndex}
+                          </div>
                           <Checkbox
                             checked={selectedIds.includes(account.id)}
                             onCheckedChange={(checked) => toggleAccountSelection(account.id, Boolean(checked))}

@@ -196,8 +196,8 @@ func buildInlineMessages(mode, latest string, latestTooLong bool, hasHistoryFile
 	if hasToolsFile {
 		lines = append(lines, "可用工具说明在 tools.txt。")
 	}
-	if hasHistoryFile && (latestTooLong || mode == ModeFile) {
-		lines = append(lines, "当前用户任务也在 history.txt 的 Current User Task 小节中，正文不重复粘贴长任务。")
+	if hasHistoryFile {
+		lines = append(lines, "当前用户任务也在 history.txt 的 Current User Task 小节中，正文不重复粘贴。")
 	} else if strings.TrimSpace(latest) != "" {
 		lines = append(lines, "Current User Task:\n"+latest)
 	}

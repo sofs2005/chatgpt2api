@@ -75,6 +75,34 @@ func TestPlanContextMovesHugeLatestUserToFile(t *testing.T) {
 	}
 }
 
+func TestPlanContextDoesNotRepeatLatestUserWhenHistoryFileIsGenerated(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "assistant", "content": strings.Repeat("prior ", 10)},
+		{"role": "user", "content": "current task"},
+	}
+	options := tinyOptions()
+	options.ContextPromptMaxChars = 240
+
+	plan := PlanContext(messages, nil, nil, options)
+
+	if plan.Mode != ModeHybrid {
+		t.Fatalf("Mode = %q, want hybrid", plan.Mode)
+	}
+	if len(plan.Files) != 1 {
+		t.Fatalf("len(Files) = %d, want 1", len(plan.Files))
+	}
+	if !strings.Contains(plan.Files[0].Text, "## Current User Task\ncurrent task") {
+		t.Fatalf("history file missing current task: %s", plan.Files[0].Text)
+	}
+	inline := plan.InlineMessages[0]["content"].(string)
+	if strings.Contains(inline, "Current User Task:\ncurrent task") {
+		t.Fatalf("inline prompt repeated latest user text: %s", inline)
+	}
+	if !strings.Contains(inline, "当前用户任务也在 history.txt") {
+		t.Fatalf("inline prompt missing current task attachment note: %s", inline)
+	}
+}
+
 func TestPlanContextCreatesToolsFileUnlessChoiceNone(t *testing.T) {
 	messages := []map[string]any{{"role": "user", "content": "use a tool"}}
 	tools := []map[string]any{{

@@ -1558,6 +1558,36 @@ func TestAddAccountsDefaultsToEnabledAndListsIt(t *testing.T) {
 	if account["enabled"] != true {
 		t.Fatalf("enabled after add = %#v, want true", account["enabled"])
 	}
+	if got := util.Clean(account["browser-family"]); got == "" {
+		t.Fatal("browser-family should be set on new accounts")
+	}
+	if got := util.Clean(account["browser-version"]); got == "" {
+		t.Fatal("browser-version should be set on new accounts")
+	}
+	fp, ok := account["fp"].(map[string]any)
+	if !ok {
+		t.Fatalf("account fp = %#v, want map", account["fp"])
+	}
+	if got := util.Clean(fp["browser-family"]); got != util.Clean(account["browser-family"]) {
+		t.Fatalf("fp browser-family = %q, want %q", got, util.Clean(account["browser-family"]))
+	}
+	if got := util.Clean(fp["browser-version"]); got != util.Clean(account["browser-version"]) {
+		t.Fatalf("fp browser-version = %q, want %q", got, util.Clean(account["browser-version"]))
+	}
+	if pools := BrowserFamilyVersionPools(); func() bool {
+		versions, ok := pools[util.Clean(account["browser-family"])]
+		if !ok {
+			return false
+		}
+		for _, candidate := range versions {
+			if candidate == util.Clean(account["browser-version"]) {
+				return true
+			}
+		}
+		return false
+	}() == false {
+		t.Fatalf("browser-family/version = %q/%q, want a real pooled version", account["browser-family"], account["browser-version"])
+	}
 	items := accounts.ListAccounts()
 	if len(items) != 1 {
 		t.Fatalf("ListAccounts() length = %d, want 1", len(items))
@@ -1583,8 +1613,17 @@ func TestGetAccountGeneratesAndPersistsFingerprint(t *testing.T) {
 	if !ok {
 		t.Fatalf("account fp = %#v, want map", account["fp"])
 	}
+	if got := util.Clean(fp["sec-ch-ua-full-version-list"]); !strings.Contains(got, browserNormalizeFullVersion(util.Clean(fp["browser-version"]))) {
+		t.Fatalf("sec-ch-ua-full-version-list = %q, want to contain %q", got, browserNormalizeFullVersion(util.Clean(fp["browser-version"])))
+	}
 	if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
 		t.Fatalf("generated fp missing device/session: %#v", fp)
+	}
+	if util.Clean(fp["browser-family"]) == "" || util.Clean(fp["browser-version"]) == "" {
+		t.Fatalf("generated fp missing browser family/version: %#v", fp)
+	}
+	if util.Clean(account["browser-family"]) != util.Clean(fp["browser-family"]) || util.Clean(account["browser-version"]) != util.Clean(fp["browser-version"]) {
+		t.Fatalf("account browser family/version mismatch: account=%#v fp=%#v", account, fp)
 	}
 	if backend.saveCount != 1 {
 		t.Fatalf("GetAccount() saveCount = %d, want 1", backend.saveCount)
@@ -1614,8 +1653,17 @@ func TestGetAccountGeneratesAndPersistsFingerprintForDisabledAccount(t *testing.
 	if !ok {
 		t.Fatalf("account fp = %#v, want map", account["fp"])
 	}
+	if got := util.Clean(fp["sec-ch-ua-full-version-list"]); !strings.Contains(got, browserNormalizeFullVersion(util.Clean(fp["browser-version"]))) {
+		t.Fatalf("sec-ch-ua-full-version-list = %q, want to contain %q", got, browserNormalizeFullVersion(util.Clean(fp["browser-version"])))
+	}
 	if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
 		t.Fatalf("generated fp missing device/session: %#v", fp)
+	}
+	if util.Clean(fp["browser-family"]) == "" || util.Clean(fp["browser-version"]) == "" {
+		t.Fatalf("generated fp missing browser family/version: %#v", fp)
+	}
+	if util.Clean(account["browser-family"]) != util.Clean(fp["browser-family"]) || util.Clean(account["browser-version"]) != util.Clean(fp["browser-version"]) {
+		t.Fatalf("account browser family/version mismatch: account=%#v fp=%#v", account, fp)
 	}
 	if backend.saveCount != 1 {
 		t.Fatalf("GetAccount() saveCount = %d, want 1", backend.saveCount)
@@ -1654,6 +1702,12 @@ func TestGetAccountKeepsExistingFingerprintStable(t *testing.T) {
 	if secondFP["oai-device-id"] != "device-1" || secondFP["oai-session-id"] != "session-1" {
 		t.Fatalf("second fp changed device/session: %#v", secondFP)
 	}
+	if util.Clean(firstFP["browser-family"]) != "edge" || util.Clean(firstFP["browser-version"]) != "143" {
+		t.Fatalf("first fp family/version = %#v, want edge/143", firstFP)
+	}
+	if util.Clean(secondFP["browser-family"]) != "edge" || util.Clean(secondFP["browser-version"]) != "143" {
+		t.Fatalf("second fp family/version = %#v, want edge/143", secondFP)
+	}
 	if backend.saveCount != 1 {
 		t.Fatalf("saveCount = %d, want 1 to persist filled client hints only once", backend.saveCount)
 	}
@@ -1677,6 +1731,9 @@ func TestUpdateAccountFromSessionImportPreservesFingerprint(t *testing.T) {
 	afterFP := after["fp"].(map[string]any)
 	if afterFP["oai-device-id"] != beforeFP["oai-device-id"] || afterFP["oai-session-id"] != beforeFP["oai-session-id"] {
 		t.Fatalf("fingerprint changed across token migration: before=%#v after=%#v", beforeFP, afterFP)
+	}
+	if util.Clean(afterFP["browser-family"]) != util.Clean(beforeFP["browser-family"]) || util.Clean(afterFP["browser-version"]) != util.Clean(beforeFP["browser-version"]) {
+		t.Fatalf("family/version changed across token migration: before=%#v after=%#v", beforeFP, afterFP)
 	}
 }
 
@@ -1869,6 +1926,9 @@ func TestNormalizeBrowserFingerprintRegeneratesInvalidFingerprint(t *testing.T) 
 	if fp["version"] != 1 {
 		t.Fatalf("version = %#v, want 1", fp["version"])
 	}
+	if got := util.Clean(fp["sec-ch-ua-full-version-list"]); !strings.Contains(got, browserNormalizeFullVersion(util.Clean(fp["browser-version"]))) {
+		t.Fatalf("sec-ch-ua-full-version-list = %q, want to contain %q", got, browserNormalizeFullVersion(util.Clean(fp["browser-version"])))
+	}
 	if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
 		t.Fatalf("device/session missing in regenerated fingerprint: %#v", fp)
 	}
@@ -1876,7 +1936,7 @@ func TestNormalizeBrowserFingerprintRegeneratesInvalidFingerprint(t *testing.T) 
 
 func TestNormalizeBrowserFingerprintAcceptsStringMap(t *testing.T) {
 	fp, changed := NormalizeBrowserFingerprint(map[string]string{
-		" User-Agent ":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		" User-Agent ":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
 		"oai-device-id":  " device-1 ",
 		"oai-session-id": " session-1 ",
 	})
@@ -1896,7 +1956,7 @@ func TestNormalizeBrowserFingerprintAcceptsStringMap(t *testing.T) {
 		t.Fatalf("sec-ch-ua = %q", got)
 	}
 	values := BrowserFingerprintStringMap(map[string]string{
-		" User-Agent ":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		" User-Agent ":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
 		"oai-device-id":  " device-1 ",
 		"oai-session-id": " session-1 ",
 	})
@@ -1908,19 +1968,19 @@ func TestNormalizeBrowserFingerprintAcceptsStringMap(t *testing.T) {
 func TestNormalizeBrowserFingerprintReportsKeyNormalizationAsChange(t *testing.T) {
 	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
 	fp, changed := NormalizeBrowserFingerprint(map[string]any{
-		" Version ":                    1,
-		" Impersonate ":                "edge143",
-		" User-Agent ":                 userAgent,
-		" Sec-CH-UA ":                  `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
-		" Sec-CH-UA-Mobile ":           "?0",
-		" Sec-CH-UA-Platform ":         `"Windows"`,
-		" Sec-CH-UA-Arch ":             `"x86"`,
-		" Sec-CH-UA-Bitness ":          `"64"`,
-		" Sec-CH-UA-Full-Version ":     `"143.0.0.0"`,
+		" Version ":                     1,
+		" Impersonate ":                 "edge143",
+		" User-Agent ":                  userAgent,
+		" Sec-CH-UA ":                   `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
+		" Sec-CH-UA-Mobile ":            "?0",
+		" Sec-CH-UA-Platform ":          `"Windows"`,
+		" Sec-CH-UA-Arch ":              `"x86"`,
+		" Sec-CH-UA-Bitness ":           `"64"`,
+		" Sec-CH-UA-Full-Version ":      `"143.0.0.0"`,
 		" Sec-CH-UA-Full-Version-List ": `"Microsoft Edge";v="143.0.0.0", "Chromium";v="143.0.0.0", "Not A(Brand";v="24.0.0.0"`,
-		" Sec-CH-UA-Platform-Version ": `"19.0.0"`,
-		" OAI-Device-ID ":              "device-1",
-		" OAI-Session-ID ":             "session-1",
+		" Sec-CH-UA-Platform-Version ":  `"19.0.0"`,
+		" OAI-Device-ID ":               "device-1",
+		" OAI-Session-ID ":              "session-1",
 	})
 	if !changed {
 		t.Fatal("NormalizeBrowserFingerprint() changed = false, want true when keys are normalized")
@@ -1969,7 +2029,7 @@ func TestBrowserHeadersForFingerprintUsesNormalizedValues(t *testing.T) {
 
 func TestBrowserHeadersForFingerprintAcceptsStringMap(t *testing.T) {
 	headers := BrowserHeadersForFingerprint(map[string]string{
-		" User-Agent ":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		" User-Agent ":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
 		"oai-device-id":  " device-1 ",
 		"oai-session-id": " session-1 ",
 	})
@@ -1986,6 +2046,82 @@ func TestBrowserHeadersForFingerprintAcceptsStringMap(t *testing.T) {
 		if got := headers[key]; got != want {
 			t.Fatalf("headers[%s] = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestBrowserFamilyVersionPoolsContainVerifiedVersions(t *testing.T) {
+	want := map[string][]string{
+		"chrome":  []string{"148", "147", "146"},
+		"edge":    []string{"148", "147", "146"},
+		"firefox": []string{"151", "150", "149"},
+		"safari":  []string{"26.5", "26.4", "26.3"},
+	}
+	if got := BrowserFamilyVersionPools(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("BrowserFamilyVersionPools() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBrowserFingerprintFromFamilyVersionBuildsExpectedFamilies(t *testing.T) {
+	tests := []struct {
+		name                string
+		family              string
+		version             string
+		wantFamily          string
+		wantVersion         string
+		wantImpersonate     string
+		wantUserAgent       string
+		wantSecCHUAContains string
+		wantFullVersion     string
+	}{
+		{name: "chrome148", family: "chrome", version: "148", wantFamily: "chrome", wantVersion: "148", wantImpersonate: "chrome148", wantUserAgent: "Chrome/148.0.0.0", wantSecCHUAContains: `Google Chrome";v="148`, wantFullVersion: `"148.0.0.0"`},
+		{name: "edge148", family: "edge", version: "148", wantFamily: "edge", wantVersion: "148", wantImpersonate: "edge148", wantUserAgent: "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0", wantSecCHUAContains: `Microsoft Edge";v="148`, wantFullVersion: `"148.0.0.0"`},
+		{name: "firefox151", family: "firefox", version: "151", wantFamily: "firefox", wantVersion: "151", wantImpersonate: "firefox151", wantUserAgent: "Firefox/151.0", wantSecCHUAContains: `Firefox";v="151`, wantFullVersion: `"151.0.0.0"`},
+		{name: "safari265", family: "safari", version: "26.5", wantFamily: "safari", wantVersion: "26.5", wantImpersonate: "safari26.5", wantUserAgent: "Version/26.5 Safari/605.1.15", wantSecCHUAContains: `Safari";v="26`, wantFullVersion: `"26.5.0.0"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fp := BrowserFingerprintFromFamilyVersion(tt.family, tt.version)
+			if got := util.Clean(fp["browser-family"]); got != tt.wantFamily {
+				t.Fatalf("browser-family = %q, want %q", got, tt.wantFamily)
+			}
+			if got := util.Clean(fp["browser-version"]); got != tt.wantVersion {
+				t.Fatalf("browser-version = %q, want %q", got, tt.wantVersion)
+			}
+			if got := util.Clean(fp["impersonate"]); got != tt.wantImpersonate {
+				t.Fatalf("impersonate = %q, want %q", got, tt.wantImpersonate)
+			}
+			if got := util.Clean(fp["user-agent"]); !strings.Contains(got, tt.wantUserAgent) {
+				t.Fatalf("user-agent = %q, want to contain %q", got, tt.wantUserAgent)
+			}
+			if got := util.Clean(fp["sec-ch-ua"]); !strings.Contains(got, tt.wantSecCHUAContains) {
+				t.Fatalf("sec-ch-ua = %q, want to contain %q", got, tt.wantSecCHUAContains)
+			}
+			if got := util.Clean(fp["sec-ch-ua-full-version"]); got != tt.wantFullVersion {
+				t.Fatalf("sec-ch-ua-full-version = %q, want %q", got, tt.wantFullVersion)
+			}
+			if got := util.Clean(fp["sec-ch-ua-full-version-list"]); !strings.Contains(got, browserNormalizeFullVersion(util.Clean(fp["browser-version"]))) {
+				t.Fatalf("sec-ch-ua-full-version-list = %q, want to contain %q", got, browserNormalizeFullVersion(util.Clean(fp["browser-version"])))
+			}
+			if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
+				t.Fatalf("fingerprint missing generated ids: %#v", fp)
+			}
+		})
+	}
+}
+
+func TestBrowserFingerprintFromFamilyVersionFallsBackToDefault(t *testing.T) {
+	fp := BrowserFingerprintFromFamilyVersion("bogus", "999")
+	if got := util.Clean(fp["browser-family"]); got != "chrome" {
+		t.Fatalf("browser-family = %q, want chrome", got)
+	}
+	if got := util.Clean(fp["browser-version"]); got != "145" {
+		t.Fatalf("browser-version = %q, want 145", got)
+	}
+	if got := util.Clean(fp["impersonate"]); got != "chrome145" {
+		t.Fatalf("impersonate = %q, want chrome145", got)
+	}
+	if got := util.Clean(fp["user-agent"]); !strings.Contains(got, "Chrome/145.0.0.0") {
+		t.Fatalf("user-agent = %q, want Chrome/145.0.0.0", got)
 	}
 }
 

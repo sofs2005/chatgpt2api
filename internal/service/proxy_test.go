@@ -2,9 +2,19 @@ package service
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	crand "crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -87,4 +97,155 @@ func TestBrowserHTTPClientPreservesCallerAuthHeaders(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
+}
+
+func TestProxyTestUsesBrowserFingerprintHeaders(t *testing.T) {
+	cert, roots := mustChatGPTCertificate(t)
+	t.Setenv("GODEBUG", "x509usefallbackroots=1")
+	x509.SetFallbackRoots(roots)
+	var seenMu sync.Mutex
+	var seenUserAgent string
+	var seenSecCHUA string
+
+	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenMu.Lock()
+		seenUserAgent = r.Header.Get("User-Agent")
+		seenSecCHUA = r.Header.Get("Sec-Ch-Ua")
+		seenMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	target.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	target.StartTLS()
+	defer target.Close()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			t.Fatalf("proxy method = %s, want CONNECT", r.Method)
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("proxy response writer does not support hijacking")
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			_ = conn.Close()
+			t.Fatal(err)
+		}
+		upstream, err := net.Dial("tcp", target.Listener.Addr().String())
+		if err != nil {
+			_ = conn.Close()
+			t.Fatal(err)
+		}
+		go tunnelConn(conn, upstream)
+	}))
+	defer proxy.Close()
+
+	service := NewProxyService(proxyConfigFunc(func() string { return "" }))
+	result := service.Test(proxy.URL, 5*time.Second)
+
+	if ok, _ := result["ok"].(bool); !ok {
+		t.Fatalf("result[ok] = %v, want true", result["ok"])
+	}
+	if status, _ := result["status"].(int); status != http.StatusNoContent {
+		t.Fatalf("result[status] = %v, want %d", result["status"], http.StatusNoContent)
+	}
+
+	seenMu.Lock()
+	defer seenMu.Unlock()
+	if seenUserAgent == "" {
+		t.Fatal("User-Agent should be sent to the upstream request")
+	}
+	if seenSecCHUA == "" {
+		t.Fatal("Sec-Ch-Ua should be sent to the upstream request")
+	}
+}
+
+func mustChatGPTCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+
+	caPriv, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caSerialLimit := new(big.Int).Lsh(big.NewInt(1), 62)
+	caSerial, err := crand.Int(crand.Reader, caSerialLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTemplate := x509.Certificate{
+		SerialNumber: caSerial,
+		Subject: pkix.Name{
+			CommonName:   "chatgpt2api test CA",
+			Organization: []string{"chatgpt2api"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(crand.Reader, &caTemplate, &caTemplate, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverPriv, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSerial, err := crand.Int(crand.Reader, caSerialLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverTemplate := x509.Certificate{
+		SerialNumber: serverSerial,
+		Subject: pkix.Name{
+			CommonName: "chatgpt.com",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"chatgpt.com"},
+	}
+	serverDER, err := x509.CreateCertificate(crand.Reader, &serverTemplate, caCert, &serverPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverDER})
+	serverKey, err := x509.MarshalECPrivateKey(serverPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: serverKey})
+	cert, err := tls.X509KeyPair(serverPEM, serverKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	return cert, pool
+}
+
+type proxyConfigFunc func() string
+
+func (f proxyConfigFunc) Proxy() string { return f() }
+
+func tunnelConn(left, right net.Conn) {
+	defer left.Close()
+	defer right.Close()
+	go func() {
+		_, _ = io.Copy(right, left)
+		_ = right.Close()
+	}()
+	_, _ = io.Copy(left, right)
 }

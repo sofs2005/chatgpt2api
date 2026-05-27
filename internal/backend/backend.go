@@ -207,7 +207,22 @@ func (c *Client) buildFingerprint() map[string]string {
 			}
 		}
 	}
-	for _, key := range []string{"user-agent", "impersonate", "oai-device-id", "oai-session-id", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"} {
+	for _, key := range []string{
+		"user-agent",
+		"impersonate",
+		"browser-family",
+		"browser-version",
+		"oai-device-id",
+		"oai-session-id",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"sec-ch-ua-arch",
+		"sec-ch-ua-bitness",
+		"sec-ch-ua-full-version",
+		"sec-ch-ua-full-version-list",
+		"sec-ch-ua-platform-version",
+	} {
 		if value := util.Clean(account[key]); value != "" {
 			fp[key] = value
 		}

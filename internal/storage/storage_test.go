@@ -71,6 +71,46 @@ func TestDatabaseBackendStoresDocumentsAndLogs(t *testing.T) {
 	}
 }
 
+func TestDatabaseBackendRoundTripsBrowserFamilyVersion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
+	backend, err := NewDatabaseBackend("sqlite:///" + filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatalf("NewDatabaseBackend() error = %v", err)
+	}
+	defer backend.db.Close()
+
+	want := map[string]any{
+		"access_token":    "token-1",
+		"browser-family":  "chrome",
+		"browser-version": "148",
+		"fp": map[string]any{
+			"version":         2,
+			"browser-family":  "chrome",
+			"browser-version": "148",
+		},
+	}
+	if err := backend.SaveAccounts([]map[string]any{want}); err != nil {
+		t.Fatalf("SaveAccounts() error = %v", err)
+	}
+	accounts, err := backend.LoadAccounts()
+	if err != nil {
+		t.Fatalf("LoadAccounts() error = %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("LoadAccounts() length = %d, want 1", len(accounts))
+	}
+	if accounts[0]["access_token"] != "token-1" || accounts[0]["browser-family"] != "chrome" || accounts[0]["browser-version"] != "148" {
+		t.Fatalf("LoadAccounts()[0] = %#v, want browser family/version fields preserved", accounts[0])
+	}
+	fp, ok := accounts[0]["fp"].(map[string]any)
+	if !ok {
+		t.Fatalf("LoadAccounts()[0][fp] = %#v, want map", accounts[0]["fp"])
+	}
+	if fp["browser-family"] != "chrome" || fp["browser-version"] != "148" {
+		t.Fatalf("LoadAccounts()[0][fp] = %#v, want nested browser family/version fields preserved", fp)
+	}
+}
+
 func TestDatabaseBackendQueryLogsEmptyReturnsJSONArray(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
 	backend, err := NewDatabaseBackend("sqlite:///" + filepath.ToSlash(dbPath))

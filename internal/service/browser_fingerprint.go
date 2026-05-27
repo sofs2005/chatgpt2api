@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"math/rand"
 	"regexp"
 	"strings"
 
@@ -21,29 +22,205 @@ const (
 	DefaultBrowserImpersonationProfile   = "chrome145"
 )
 
+var browserFamilyVersionPools = map[string][]string{
+	"chrome":  []string{"148", "147", "146"},
+	"edge":    []string{"148", "147", "146"},
+	"firefox": []string{"151", "150", "149"},
+	"safari":  []string{"26.5", "26.4", "26.3"},
+}
+
+type browserFamilyWeight struct {
+	family string
+	weight int
+}
+
+var browserFamilySelectionWeights = []browserFamilyWeight{
+	{family: "chrome", weight: 50},
+	{family: "edge", weight: 20},
+	{family: "firefox", weight: 20},
+	{family: "safari", weight: 10},
+}
+
 type browserHeaderMetadata struct {
 	secCHUA         string
 	fullVersion     string
 	fullVersionList string
 }
 
+type browserFingerprintTemplate struct {
+	family          string
+	version         string
+	userAgent       string
+	secCHUA         string
+	fullVersion     string
+	fullVersionList string
+	impersonate     string
+}
+
+func BrowserFamilyVersionPools() map[string][]string {
+	out := make(map[string][]string, len(browserFamilyVersionPools))
+	for family, versions := range browserFamilyVersionPools {
+		out[family] = append([]string(nil), versions...)
+	}
+	return out
+}
+
 func NewBrowserFingerprint() map[string]any {
-	metadata := BrowserMetadataFromUserAgent(DefaultBrowserUserAgent)
+	return BrowserFingerprintFromFamilyVersion("chrome", "145")
+}
+
+func NewAccountBrowserFingerprint(random *rand.Rand) map[string]any {
+	family, version := randomBrowserFamilyVersion(random)
+	return BrowserFingerprintFromFamilyVersion(family, version)
+}
+
+func randomBrowserFamilyVersion(random *rand.Rand) (string, string) {
+	family := randomBrowserFamily(random)
+	versions := browserFamilyVersionPools[family]
+	if len(versions) == 0 {
+		return "chrome", "145"
+	}
+	if random == nil {
+		return family, versions[0]
+	}
+	return family, versions[random.Intn(len(versions))]
+}
+
+func randomBrowserFamily(random *rand.Rand) string {
+	if random == nil {
+		return "chrome"
+	}
+	total := 0
+	for _, choice := range browserFamilySelectionWeights {
+		total += choice.weight
+	}
+	if total <= 0 {
+		return "chrome"
+	}
+	slot := random.Intn(total)
+	for _, choice := range browserFamilySelectionWeights {
+		if slot < choice.weight {
+			return choice.family
+		}
+		slot -= choice.weight
+	}
+	return "chrome"
+}
+
+func BrowserFingerprintFromFamilyVersion(family, version string) map[string]any {
+	template, ok := browserFingerprintTemplateFromFamilyVersion(family, version)
+	if !ok {
+		template = browserFingerprintTemplate{
+			family:          "chrome",
+			version:         "145",
+			userAgent:       DefaultBrowserUserAgent,
+			secCHUA:         DefaultBrowserSecCHUA,
+			fullVersion:     strings.Trim(DefaultBrowserSecCHUAFullVersion, `"`),
+			fullVersionList: DefaultBrowserSecCHUAFullVersionList,
+			impersonate:     DefaultBrowserImpersonationProfile,
+		}
+	}
+	return template.toFingerprint()
+}
+
+func (t browserFingerprintTemplate) toFingerprint() map[string]any {
 	return map[string]any{
 		"version":                     1,
-		"impersonate":                 DefaultBrowserImpersonationProfile,
-		"user-agent":                  DefaultBrowserUserAgent,
-		"sec-ch-ua":                   metadata.secCHUA,
+		"browser-family":              t.family,
+		"browser-version":             t.version,
+		"impersonate":                 t.impersonate,
+		"user-agent":                  t.userAgent,
+		"sec-ch-ua":                   t.secCHUA,
 		"sec-ch-ua-mobile":            DefaultBrowserSecCHUAMobile,
 		"sec-ch-ua-platform":          DefaultBrowserSecCHUAPlatform,
 		"sec-ch-ua-arch":              DefaultBrowserSecCHUAArch,
 		"sec-ch-ua-bitness":           DefaultBrowserSecCHUABitness,
-		"sec-ch-ua-full-version":      quoteBrowserHeaderValue(metadata.fullVersion),
-		"sec-ch-ua-full-version-list": metadata.fullVersionList,
+		"sec-ch-ua-full-version":      quoteBrowserHeaderValue(t.fullVersion),
+		"sec-ch-ua-full-version-list": t.fullVersionList,
 		"sec-ch-ua-platform-version":  DefaultBrowserSecCHUAPlatformVersion,
 		"oai-device-id":               util.NewUUID(),
 		"oai-session-id":              util.NewUUID(),
 	}
+}
+
+func browserFingerprintTemplateFromFamilyVersion(family, version string) (browserFingerprintTemplate, bool) {
+	family = strings.ToLower(strings.TrimSpace(family))
+	version = strings.TrimSpace(version)
+	if family == "" || version == "" || !browserFamilyVersionInPool(family, version) {
+		return browserFingerprintTemplate{}, false
+	}
+
+	switch family {
+	case "chrome":
+		return chromiumBrowserFingerprintTemplate(family, version, "Google Chrome", `Not:A-Brand`, "99", "chrome", false), true
+	case "edge":
+		return chromiumBrowserFingerprintTemplate(family, version, "Microsoft Edge", `Not A(Brand`, "24", "edge", true), true
+	case "firefox":
+		return firefoxBrowserFingerprintTemplate(family, version), true
+	case "safari":
+		return safariBrowserFingerprintTemplate(family, version), true
+	default:
+		return browserFingerprintTemplate{}, false
+	}
+}
+
+func chromiumBrowserFingerprintTemplate(family, version, clientHintName, brandName, brandVersion, impersonatePrefix string, includeEdgeSuffix bool) browserFingerprintTemplate {
+	major := browserMajorVersion(version)
+	fullVersion := browserNormalizeFullVersion(version)
+	userAgent := fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36", major)
+	if includeEdgeSuffix {
+		userAgent += fmt.Sprintf(" Edg/%s.0.0.0", major)
+	}
+	return browserFingerprintTemplate{
+		family:          family,
+		version:         version,
+		userAgent:       userAgent,
+		secCHUA:         fmt.Sprintf(`"%s";v="%s", "Chromium";v="%s", "%s";v="%s"`, clientHintName, major, major, brandName, brandVersion),
+		fullVersion:     fullVersion,
+		fullVersionList: fmt.Sprintf(`"%s";v="%s", "Chromium";v="%s", "%s";v="%s"`, clientHintName, fullVersion, fullVersion, brandName, brandVersion),
+		impersonate:     impersonatePrefix + major,
+	}
+}
+
+func firefoxBrowserFingerprintTemplate(family, version string) browserFingerprintTemplate {
+	major := browserMajorVersion(version)
+	fullVersion := browserNormalizeFullVersion(version)
+	return browserFingerprintTemplate{
+		family:          family,
+		version:         version,
+		userAgent:       fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:%s.0) Gecko/20100101 Firefox/%s.0", major, major),
+		secCHUA:         fmt.Sprintf(`"Not A(Brand";v="99", "Firefox";v="%s"`, major),
+		fullVersion:     fullVersion,
+		fullVersionList: fmt.Sprintf(`"Not A(Brand";v="99.0.0.0", "Firefox";v="%s"`, fullVersion),
+		impersonate:     "firefox" + major,
+	}
+}
+
+func safariBrowserFingerprintTemplate(family, version string) browserFingerprintTemplate {
+	major := browserMajorVersion(version)
+	fullVersion := browserNormalizeFullVersion(version)
+	return browserFingerprintTemplate{
+		family:          family,
+		version:         version,
+		userAgent:       fmt.Sprintf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/%s Safari/605.1.15", version),
+		secCHUA:         fmt.Sprintf(`"Not A(Brand";v="99", "Safari";v="%s"`, major),
+		fullVersion:     fullVersion,
+		fullVersionList: fmt.Sprintf(`"Not A(Brand";v="99.0.0.0", "Safari";v="%s"`, fullVersion),
+		impersonate:     "safari" + version,
+	}
+}
+
+func browserFamilyVersionInPool(family, version string) bool {
+	versions, ok := browserFamilyVersionPools[family]
+	if !ok {
+		return false
+	}
+	for _, candidate := range versions {
+		if candidate == version {
+			return true
+		}
+	}
+	return false
 }
 
 func NormalizeBrowserFingerprint(raw any) (map[string]any, bool) {
@@ -116,7 +293,7 @@ func BrowserHeadersForFingerprint(raw any) map[string]string {
 		"Sec-Ch-Ua-Bitness":           firstNonEmpty(values["sec-ch-ua-bitness"], DefaultBrowserSecCHUABitness),
 		"Sec-Ch-Ua-Full-Version":      firstNonEmpty(values["sec-ch-ua-full-version"], DefaultBrowserSecCHUAFullVersion),
 		"Sec-Ch-Ua-Full-Version-List": firstNonEmpty(values["sec-ch-ua-full-version-list"], DefaultBrowserSecCHUAFullVersionList),
-		"Sec-Ch-Ua-Platform-Version":  firstNonEmpty(values["sec-ch-ua-platform-version"], DefaultBrowserSecCHUAPlatformVersion),
+		"Sec-Ch-Ua-Platform-Version":   firstNonEmpty(values["sec-ch-ua-platform-version"], DefaultBrowserSecCHUAPlatformVersion),
 	}
 	if value := values["oai-device-id"]; value != "" {
 		headers["OAI-Device-Id"] = value

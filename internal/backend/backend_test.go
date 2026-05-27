@@ -80,6 +80,61 @@ func TestUpstreamTransportErrorSummarizesSurfHandshakeFailure(t *testing.T) {
 	}
 }
 
+func TestBuildFingerprintReadsFamilyVersionFromAccount(t *testing.T) {
+	firefoxUA := "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
+	client := &Client{
+		AccessToken: "token-1",
+		lookup: testAccountLookup{
+			"token-1": {
+				"fp": map[string]any{
+					"version":                2,
+					"browser-family":         "firefox",
+					"browser-version":        "150",
+					"user-agent":             firefoxUA,
+					"impersonate":            "firefox150",
+					"oai-device-id":          "device-1",
+					"oai-session-id":         "session-1",
+					"sec-ch-ua-full-version": `"150.0.0.0"`,
+				},
+			},
+		},
+	}
+	fp := client.buildFingerprint()
+	for key, want := range map[string]string{
+		"browser-family":         "firefox",
+		"browser-version":        "150",
+		"impersonate":            "firefox150",
+		"oai-device-id":          "device-1",
+		"oai-session-id":         "session-1",
+		"sec-ch-ua-full-version": `"150.0.0.0"`,
+	} {
+		if got := fp[key]; got != want {
+			t.Fatalf("fp[%s] = %q, want %q", key, got, want)
+		}
+	}
+
+	fallbackClient := &Client{
+		AccessToken: "token-1",
+		lookup: testAccountLookup{
+			"token-1": {
+				"browser-family":         "firefox",
+				"browser-version":        "150",
+				"sec-ch-ua-full-version": `"150.0.0.0"`,
+			},
+		},
+	}
+	fallbackFP := fallbackClient.buildFingerprint()
+	for key, want := range map[string]string{
+		"browser-family":         "firefox",
+		"browser-version":        "150",
+		"sec-ch-ua-full-version": `"150.0.0.0"`,
+	} {
+		if got := fallbackFP[key]; got != want {
+			t.Fatalf("fallback fp[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestApplyBrowserFingerprintPreservesAccountProfile(t *testing.T) {
 	client := &Client{fp: map[string]string{
 		"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",

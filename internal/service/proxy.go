@@ -64,7 +64,9 @@ func (s *ProxyService) Test(candidate string, timeout time.Duration) map[string]
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/", nil)
-	req.Header.Set("user-agent", "Mozilla/5.0 (chatgpt2api proxy test)")
+	for key, value := range BrowserHeadersForFingerprint(nil) {
+		req.Header.Set(key, value)
+	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	latency := time.Since(start).Milliseconds()

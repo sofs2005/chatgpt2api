@@ -230,10 +230,10 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 		updates := map[string]any{"access_token": token, "type": util.ValueOr(current["type"], "Free")}
 		if !ok {
 			updates["enabled"] = true
-			updates["fp"] = NewBrowserFingerprint()
+			updates["fp"] = NewAccountBrowserFingerprint(s.random)
 		}
 		normalized := normalizeAccount(mergeMaps(current, updates))
-		if normalized != nil {
+		if normalized, _ = ensureAccountFingerprint(normalized); normalized != nil {
 			indexed[token] = normalized
 		}
 	}
@@ -2205,8 +2205,76 @@ func ensureAccountFingerprint(account map[string]any) (map[string]any, bool) {
 	}
 	normalized := util.CopyMap(account)
 	fp, changed := NormalizeBrowserFingerprint(normalized["fp"])
+	family, version := browserFingerprintFamilyVersion(fp)
+	if util.Clean(fp["browser-family"]) != family {
+		fp["browser-family"] = family
+		changed = true
+	}
+	if util.Clean(fp["browser-version"]) != version {
+		fp["browser-version"] = version
+		changed = true
+	}
 	normalized["fp"] = fp
+	if util.Clean(normalized["browser-family"]) != family {
+		normalized["browser-family"] = family
+		changed = true
+	}
+	if util.Clean(normalized["browser-version"]) != version {
+		normalized["browser-version"] = version
+		changed = true
+	}
 	return normalized, changed
+}
+
+func browserFingerprintFamilyVersion(fp map[string]any) (string, string) {
+	if fp == nil {
+		return "chrome", "145"
+	}
+	family := util.Clean(fp["browser-family"])
+	version := util.Clean(fp["browser-version"])
+	if family != "" && version != "" {
+		return family, version
+	}
+	userAgent := util.Clean(fp["user-agent"])
+	if edgeVersion := browserRegexpVersion(userAgent, `Edg[A-Z]*/([0-9]+(?:\.[0-9]+){0,3})`); edgeVersion != "" {
+		if family == "" {
+			family = "edge"
+		}
+		if version == "" {
+			version = browserMajorVersion(edgeVersion)
+		}
+	}
+	if chromeVersion := browserRegexpVersion(userAgent, `Chrome/([0-9]+(?:\.[0-9]+){0,3})`); chromeVersion != "" {
+		if family == "" {
+			family = "chrome"
+		}
+		if version == "" {
+			version = browserMajorVersion(chromeVersion)
+		}
+	}
+	if firefoxVersion := browserRegexpVersion(userAgent, `Firefox/([0-9]+(?:\.[0-9]+){0,3})`); firefoxVersion != "" {
+		if family == "" {
+			family = "firefox"
+		}
+		if version == "" {
+			version = browserMajorVersion(firefoxVersion)
+		}
+	}
+	if safariVersion := browserRegexpVersion(userAgent, `Version/([0-9]+(?:\.[0-9]+){0,3})`); safariVersion != "" && strings.Contains(userAgent, "Safari/") && !strings.Contains(userAgent, "Chrome/") && !strings.Contains(userAgent, "Chromium/") {
+		if family == "" {
+			family = "safari"
+		}
+		if version == "" {
+			version = safariVersion
+		}
+	}
+	if family == "" {
+		family = "chrome"
+	}
+	if version == "" {
+		version = "145"
+	}
+	return family, version
 }
 
 func normalizeAccount(item map[string]any) map[string]any {

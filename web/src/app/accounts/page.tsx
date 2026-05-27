@@ -339,7 +339,8 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
       const searchMatched =
         normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
       const typeMatched = typeFilter === "all" || account.type === typeFilter;
-      const statusMatched = statusFilter === "all" || account.status === statusFilter;
+      const statusMatched =
+        statusFilter === "all" || (statusFilter === "禁用" ? account.enabled === false : account.status === statusFilter);
       return searchMatched && typeMatched && statusMatched;
     });
   }, [accounts, query, statusFilter, typeFilter]);

@@ -1567,6 +1567,119 @@ func TestAddAccountsDefaultsToEnabledAndListsIt(t *testing.T) {
 	}
 }
 
+func TestGetAccountGeneratesAndPersistsFingerprint(t *testing.T) {
+	backend := &accountStorageSpy{accounts: []map[string]any{{
+		"access_token": "token-1",
+		"type":         "Plus",
+		"status":       "正常",
+	}}}
+	accounts := NewAccountService(backend, testAccountConfig{}, nil, NewLogService())
+	if backend.saveCount != 0 {
+		t.Fatalf("NewAccountService() saveCount = %d, want 0", backend.saveCount)
+	}
+
+	account := accounts.GetAccount("token-1")
+	fp, ok := account["fp"].(map[string]any)
+	if !ok {
+		t.Fatalf("account fp = %#v, want map", account["fp"])
+	}
+	if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
+		t.Fatalf("generated fp missing device/session: %#v", fp)
+	}
+	if backend.saveCount != 1 {
+		t.Fatalf("GetAccount() saveCount = %d, want 1", backend.saveCount)
+	}
+	savedFP, ok := backend.saved[0]["fp"].(map[string]any)
+	if !ok {
+		t.Fatalf("saved fp = %#v, want map", backend.saved[0]["fp"])
+	}
+	if savedFP["oai-device-id"] != fp["oai-device-id"] || savedFP["oai-session-id"] != fp["oai-session-id"] {
+		t.Fatalf("saved fp = %#v, returned fp = %#v", savedFP, fp)
+	}
+}
+
+func TestGetAccountGeneratesAndPersistsFingerprintForDisabledAccount(t *testing.T) {
+	backend := &accountStorageSpy{accounts: []map[string]any{{
+		"access_token": "token-1",
+		"type":         "Plus",
+		"status":       "禁用",
+	}}}
+	accounts := NewAccountService(backend, testAccountConfig{}, nil, NewLogService())
+
+	account := accounts.GetAccount("token-1")
+	if account == nil {
+		t.Fatal("GetAccount() = nil, want account")
+	}
+	fp, ok := account["fp"].(map[string]any)
+	if !ok {
+		t.Fatalf("account fp = %#v, want map", account["fp"])
+	}
+	if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
+		t.Fatalf("generated fp missing device/session: %#v", fp)
+	}
+	if backend.saveCount != 1 {
+		t.Fatalf("GetAccount() saveCount = %d, want 1", backend.saveCount)
+	}
+	savedFP, ok := backend.saved[0]["fp"].(map[string]any)
+	if !ok {
+		t.Fatalf("saved fp = %#v, want map", backend.saved[0]["fp"])
+	}
+	if savedFP["oai-device-id"] != fp["oai-device-id"] || savedFP["oai-session-id"] != fp["oai-session-id"] {
+		t.Fatalf("saved fp = %#v, returned fp = %#v", savedFP, fp)
+	}
+}
+
+func TestGetAccountKeepsExistingFingerprintStable(t *testing.T) {
+	backend := &accountStorageSpy{accounts: []map[string]any{{
+		"access_token": "token-1",
+		"type":         "Plus",
+		"status":       "正常",
+		"fp": map[string]any{
+			"version":        1,
+			"impersonate":    "edge101",
+			"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+			"oai-device-id":  "device-1",
+			"oai-session-id": "session-1",
+		},
+	}}}
+	accounts := NewAccountService(backend, testAccountConfig{}, nil, NewLogService())
+
+	first := accounts.GetAccount("token-1")
+	second := accounts.GetAccount("token-1")
+	firstFP := first["fp"].(map[string]any)
+	secondFP := second["fp"].(map[string]any)
+	if firstFP["oai-device-id"] != "device-1" || firstFP["oai-session-id"] != "session-1" {
+		t.Fatalf("first fp changed device/session: %#v", firstFP)
+	}
+	if secondFP["oai-device-id"] != "device-1" || secondFP["oai-session-id"] != "session-1" {
+		t.Fatalf("second fp changed device/session: %#v", secondFP)
+	}
+	if backend.saveCount != 1 {
+		t.Fatalf("saveCount = %d, want 1 to persist filled client hints only once", backend.saveCount)
+	}
+}
+
+func TestUpdateAccountFromSessionImportPreservesFingerprint(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"old-token"})
+	before := accounts.GetAccount("old-token")
+	beforeFP := before["fp"].(map[string]any)
+
+	ok := accounts.UpdateAccountFromSessionImport("old-token", "new-token", map[string]any{
+		"session_token": "session-1",
+		"type":          "Plus",
+		"status":        "正常",
+	}, true)
+	if !ok {
+		t.Fatal("UpdateAccountFromSessionImport() = false, want true")
+	}
+	after := accounts.GetAccount("new-token")
+	afterFP := after["fp"].(map[string]any)
+	if afterFP["oai-device-id"] != beforeFP["oai-device-id"] || afterFP["oai-session-id"] != beforeFP["oai-session-id"] {
+		t.Fatalf("fingerprint changed across token migration: before=%#v after=%#v", beforeFP, afterFP)
+	}
+}
+
 func TestLoadAccountsDoesNotPersistEnabledForLegacyRecord(t *testing.T) {
 	backend := &accountStorageSpy{accounts: []map[string]any{{
 		"access_token":        "legacy-token",
@@ -1584,6 +1697,9 @@ func TestLoadAccountsDoesNotPersistEnabledForLegacyRecord(t *testing.T) {
 	if _, ok := account["enabled"]; ok {
 		t.Fatalf("legacy account gained enabled field during load: %#v", account)
 	}
+	if backend.saveCount != 1 {
+		t.Fatalf("GetAccount() saved legacy account %d times, want 1 for fingerprint normalization", backend.saveCount)
+	}
 
 	items := accounts.ListAccounts()
 	if len(items) != 1 {
@@ -1592,8 +1708,8 @@ func TestLoadAccountsDoesNotPersistEnabledForLegacyRecord(t *testing.T) {
 	if items[0]["enabled"] != false {
 		t.Fatalf("public enabled for legacy account = %#v, want false", items[0]["enabled"])
 	}
-	if backend.saveCount != 0 {
-		t.Fatalf("ListAccounts() saved legacy account %d times, want 0", backend.saveCount)
+	if backend.saveCount != 1 {
+		t.Fatalf("ListAccounts() saved legacy account %d times, want 1", backend.saveCount)
 	}
 }
 
@@ -1707,6 +1823,170 @@ func copyAccountItems(items []map[string]any) []map[string]any {
 		out = append(out, util.CopyMap(item))
 	}
 	return out
+}
+
+func TestNormalizeBrowserFingerprintFillsMissingFields(t *testing.T) {
+	fp, changed := NormalizeBrowserFingerprint(map[string]any{
+		"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		"oai-device-id":  "device-1",
+		"oai-session-id": "session-1",
+	})
+	if !changed {
+		t.Fatal("NormalizeBrowserFingerprint() changed = false, want true for missing fields")
+	}
+	for _, key := range []string{
+		"version",
+		"impersonate",
+		"user-agent",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"sec-ch-ua-arch",
+		"sec-ch-ua-bitness",
+		"sec-ch-ua-full-version",
+		"sec-ch-ua-full-version-list",
+		"sec-ch-ua-platform-version",
+		"oai-device-id",
+		"oai-session-id",
+	} {
+		if _, ok := fp[key]; !ok {
+			t.Fatalf("normalized fingerprint missing %s: %#v", key, fp)
+		}
+	}
+	if fp["oai-device-id"] != "device-1" || fp["oai-session-id"] != "session-1" {
+		t.Fatalf("device/session changed: %#v", fp)
+	}
+	if fp["sec-ch-ua"] != `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"` {
+		t.Fatalf("sec-ch-ua = %#v", fp["sec-ch-ua"])
+	}
+}
+
+func TestNormalizeBrowserFingerprintRegeneratesInvalidFingerprint(t *testing.T) {
+	fp, changed := NormalizeBrowserFingerprint("not-a-map")
+	if !changed {
+		t.Fatal("NormalizeBrowserFingerprint() changed = false, want true for invalid input")
+	}
+	if fp["version"] != 1 {
+		t.Fatalf("version = %#v, want 1", fp["version"])
+	}
+	if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
+		t.Fatalf("device/session missing in regenerated fingerprint: %#v", fp)
+	}
+}
+
+func TestNormalizeBrowserFingerprintAcceptsStringMap(t *testing.T) {
+	fp, changed := NormalizeBrowserFingerprint(map[string]string{
+		" User-Agent ":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		"oai-device-id":  " device-1 ",
+		"oai-session-id": " session-1 ",
+	})
+	if !changed {
+		t.Fatal("NormalizeBrowserFingerprint() changed = false, want true for missing fields in string map")
+	}
+	if got := util.Clean(fp["user-agent"]); got != "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0" {
+		t.Fatalf("user-agent = %q", got)
+	}
+	if got := util.Clean(fp["oai-device-id"]); got != "device-1" {
+		t.Fatalf("oai-device-id = %q, want device-1", got)
+	}
+	if got := util.Clean(fp["oai-session-id"]); got != "session-1" {
+		t.Fatalf("oai-session-id = %q, want session-1", got)
+	}
+	if got := util.Clean(fp["sec-ch-ua"]); got != `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"` {
+		t.Fatalf("sec-ch-ua = %q", got)
+	}
+	values := BrowserFingerprintStringMap(map[string]string{
+		" User-Agent ":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		"oai-device-id":  " device-1 ",
+		"oai-session-id": " session-1 ",
+	})
+	if got := values["sec-ch-ua-full-version"]; got != `"143.0.0.0"` {
+		t.Fatalf("BrowserFingerprintStringMap()[sec-ch-ua-full-version] = %q, want %q", got, `"143.0.0.0"`)
+	}
+}
+
+func TestNormalizeBrowserFingerprintReportsKeyNormalizationAsChange(t *testing.T) {
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
+	fp, changed := NormalizeBrowserFingerprint(map[string]any{
+		" Version ":                    1,
+		" Impersonate ":                "edge143",
+		" User-Agent ":                 userAgent,
+		" Sec-CH-UA ":                  `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
+		" Sec-CH-UA-Mobile ":           "?0",
+		" Sec-CH-UA-Platform ":         `"Windows"`,
+		" Sec-CH-UA-Arch ":             `"x86"`,
+		" Sec-CH-UA-Bitness ":          `"64"`,
+		" Sec-CH-UA-Full-Version ":     `"143.0.0.0"`,
+		" Sec-CH-UA-Full-Version-List ": `"Microsoft Edge";v="143.0.0.0", "Chromium";v="143.0.0.0", "Not A(Brand";v="24.0.0.0"`,
+		" Sec-CH-UA-Platform-Version ": `"19.0.0"`,
+		" OAI-Device-ID ":              "device-1",
+		" OAI-Session-ID ":             "session-1",
+	})
+	if !changed {
+		t.Fatal("NormalizeBrowserFingerprint() changed = false, want true when keys are normalized")
+	}
+	for _, key := range []string{
+		"version",
+		"impersonate",
+		"user-agent",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"sec-ch-ua-arch",
+		"sec-ch-ua-bitness",
+		"sec-ch-ua-full-version",
+		"sec-ch-ua-full-version-list",
+		"sec-ch-ua-platform-version",
+		"oai-device-id",
+		"oai-session-id",
+	} {
+		if _, ok := fp[key]; !ok {
+			t.Fatalf("normalized fingerprint missing canonical key %s: %#v", key, fp)
+		}
+	}
+}
+
+func TestBrowserHeadersForFingerprintUsesNormalizedValues(t *testing.T) {
+	fp, _ := NormalizeBrowserFingerprint(map[string]any{
+		"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		"oai-device-id":  "device-1",
+		"oai-session-id": "session-1",
+	})
+	headers := BrowserHeadersForFingerprint(fp)
+	for key, want := range map[string]string{
+		"User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		"Sec-Ch-Ua":          `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
+		"Sec-Ch-Ua-Mobile":   "?0",
+		"Sec-Ch-Ua-Platform": `"Windows"`,
+		"OAI-Device-Id":      "device-1",
+		"OAI-Session-Id":     "session-1",
+	} {
+		if got := headers[key]; got != want {
+			t.Fatalf("headers[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestBrowserHeadersForFingerprintAcceptsStringMap(t *testing.T) {
+	headers := BrowserHeadersForFingerprint(map[string]string{
+		" User-Agent ":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		"oai-device-id":  " device-1 ",
+		"oai-session-id": " session-1 ",
+	})
+	for key, want := range map[string]string{
+		"User-Agent":                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+		"Sec-Ch-Ua":                   `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
+		"Sec-Ch-Ua-Mobile":            "?0",
+		"Sec-Ch-Ua-Platform":          `"Windows"`,
+		"Sec-Ch-Ua-Full-Version":      `"143.0.0.0"`,
+		"Sec-Ch-Ua-Full-Version-List": `"Microsoft Edge";v="143.0.0.0", "Chromium";v="143.0.0.0", "Not A(Brand";v="24.0.0.0"`,
+		"OAI-Device-Id":               "device-1",
+		"OAI-Session-Id":              "session-1",
+	} {
+		if got := headers[key]; got != want {
+			t.Fatalf("headers[%s] = %q, want %q", key, got, want)
+		}
+	}
 }
 
 func newTestAccountService(t *testing.T) *AccountService {

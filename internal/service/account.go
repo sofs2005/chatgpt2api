@@ -230,6 +230,7 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 		updates := map[string]any{"access_token": token, "type": util.ValueOr(current["type"], "Free")}
 		if !ok {
 			updates["enabled"] = true
+			updates["fp"] = NewBrowserFingerprint()
 		}
 		normalized := normalizeAccount(mergeMaps(current, updates))
 		if normalized != nil {
@@ -524,6 +525,9 @@ func (s *AccountService) UpdateAccountFromSessionImport(oldAccessToken, newAcces
 	}
 
 	accountUpdates := mergeMaps(updates, map[string]any{"access_token": newAccessToken})
+	if _, ok := accountUpdates["fp"]; !ok {
+		accountUpdates["fp"] = s.items[idx]["fp"]
+	}
 	if recoverStatus && isRecoverableSessionImportStatus(util.Clean(s.items[idx]["status"])) {
 		accountUpdates["status"] = "正常"
 	}
@@ -566,6 +570,12 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 	idx := s.findIndexLocked(accessToken)
 	if idx < 0 {
 		return nil
+	}
+	if account, changed := ensureAccountFingerprint(s.items[idx]); account != nil {
+		s.items[idx] = account
+		if changed {
+			_ = s.saveLocked()
+		}
 	}
 	return util.CopyMap(s.items[idx])
 }
@@ -2187,6 +2197,16 @@ func IsAccountRateLimitedErrorMessage(message string) bool {
 		return true
 	}
 	return false
+}
+
+func ensureAccountFingerprint(account map[string]any) (map[string]any, bool) {
+	if account == nil {
+		return nil, false
+	}
+	normalized := util.CopyMap(account)
+	fp, changed := NormalizeBrowserFingerprint(normalized["fp"])
+	normalized["fp"] = fp
+	return normalized, changed
 }
 
 func normalizeAccount(item map[string]any) map[string]any {

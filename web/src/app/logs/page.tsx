@@ -18,6 +18,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { fetchSettingsConfig, fetchSystemLogs, type LogView, type SystemLog, type SystemLogFilters } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
+import { detailLabels, detailSectionDefinitions, getUpstreamAccountText, summaryDetailKeys } from "./log-detail";
+
 const methodOptions = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const statusOptions = ["200", "201", "400", "401", "403", "404", "422", "429", "500", "502"];
 const logLevelOptions = ["info", "warning", "error"];
@@ -50,64 +52,6 @@ function createEmptyFilters(view: LogView): SystemLogFilters {
   };
 }
 
-const detailLabels: Record<string, string> = {
-  endpoint: "接口",
-  model: "模型",
-  method: "方法",
-  path: "路径",
-  module: "模块",
-  status: "状态",
-  outcome: "结果",
-  log_level: "日志级别",
-  operation_type: "操作类型",
-  duration_ms: "耗时",
-  response_time: "响应时间",
-  started_at: "开始时间",
-  ended_at: "结束时间",
-  username: "操作人",
-  key_name: "令牌名称",
-  session_name: "会话名称",
-  auth_kind: "认证方式",
-  key_role: "角色",
-  key_id: "凭据 ID",
-  subject_id: "用户 ID",
-  provider: "来源",
-  ip_address: "IP 地址",
-  user_agent: "User-Agent",
-  error: "错误",
-  token: "令牌",
-  source: "来源事件",
-  added: "新增",
-  skipped: "跳过",
-  removed: "删除",
-};
-
-const summaryDetailKeys = new Set([
-  "method",
-  "path",
-  "endpoint",
-  "module",
-  "status",
-  "outcome",
-  "log_level",
-  "duration_ms",
-  "response_time",
-]);
-
-const detailSectionDefinitions = [
-  {
-    title: "请求",
-    keys: ["operation_type", "ip_address", "user_agent", "model"],
-  },
-  {
-    title: "身份",
-    keys: ["username", "key_name", "session_name", "auth_kind", "key_role", "subject_id", "key_id", "provider"],
-  },
-  {
-    title: "时间",
-    keys: ["started_at", "ended_at"],
-  },
-] as const;
 
 type DetailFieldSection = {
   title: string;
@@ -301,6 +245,7 @@ function LogsContent() {
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const detailMethod = detailText(detailLog, "method");
+  const upstreamAccountText = getUpstreamAccountText(detailLog);
   const detailFieldSections = getDetailFieldSections(detailLog);
   const pageSize = 15;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
@@ -542,7 +487,7 @@ function LogsContent() {
                 <div className="text-sm font-semibold text-foreground">摘要</div>
                 <div className="rounded-xl border border-border bg-muted/35 p-4">
                   <div className="text-sm font-medium text-foreground">{detailLog?.summary || "—"}</div>
-                  <div className="mt-3 grid gap-3 text-sm sm:grid-cols-4">
+                  <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
                     <div>
                       <div className="text-xs text-muted-foreground">操作人</div>
                       <div className="mt-1 truncate font-medium text-foreground">{actorText(detailLog)}</div>
@@ -557,6 +502,10 @@ function LogsContent() {
                         {detailMethod ? <Badge variant={methodBadgeVariant(detailMethod)} className="shrink-0 rounded-md">{detailMethod}</Badge> : null}
                         <span className="truncate">{pathText(detailLog)}</span>
                       </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted-foreground">上游账号</div>
+                      <div className="mt-1 truncate font-medium text-foreground">{upstreamAccountText}</div>
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">耗时</div>

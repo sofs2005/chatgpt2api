@@ -11,6 +11,7 @@ import (
 	"chatgpt2api/internal/backend"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/storage"
+	"chatgpt2api/internal/util"
 )
 
 func ptrInt(value int) *int {
@@ -126,6 +127,22 @@ func TestImageRequestDefaultsToAutoModel(t *testing.T) {
 	}
 	if model != "auto" || prompt != "画一张图" || n != 1 {
 		t.Fatalf("ChatImageArgs() = model %q prompt %q n %d", model, prompt, n)
+	}
+}
+
+func TestAccountUsageFromContextIncludesAccountName(t *testing.T) {
+	ctx, tracker := WithAccountUsageTracker(context.Background())
+	tracker.Record("token-1", "Alice Example")
+
+	usedAccounts := AccountUsageFromContext(ctx)
+	if len(usedAccounts) != 1 {
+		t.Fatalf("used accounts = %#v, want one account", usedAccounts)
+	}
+	if got := util.Clean(usedAccounts[0]["account_name"]); got != "Alice Example" {
+		t.Fatalf("account_name = %q, want Alice Example", got)
+	}
+	if got := util.Clean(usedAccounts[0]["account_id"]); got == "" {
+		t.Fatalf("account_id = %q, want non-empty", got)
 	}
 }
 

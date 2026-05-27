@@ -1418,6 +1418,19 @@ func (a *App) logCall(ctx context.Context, identity service.Identity, summary, m
 			detail["upstream_account_id"] = usedAccounts[0]["account_id"]
 			detail["upstream_token_preview"] = usedAccounts[0]["token_preview"]
 		}
+		names := make([]string, 0, len(usedAccounts))
+		for _, account := range usedAccounts {
+			if name := util.Clean(account["account_name"]); name != "" {
+				names = append(names, name)
+			}
+		}
+		if len(usedAccounts) == 1 {
+			if len(names) == 1 {
+				detail["upstream_account_name"] = names[0]
+			}
+		} else if len(names) > 0 {
+			detail["upstream_account_names"] = names
+		}
 	}
 	if errText != "" {
 		detail["error"] = errText

@@ -26,10 +26,15 @@ const ImageOutputSlotAcquirerPayloadKey = "image_output_slot_acquirer"
 
 type accountUsageContextKey struct{}
 
+type trackedAccountUsage struct {
+	token string
+	name  string
+}
+
 type AccountUsageTracker struct {
-	mu     sync.Mutex
-	tokens []string
-	seen   map[string]struct{}
+	mu       sync.Mutex
+	accounts []trackedAccountUsage
+	seen     map[string]struct{}
 }
 
 func WithAccountUsageTracker(ctx context.Context) (context.Context, *AccountUsageTracker) {
@@ -45,16 +50,17 @@ func AccountUsageFromContext(ctx context.Context) []map[string]any {
 	return tracker.Accounts()
 }
 
-func recordAccountUsage(ctx context.Context, token string) {
+func recordAccountUsage(ctx context.Context, token, accountName string) {
 	tracker, _ := ctx.Value(accountUsageContextKey{}).(*AccountUsageTracker)
 	if tracker == nil {
 		return
 	}
-	tracker.Record(token)
+	tracker.Record(token, accountName)
 }
 
-func (t *AccountUsageTracker) Record(token string) {
+func (t *AccountUsageTracker) Record(token, accountName string) {
 	token = strings.TrimSpace(token)
+	accountName = strings.TrimSpace(accountName)
 	if t == nil || token == "" {
 		return
 	}
@@ -67,7 +73,7 @@ func (t *AccountUsageTracker) Record(token string) {
 		return
 	}
 	t.seen[token] = struct{}{}
-	t.tokens = append(t.tokens, token)
+	t.accounts = append(t.accounts, trackedAccountUsage{token: token, name: accountName})
 }
 
 func (t *AccountUsageTracker) Accounts() []map[string]any {
@@ -76,12 +82,16 @@ func (t *AccountUsageTracker) Accounts() []map[string]any {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make([]map[string]any, 0, len(t.tokens))
-	for _, token := range t.tokens {
-		out = append(out, map[string]any{
-			"account_id":    util.SHA1Short(token, 16),
-			"token_preview": util.AnonymizeToken(token),
-		})
+	out := make([]map[string]any, 0, len(t.accounts))
+	for _, account := range t.accounts {
+		item := map[string]any{
+			"account_id":    util.SHA1Short(account.token, 16),
+			"token_preview": util.AnonymizeToken(account.token),
+		}
+		if account.name != "" {
+			item["account_name"] = account.name
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -228,7 +238,11 @@ func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]s
 		return err
 	}
 	defer lease.Release()
-	recordAccountUsage(ctx, lease.Token)
+	accountName := ""
+	if account := e.Accounts.GetAccount(lease.Token); account != nil {
+		accountName = util.Clean(account["name"])
+	}
+	recordAccountUsage(ctx, lease.Token, accountName)
 	if fn == nil {
 		return nil
 	}

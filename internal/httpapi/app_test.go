@@ -524,13 +524,13 @@ func TestLogsEndpointUsesDefaultLogView(t *testing.T) {
 	}
 }
 
-func TestChatCompletionsCallLogIncludesUpstreamAccountPreview(t *testing.T) {
+func TestChatCompletionsCallLogIncludesUpstreamAccountName(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 
 	const fullToken = "secret-upstream-token-for-log-test"
 	ctx, tracker := protocol.WithAccountUsageTracker(context.Background())
-	tracker.Record(fullToken)
+	tracker.Record(fullToken, "Alice Example")
 	app.logCall(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, "文本生成", http.MethodPost, "/v1/chat/completions", "gpt-5", time.Now(), "success", http.StatusOK, "", nil, auditRequestCapture{})
 
 	logs := app.logs.Search(service.LogQuery{Limit: 10})
@@ -539,6 +539,9 @@ func TestChatCompletionsCallLogIncludesUpstreamAccountPreview(t *testing.T) {
 		t.Fatalf("expected chat completions log, got %#v", logs)
 	}
 	detail := util.StringMap(item["detail"])
+	if util.Clean(detail["upstream_account_name"]) != "Alice Example" {
+		t.Fatalf("log detail missing upstream account name: %#v", detail)
+	}
 	if util.Clean(detail["upstream_account_id"]) == "" || util.Clean(detail["upstream_token_preview"]) == "" {
 		t.Fatalf("log detail missing upstream singleton fields: %#v", detail)
 	}
@@ -552,6 +555,97 @@ func TestChatCompletionsCallLogIncludesUpstreamAccountPreview(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), fullToken) {
 		t.Fatalf("log JSON leaked full upstream token: %s", encoded)
+	}
+}
+
+func TestChatCompletionsCallLogIncludesMultipleUpstreamAccountNames(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	ctx, tracker := protocol.WithAccountUsageTracker(context.Background())
+	tracker.Record("token-1", "Alice Example")
+	tracker.Record("token-2", "Bob Example")
+	app.logCall(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, "文本生成", http.MethodPost, "/v1/chat/completions", "gpt-5", time.Now(), "success", http.StatusOK, "", nil, auditRequestCapture{})
+
+	logs := app.logs.Search(service.LogQuery{Limit: 10})
+	item := findLogBySummary(logs, "文本生成调用完成")
+	if item == nil {
+		t.Fatalf("expected chat completions log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if got := util.Clean(detail["upstream_account_name"]); got != "" {
+		t.Fatalf("log detail upstream_account_name = %q, want blank: %#v", got, detail)
+	}
+	if got := util.AsStringSlice(detail["upstream_account_names"]); !reflect.DeepEqual(got, []string{"Alice Example", "Bob Example"}) {
+		t.Fatalf("log detail upstream_account_names = %#v, want [Alice Example Bob Example]: %#v", got, detail)
+	}
+	accounts := util.AsMapSlice(detail["upstream_accounts"])
+	if len(accounts) != 2 {
+		t.Fatalf("log detail upstream_accounts = %#v, want 2 accounts", accounts)
+	}
+	for _, account := range accounts {
+		if util.Clean(account["account_id"]) == "" || util.Clean(account["token_preview"]) == "" {
+			t.Fatalf("log detail upstream account missing privacy fields: %#v", accounts)
+		}
+	}
+}
+
+func TestChatCompletionsCallLogKeepsPluralWhenSomeUpstreamNamesMissing(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	ctx, tracker := protocol.WithAccountUsageTracker(context.Background())
+	tracker.Record("token-1", "Alice Example")
+	tracker.Record("token-2", "")
+	app.logCall(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, "文本生成", http.MethodPost, "/v1/chat/completions", "gpt-5", time.Now(), "success", http.StatusOK, "", nil, auditRequestCapture{})
+
+	logs := app.logs.Search(service.LogQuery{Limit: 10})
+	item := findLogBySummary(logs, "文本生成调用完成")
+	if item == nil {
+		t.Fatalf("expected chat completions log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if got := util.Clean(detail["upstream_account_name"]); got != "" {
+		t.Fatalf("log detail upstream_account_name = %q, want blank: %#v", got, detail)
+	}
+	if got := util.AsStringSlice(detail["upstream_account_names"]); !reflect.DeepEqual(got, []string{"Alice Example"}) {
+		t.Fatalf("log detail upstream_account_names = %#v, want [Alice Example]: %#v", got, detail)
+	}
+	accounts := util.AsMapSlice(detail["upstream_accounts"])
+	if len(accounts) != 2 {
+		t.Fatalf("log detail upstream_accounts = %#v, want 2 accounts", accounts)
+	}
+	for _, account := range accounts {
+		if util.Clean(account["account_id"]) == "" || util.Clean(account["token_preview"]) == "" {
+			t.Fatalf("log detail upstream account missing privacy fields: %#v", accounts)
+		}
+	}
+}
+
+func TestChatCompletionsCallLogOmitsNameSummaryWhenUpstreamNamesMissing(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	ctx, tracker := protocol.WithAccountUsageTracker(context.Background())
+	tracker.Record("token-1", "")
+	tracker.Record("token-2", "")
+	app.logCall(ctx, service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"}, "文本生成", http.MethodPost, "/v1/chat/completions", "gpt-5", time.Now(), "success", http.StatusOK, "", nil, auditRequestCapture{})
+
+	logs := app.logs.Search(service.LogQuery{Limit: 10})
+	item := findLogBySummary(logs, "文本生成调用完成")
+	if item == nil {
+		t.Fatalf("expected chat completions log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if got := util.Clean(detail["upstream_account_name"]); got != "" {
+		t.Fatalf("log detail upstream_account_name = %q, want blank: %#v", got, detail)
+	}
+	if got := util.AsStringSlice(detail["upstream_account_names"]); len(got) != 0 {
+		t.Fatalf("log detail upstream_account_names = %#v, want blank: %#v", got, detail)
+	}
+	accounts := util.AsMapSlice(detail["upstream_accounts"])
+	if len(accounts) != 2 {
+		t.Fatalf("log detail upstream_accounts = %#v, want 2 accounts", accounts)
 	}
 }
 

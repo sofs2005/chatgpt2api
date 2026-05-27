@@ -1700,8 +1700,7 @@ func preprocessBlock(block any) any {
 		copied["text"] = compactMessageText(util.Clean(item["text"]))
 		return copied
 	case "tool_use":
-		data, _ := json.Marshal(item["input"])
-		return map[string]any{"type": "text", "text": fmt.Sprintf("<tool_calls><tool_call><tool_name>%s</tool_name><parameters>%s</parameters></tool_call></tool_calls>", util.Clean(item["name"]), string(data))}
+		return map[string]any{"type": "text", "text": tooladapter.RenderHistoryToolCall(util.Clean(item["name"]), util.StringMap(item["input"]))}
 	case "tool_result":
 		return map[string]any{"type": "text", "text": fmt.Sprintf("Tool result %s: %s", util.Clean(item["tool_use_id"]), util.Clean(item["content"]))}
 	default:

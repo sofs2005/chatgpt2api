@@ -481,6 +481,46 @@ func TestBuildPromptForcedToolUsesBridgeZeroWhenOriginalNameCollides(t *testing.
 	}
 }
 
+func TestCompactHistoryToolInputPrefersHistoryKeysAndTruncatesLargeStrings(t *testing.T) {
+	input := map[string]any{
+		"file_path":   "internal/app.go",
+		"path":        "ignored.go",
+		"target_file": "target.go",
+		"filename":    "notes.txt",
+		"old_string":  strings.Repeat("o", 161),
+		"new_string":  strings.Repeat("n", 10),
+		"content":     strings.Repeat("c", 170),
+		"extra":       "drop-me",
+	}
+
+	got := CompactHistoryToolInput("Edit", input)
+	want := map[string]any{
+		"file_path":   "internal/app.go",
+		"path":        "ignored.go",
+		"target_file": "target.go",
+		"filename":    "notes.txt",
+		"old_string":  "[omitted 161 chars]",
+		"new_string":  strings.Repeat("n", 10),
+		"content":     "[omitted 170 chars]",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CompactHistoryToolInput() = %#v, want %#v", got, want)
+	}
+}
+
+func TestRenderHistoryToolCallUsesUnifiedHistoryXML(t *testing.T) {
+	got := RenderHistoryToolCall("Edit", map[string]any{
+		"file_path":  "internal/app.go",
+		"old_string": strings.Repeat("o", 161),
+		"content":    "hello]]>world",
+		"extra":      "drop-me",
+	})
+	want := `<tool_calls><invoke name="Edit"><parameter name="content"><![CDATA[hello]]]]><![CDATA[>world]]></parameter><parameter name="file_path"><![CDATA[internal/app.go]]></parameter><parameter name="old_string"><![CDATA[[omitted 161 chars]]]></parameter></invoke></tool_calls>`
+	if got != want {
+		t.Fatalf("RenderHistoryToolCall() = %q, want %q", got, want)
+	}
+}
+
 func TestNormalizeForSchemasStringifiesObjectForStringSchema(t *testing.T) {
 	calls := []ParsedCall{{
 		Name: "read_file",

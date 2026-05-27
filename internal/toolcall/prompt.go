@@ -2,6 +2,7 @@ package toolcall
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"sort"
 	"strings"
@@ -167,6 +168,106 @@ func compactJSON(v any) string {
 		return ""
 	}
 	return string(buf)
+}
+
+func CompactHistoryToolInput(name string, input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	if preferHistoryToolKeys(name) {
+		keys := []string{"file_path", "path", "target_file", "filename", "old_string", "new_string", "content"}
+		out := make(map[string]any, len(keys))
+		for _, key := range keys {
+			if value, ok := input[key]; ok {
+				out[key] = compactHistoryValue(key, value)
+			}
+		}
+		return out
+	}
+	out := make(map[string]any, len(input))
+	for key, value := range input {
+		out[key] = compactHistoryValue(key, value)
+	}
+	return out
+}
+
+func RenderHistoryToolCall(name string, input map[string]any) string {
+	compacted := CompactHistoryToolInput(name, input)
+	var b strings.Builder
+	b.Grow(64)
+	b.WriteString("<tool_calls><invoke name=\"")
+	writeXMLAttr(&b, name)
+	b.WriteString("\">")
+	for _, key := range sortedMapKeys(compacted) {
+		b.WriteString("<parameter name=\"")
+		writeXMLAttr(&b, key)
+		b.WriteString("\">")
+		b.WriteString(renderHistoryToolValue(compacted[key]))
+		b.WriteString("</parameter>")
+	}
+	b.WriteString("</invoke></tool_calls>")
+	return b.String()
+}
+
+func preferHistoryToolKeys(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "Write", "Edit", "NotebookEdit":
+		return true
+	default:
+		return false
+	}
+}
+
+func compactHistoryValue(key string, value any) any {
+	switch typed := value.(type) {
+	case string:
+		if isHistoryStringKey(key) && len([]rune(typed)) > 160 {
+			return fmt.Sprintf("[omitted %d chars]", len([]rune(typed)))
+		}
+		return typed
+	case map[string]any:
+		return CompactHistoryToolInput("", typed)
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, compactHistoryValue(key, item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func renderHistoryToolValue(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return wrapCDATA(typed)
+	case map[string]any, []any:
+		return compactJSON(typed)
+	case []string:
+		return compactJSON(typed)
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func wrapCDATA(text string) string {
+	return "<![CDATA[" + strings.ReplaceAll(text, "]]>", "]]]]><![CDATA[>") + "]]>"
+}
+
+func writeXMLAttr(b *strings.Builder, text string) {
+	_ = xml.EscapeText(b, []byte(text))
+}
+
+func isHistoryStringKey(key string) bool {
+	switch key {
+	case "content", "new_string", "old_string", "insert_text", "text", "patch":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstNonNil(values ...any) any {

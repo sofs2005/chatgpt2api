@@ -212,43 +212,27 @@ func buildInlineMessages(mode, latest string, latestTooLong bool, hasHistoryFile
 }
 
 func toolsText(tools any, choice any) string {
-	if tooladapter.PolicyFromToolChoice(choice).Mode == tooladapter.ChoiceNone {
+	policy := tooladapter.PolicyFromToolChoice(choice)
+	if policy.Mode == tooladapter.ChoiceNone {
 		return ""
 	}
-	items := toolMaps(tools)
-	if len(items) == 0 {
+	prompt := tooladapter.BuildPrompt(tools, policy)
+	if strings.TrimSpace(prompt) == "" {
 		return ""
 	}
-	var blocks []string
-	for _, item := range items {
-		name, description, schema := tooladapter.ExtractToolMeta(item)
-		if strings.TrimSpace(name) == "" {
-			continue
-		}
-		schemaJSON, _ := json.Marshal(schema)
-		blocks = append(blocks, "Tool: "+name+"\nDescription: "+description+"\nParameters: "+string(schemaJSON))
-	}
-	if len(blocks) == 0 {
-		return ""
-	}
-	return "# Available Tools\n\n" + strings.Join(blocks, "\n\n") + "\n"
+	return "# Available Tools\n\n" + prompt + "\n"
 }
 
 func toolFallbackText(tools any, choice any) string {
-	if tooladapter.PolicyFromToolChoice(choice).Mode == tooladapter.ChoiceNone {
+	policy := tooladapter.PolicyFromToolChoice(choice)
+	if policy.Mode == tooladapter.ChoiceNone {
 		return ""
 	}
-	var names []string
-	for _, item := range toolMaps(tools) {
-		name, _, _ := tooladapter.ExtractToolMeta(item)
-		if strings.TrimSpace(name) != "" {
-			names = append(names, strings.TrimSpace(name))
-		}
-	}
-	if len(names) == 0 {
+	catalog := tooladapter.NewBridgeCatalog(tools, policy)
+	if len(catalog.Tools) == 0 {
 		return ""
 	}
-	return "上下文附件上传失败。可用工具名称：" + strings.Join(names, ", ") + "。工具调用必须输出且只输出 XML：<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters>{JSON}</parameters></tool_call></tool_calls>"
+	return "上下文附件上传失败。可用桥接工具槽位：" + strings.Join(catalog.BridgeNames(), ", ") + "。请阅读 tools.txt，并按其中的桥接工具说明输出 XML：<tool_calls><invoke name=\"bridge-0\"><parameter name=\"ARG\"><![CDATA[value]]></parameter></invoke></tool_calls>"
 }
 
 func toolMaps(tools any) []map[string]any {

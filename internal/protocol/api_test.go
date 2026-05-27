@@ -553,6 +553,38 @@ func TestMessageResponseUsesSharedToolUseBlocks(t *testing.T) {
 	}
 }
 
+func TestPreprocessBlockRendersUnifiedHistoryToolCall(t *testing.T) {
+	block := map[string]any{
+		"type": "tool_use",
+		"name": "Edit",
+		"input": map[string]any{
+			"file_path":  "internal/app.go",
+			"content":    strings.Repeat("c", 170),
+			"old_string": strings.Repeat("o", 161),
+			"extra":      "drop-me",
+		},
+	}
+
+	processed, ok := preprocessBlock(block).(map[string]any)
+	if !ok || processed["type"] != "text" {
+		t.Fatalf("preprocessBlock() = %#v, want text block", processed)
+	}
+	text := processed["text"].(string)
+	for _, want := range []string{
+		`<tool_calls><invoke name="Edit">`,
+		`<parameter name="content"><![CDATA[[omitted 170 chars]]]></parameter>`,
+		`<parameter name="file_path"><![CDATA[internal/app.go]]></parameter>`,
+		`<parameter name="old_string"><![CDATA[[omitted 161 chars]]]></parameter>`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("preprocessBlock() text missing %q in %q", want, text)
+		}
+	}
+	if strings.Contains(text, "extra") {
+		t.Fatalf("preprocessBlock() leaked non-history key in %q", text)
+	}
+}
+
 func TestMessageRequestFromBodyHonorsToolChoiceNone(t *testing.T) {
 	tools := []any{map[string]any{"name": "read_file", "description": "read a file"}}
 	body := map[string]any{

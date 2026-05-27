@@ -119,8 +119,11 @@ func TestPlanContextCreatesToolsFileUnlessChoiceNone(t *testing.T) {
 	if len(plan.Files) != 1 {
 		t.Fatalf("len(Files) = %d, want tools file", len(plan.Files))
 	}
-	if plan.Files[0].Purpose != "tools" || !strings.Contains(plan.Files[0].Text, "Tool: Read") {
+	if plan.Files[0].Purpose != "tools" || !strings.Contains(plan.Files[0].Text, "Bridge-call slots available: bridge-0") {
 		t.Fatalf("unexpected tools file: %#v", plan.Files[0])
+	}
+	if strings.Contains(plan.Files[0].Text, "Tool: Read") {
+		t.Fatalf("tools file leaked legacy tool block: %#v", plan.Files[0])
 	}
 
 	nonePlan := PlanContext(messages, tools, "none", tinyOptions())
@@ -144,8 +147,11 @@ func TestFallbackPreservesCurrentTaskWhenPossible(t *testing.T) {
 	if got := fallback[len(fallback)-1]["content"]; got != "current task" {
 		t.Fatalf("latest fallback content = %#v", got)
 	}
-	if len(fallback) < 2 || !strings.Contains(fallback[len(fallback)-2]["content"].(string), "Read") {
-		t.Fatalf("fallback missing tool rule: %#v", fallback)
+	if len(fallback) < 2 || !strings.Contains(fallback[len(fallback)-2]["content"].(string), "桥接工具槽位：bridge-0") {
+		t.Fatalf("fallback missing bridge tool rule: %#v", fallback)
+	}
+	if strings.Contains(fallback[len(fallback)-2]["content"].(string), "可用工具名称") {
+		t.Fatalf("fallback leaked legacy tool names: %#v", fallback[len(fallback)-2])
 	}
 }
 

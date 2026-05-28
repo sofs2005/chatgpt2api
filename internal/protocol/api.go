@@ -1938,7 +1938,7 @@ func CollectChatContent(chunks <-chan map[string]any) string {
 			parts = append(parts, content)
 		}
 	}
-	return util.StripCitationMarkers(strings.Join(parts, ""))
+	return strings.Join(parts, "")
 }
 
 func firstChoice(chunk map[string]any) map[string]any {

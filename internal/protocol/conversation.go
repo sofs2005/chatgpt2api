@@ -1710,7 +1710,7 @@ func AssistantMessageText(message map[string]any) string {
 			out = append(out, text)
 		}
 	}
-	return util.StripCitationMarkers(strings.Join(out, ""))
+	return strings.Join(out, "")
 }
 
 func StripHistory(text, historyText string) string {

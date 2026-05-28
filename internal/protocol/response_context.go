@@ -229,7 +229,7 @@ func findLastUserMessageIndex(messages []map[string]any, prompt string) int {
 
 func responseContentText(content any) string {
 	if text, ok := content.(string); ok {
-		return util.StripCitationMarkers(strings.TrimSpace(text))
+		return strings.TrimSpace(text)
 	}
 	var parts []string
 	for _, raw := range anyList(content) {
@@ -240,11 +240,11 @@ func responseContentText(content any) string {
 		switch util.Clean(item["type"]) {
 		case "text", "input_text", "output_text":
 			if text := strings.TrimSpace(util.Clean(item["text"])); text != "" {
-				parts = append(parts, util.StripCitationMarkers(text))
+				parts = append(parts, text)
 			}
 		}
 	}
-	return strings.TrimSpace(util.StripCitationMarkers(strings.Join(parts, "\n")))
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func trimResponseContext(ctx ResponseContext) ResponseContext {

@@ -49,8 +49,11 @@ func TestPlanContextMovesLongHistoryToFile(t *testing.T) {
 	if !strings.Contains(plan.Files[0].Text, "## Message 1 [assistant]") {
 		t.Fatalf("history file missing assistant message: %s", plan.Files[0].Text)
 	}
-	if !strings.Contains(plan.Files[0].Text, "## Current User Task\ncontinue now") {
-		t.Fatalf("history file missing current task: %s", plan.Files[0].Text)
+	if !strings.Contains(plan.Files[0].Text, "## Message 3 [user]\ncontinue now") {
+		t.Fatalf("history file missing latest user message: %s", plan.Files[0].Text)
+	}
+	if strings.Contains(plan.Files[0].Text, "## Current User Task") {
+		t.Fatalf("history file should not label an executable current task: %s", plan.Files[0].Text)
 	}
 	if !strings.Contains(plan.InlineMessages[0]["content"].(string), "history.txt") {
 		t.Fatalf("inline prompt missing attachment instruction: %s", plan.InlineMessages[0]["content"])
@@ -91,8 +94,8 @@ func TestPlanContextKeepsCurrentTaskInlineWhenHistoryFileIsGenerated(t *testing.
 	if len(plan.Files) != 1 {
 		t.Fatalf("len(Files) = %d, want 1", len(plan.Files))
 	}
-	if !strings.Contains(plan.Files[0].Text, "## Current User Task\ncurrent task") {
-		t.Fatalf("history file missing current task: %s", plan.Files[0].Text)
+	if strings.Contains(plan.Files[0].Text, "## Current User Task") {
+		t.Fatalf("history file should not label an executable current task: %s", plan.Files[0].Text)
 	}
 	inline := plan.InlineMessages[0]["content"].(string)
 	if !strings.Contains(inline, "Current User Task:\ncurrent task") {
@@ -100,6 +103,49 @@ func TestPlanContextKeepsCurrentTaskInlineWhenHistoryFileIsGenerated(t *testing.
 	}
 	if !strings.Contains(inline, "history.txt") {
 		t.Fatalf("inline prompt missing history attachment note: %s", inline)
+	}
+}
+
+func TestPlanContextExtractsCurrentTaskFromUntrustedMetadataWrapper(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "user", "content": "刚刚我问你什么"},
+		{"role": "assistant", "content": strings.Repeat("prior answer ", 12)},
+		{"role": "user", "content": "System (untrusted): [2026-05-19 08:01:14 GMT+8] 心跳信息。\n\n当前轮问题：请只回答 banana。\n\nConversation info (untrusted metadata):\n```json\n{\"chat_id\":\"wechat:telphy\"}\n```"},
+	}
+	options := tinyOptions()
+	options.ContextPromptMaxChars = 240
+
+	plan := PlanContext(messages, nil, nil, options)
+
+	if plan.LatestUserText != "当前轮问题：请只回答 banana。" {
+		t.Fatalf("LatestUserText = %q, want sanitized current task", plan.LatestUserText)
+	}
+	inline := plan.InlineMessages[0]["content"].(string)
+	if strings.Contains(inline, "System (untrusted)") || strings.Contains(inline, "Conversation info") {
+		t.Fatalf("inline prompt leaked metadata wrapper: %s", inline)
+	}
+	if !strings.Contains(inline, "Current User Task:\n当前轮问题：请只回答 banana。") {
+		t.Fatalf("inline prompt missing sanitized task: %s", inline)
+	}
+}
+
+func TestPlanContextSkipsMetadataOnlyLatestUserForCurrentTask(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "user", "content": "刚刚我问你什么"},
+		{"role": "assistant", "content": strings.Repeat("prior answer ", 12)},
+		{"role": "user", "content": "Conversation info (untrusted metadata):\n```json\n{\"chat_id\":\"wechat:telphy\"}\n```"},
+	}
+	options := tinyOptions()
+	options.ContextPromptMaxChars = 240
+
+	plan := PlanContext(messages, nil, nil, options)
+
+	if plan.LatestUserText != "刚刚我问你什么" {
+		t.Fatalf("LatestUserText = %q, want previous real user task", plan.LatestUserText)
+	}
+	inline := plan.InlineMessages[0]["content"].(string)
+	if !strings.Contains(inline, "Current User Task:\n刚刚我问你什么") {
+		t.Fatalf("inline prompt missing previous real user task: %s", inline)
 	}
 }
 

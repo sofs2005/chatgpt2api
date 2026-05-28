@@ -95,7 +95,7 @@ func PlanContext(messages []map[string]any, tools any, choice any, options Optio
 	}
 	return Plan{
 		Mode:             mode,
-		InlineMessages:   buildInlineMessages(mode, latest, latestTooLong, strings.TrimSpace(history) != "", toolsText, options),
+		InlineMessages:   buildInlineMessages(mode, latest, latestTooLong, strings.TrimSpace(history) != "", toolsText != "", choice, options),
 		Files:            files,
 		LatestUserText:   latest,
 		LatestTooLong:    latestTooLong,
@@ -188,18 +188,21 @@ func historyText(messages []map[string]any, latestIndex int) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-func buildInlineMessages(mode, latest string, latestTooLong bool, hasHistoryFile bool, toolsText string, options Options) []map[string]any {
+func buildInlineMessages(mode, latest string, latestTooLong bool, hasHistoryFile bool, hasToolsFile bool, choice any, options Options) []map[string]any {
 	var lines []string
 	if hasHistoryFile {
 		lines = append(lines, attachmentNote)
 	}
-	if strings.TrimSpace(latest) != "" && !latestTooLong {
-		lines = append(lines, "Current User Task:\n"+latest)
-	} else if hasHistoryFile {
-		lines = append(lines, "当前用户任务在 history.txt 的 Current User Task 小节中。")
+	if hasToolsFile {
+		lines = append(lines, "可用工具说明在 tools.txt。")
 	}
-	if strings.TrimSpace(toolsText) != "" {
-		lines = append(lines, "可用工具说明也在 tools.txt；必须优先遵守以下桥接工具规则，不要把 history.txt 或 tools.txt 当作本地路径读取。\n\n"+strings.TrimSpace(toolsText))
+	if hasHistoryFile {
+		lines = append(lines, "当前用户任务也在 history.txt 的 Current User Task 小节中，正文不重复粘贴。")
+	} else if strings.TrimSpace(latest) != "" {
+		lines = append(lines, "Current User Task:\n"+latest)
+	}
+	if tooladapter.PolicyFromToolChoice(choice).Mode != tooladapter.ChoiceNone && hasToolsFile {
+		lines = append(lines, "工具调用必须输出且只输出 XML：<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters>{JSON}</parameters></tool_call></tool_calls>")
 	}
 	content := strings.Join(lines, "\n\n")
 	if len(content) > options.ContextPromptMaxChars {

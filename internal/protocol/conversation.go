@@ -1414,9 +1414,7 @@ func AssistantHistoryText(messages []map[string]any) string {
 	var parts []string
 	for _, item := range messages {
 		if item["role"] == "assistant" {
-			if text := util.StripCitationMarkers(util.Clean(item["content"])); text != "" {
-				parts = append(parts, text)
-			}
+			parts = append(parts, util.Clean(item["content"]))
 		}
 	}
 	return strings.Join(parts, "")
@@ -1425,10 +1423,8 @@ func AssistantHistoryText(messages []map[string]any) string {
 func AssistantHistoryMessages(messages []map[string]any) []string {
 	var out []string
 	for _, item := range messages {
-		if item["role"] == "assistant" {
-			if text := util.StripCitationMarkers(util.Clean(item["content"])); text != "" {
-				out = append(out, text)
-			}
+		if item["role"] == "assistant" && util.Clean(item["content"]) != "" {
+			out = append(out, util.Clean(item["content"]))
 		}
 	}
 	return out
@@ -1718,8 +1714,6 @@ func AssistantMessageText(message map[string]any) string {
 }
 
 func StripHistory(text, historyText string) string {
-	text = util.StripCitationMarkers(text)
-	historyText = util.StripCitationMarkers(historyText)
 	for historyText != "" && strings.HasPrefix(text, historyText) {
 		text = text[len(historyText):]
 	}
@@ -1731,7 +1725,7 @@ func ApplyTextPatch(event map[string]any, currentText, historyText string) strin
 		return ApplyPatchOp(event, currentText, historyText)
 	}
 	if value, ok := event["v"].(string); ok && currentText != "" && event["p"] == nil && event["o"] == nil {
-		return util.StripCitationMarkers(currentText + value)
+		return currentText + value
 	}
 	if event["o"] == "patch" {
 		text := currentText
@@ -1755,7 +1749,7 @@ func ApplyPatchOp(operation map[string]any, currentText, historyText string) str
 	value := util.Clean(operation["v"])
 	switch operation["o"] {
 	case "append":
-		return util.StripCitationMarkers(currentText + value)
+		return currentText + value
 	case "replace":
 		return StripHistory(value, historyText)
 	default:

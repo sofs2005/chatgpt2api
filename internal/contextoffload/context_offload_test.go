@@ -75,7 +75,7 @@ func TestPlanContextMovesHugeLatestUserToFile(t *testing.T) {
 	}
 }
 
-func TestPlanContextDoesNotRepeatLatestUserWhenHistoryFileIsGenerated(t *testing.T) {
+func TestPlanContextKeepsCurrentTaskInlineWhenHistoryFileIsGenerated(t *testing.T) {
 	messages := []map[string]any{
 		{"role": "assistant", "content": strings.Repeat("prior ", 10)},
 		{"role": "user", "content": "current task"},
@@ -95,11 +95,38 @@ func TestPlanContextDoesNotRepeatLatestUserWhenHistoryFileIsGenerated(t *testing
 		t.Fatalf("history file missing current task: %s", plan.Files[0].Text)
 	}
 	inline := plan.InlineMessages[0]["content"].(string)
-	if strings.Contains(inline, "Current User Task:\ncurrent task") {
-		t.Fatalf("inline prompt repeated latest user text: %s", inline)
+	if !strings.Contains(inline, "Current User Task:\ncurrent task") {
+		t.Fatalf("inline prompt missing latest user task: %s", inline)
 	}
-	if !strings.Contains(inline, "当前用户任务也在 history.txt") {
-		t.Fatalf("inline prompt missing current task attachment note: %s", inline)
+	if !strings.Contains(inline, "history.txt") {
+		t.Fatalf("inline prompt missing history attachment note: %s", inline)
+	}
+}
+
+func TestPlanContextKeepsBridgeToolInstructionsInline(t *testing.T) {
+	messages := []map[string]any{{"role": "user", "content": "use a tool"}}
+	tools := []map[string]any{{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "Read",
+			"description": "Read file contents.",
+			"parameters":  map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}}, "required": []any{"file_path"}},
+		},
+	}}
+	options := tinyOptions()
+	options.ContextPromptMaxChars = 1000
+
+	plan := PlanContext(messages, tools, nil, options)
+
+	inline := plan.InlineMessages[0]["content"].(string)
+	if !strings.Contains(inline, "<invoke name=\"bridge-0\"") {
+		t.Fatalf("inline prompt missing bridge invoke format: %s", inline)
+	}
+	if !strings.Contains(inline, "input keys: file_path; required: file_path") {
+		t.Fatalf("inline prompt missing compact parameter hint: %s", inline)
+	}
+	if strings.Contains(inline, "<tool_call><tool_name>") {
+		t.Fatalf("inline prompt contains legacy tool call format: %s", inline)
 	}
 }
 

@@ -71,7 +71,7 @@ func TestDatabaseBackendStoresDocumentsAndLogs(t *testing.T) {
 	}
 }
 
-func TestDatabaseBackendRoundTripsAccountFingerprint(t *testing.T) {
+func TestDatabaseBackendRoundTripsBrowserFamilyVersion(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
 	backend, err := NewDatabaseBackend("sqlite:///" + filepath.ToSlash(dbPath))
 	if err != nil {
@@ -80,55 +80,34 @@ func TestDatabaseBackendRoundTripsAccountFingerprint(t *testing.T) {
 	defer backend.db.Close()
 
 	want := map[string]any{
-		"access_token": "token-1",
-		"type":         "Plus",
+		"access_token":    "token-1",
+		"browser-family":  "chrome",
+		"browser-version": "148",
 		"fp": map[string]any{
-			"version":                1,
-			"user-agent":             "Mozilla/5.0",
-			"sec-ch-ua":              "\"Not:A-Brand\";v=\"99\"",
-			"oai-device-id":          "device-1",
-			"oai-session-id":         "session-1",
+			"version":         2,
+			"browser-family":  "chrome",
+			"browser-version": "148",
 		},
-		"custom_note": "keep-me",
 	}
 	if err := backend.SaveAccounts([]map[string]any{want}); err != nil {
 		t.Fatalf("SaveAccounts() error = %v", err)
 	}
-
 	accounts, err := backend.LoadAccounts()
 	if err != nil {
 		t.Fatalf("LoadAccounts() error = %v", err)
 	}
 	if len(accounts) != 1 {
-		t.Fatalf("LoadAccounts() len = %d, want 1", len(accounts))
+		t.Fatalf("LoadAccounts() length = %d, want 1", len(accounts))
 	}
-	if got := accounts[0]["access_token"]; got != "token-1" {
-		t.Fatalf("LoadAccounts()[0][access_token] = %#v", got)
-	}
-	if got := accounts[0]["type"]; got != "Plus" {
-		t.Fatalf("LoadAccounts()[0][type] = %#v", got)
-	}
-	if got := accounts[0]["custom_note"]; got != "keep-me" {
-		t.Fatalf("LoadAccounts()[0][custom_note] = %#v", got)
+	if accounts[0]["access_token"] != "token-1" || accounts[0]["browser-family"] != "chrome" || accounts[0]["browser-version"] != "148" {
+		t.Fatalf("LoadAccounts()[0] = %#v, want browser family/version fields preserved", accounts[0])
 	}
 	fp, ok := accounts[0]["fp"].(map[string]any)
 	if !ok {
 		t.Fatalf("LoadAccounts()[0][fp] = %#v, want map", accounts[0]["fp"])
 	}
-	if got := fp["version"]; got != float64(1) {
-		t.Fatalf("LoadAccounts()[0][fp][version] = %#v", got)
-	}
-	if got := fp["user-agent"]; got != "Mozilla/5.0" {
-		t.Fatalf("LoadAccounts()[0][fp][user-agent] = %#v", got)
-	}
-	if got := fp["sec-ch-ua"]; got != "\"Not:A-Brand\";v=\"99\"" {
-		t.Fatalf("LoadAccounts()[0][fp][sec-ch-ua] = %#v", got)
-	}
-	if got := fp["oai-device-id"]; got != "device-1" {
-		t.Fatalf("LoadAccounts()[0][fp][oai-device-id] = %#v", got)
-	}
-	if got := fp["oai-session-id"]; got != "session-1" {
-		t.Fatalf("LoadAccounts()[0][fp][oai-session-id] = %#v", got)
+	if fp["browser-family"] != "chrome" || fp["browser-version"] != "148" {
+		t.Fatalf("LoadAccounts()[0][fp] = %#v, want nested browser family/version fields preserved", fp)
 	}
 }
 

@@ -199,9 +199,44 @@ func (c *Client) buildFingerprint() map[string]string {
 	if c.AccessToken != "" && c.lookup != nil {
 		account = c.lookup.GetAccount(c.AccessToken)
 	}
-	fp := service.BrowserFingerprintStringMap(account["fp"])
-	for _, key := range []string{"user-agent", "impersonate", "oai-device-id", "oai-session-id", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-ch-ua-arch", "sec-ch-ua-bitness", "sec-ch-ua-full-version", "sec-ch-ua-full-version-list", "sec-ch-ua-platform-version"} {
+	fp := map[string]string{}
+	if raw, ok := account["fp"].(map[string]any); ok {
+		for key, value := range raw {
+			if text := util.Clean(value); text != "" {
+				fp[strings.ToLower(key)] = text
+			}
+		}
+	}
+	for _, key := range []string{
+		"user-agent",
+		"impersonate",
+		"browser-family",
+		"browser-version",
+		"oai-device-id",
+		"oai-session-id",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"sec-ch-ua-arch",
+		"sec-ch-ua-bitness",
+		"sec-ch-ua-full-version",
+		"sec-ch-ua-full-version-list",
+		"sec-ch-ua-platform-version",
+	} {
 		if value := util.Clean(account[key]); value != "" {
+			fp[key] = value
+		}
+	}
+	defaults := map[string]string{
+		"user-agent":         browserUserAgent,
+		"impersonate":        browserImpersonationProfile,
+		"oai-device-id":      util.NewUUID(),
+		"oai-session-id":     util.NewUUID(),
+		"sec-ch-ua-mobile":   browserSecCHUAMobile,
+		"sec-ch-ua-platform": browserSecCHUAPlatform,
+	}
+	for key, value := range defaults {
+		if fp[key] == "" {
 			fp[key] = value
 		}
 	}
@@ -209,7 +244,25 @@ func (c *Client) buildFingerprint() map[string]string {
 }
 
 func (c *Client) applyBrowserFingerprint() {
-	c.fp = service.BrowserFingerprintStringMap(c.fp)
+	if c.fp == nil {
+		c.fp = map[string]string{}
+	}
+	setDefault := func(key, value string) {
+		if strings.TrimSpace(c.fp[key]) == "" {
+			c.fp[key] = value
+		}
+	}
+	setDefault("impersonate", browserImpersonationProfile)
+	setDefault("user-agent", browserUserAgent)
+	setDefault("sec-ch-ua-mobile", browserSecCHUAMobile)
+	setDefault("sec-ch-ua-platform", browserSecCHUAPlatform)
+	metadata := browserMetadataFromUserAgent(c.fp["user-agent"])
+	setDefault("sec-ch-ua", metadata.secCHUA)
+	setDefault("sec-ch-ua-arch", browserSecCHUAArch)
+	setDefault("sec-ch-ua-bitness", browserSecCHUABitness)
+	setDefault("sec-ch-ua-full-version", quoteHeaderValue(metadata.fullVersion))
+	setDefault("sec-ch-ua-full-version-list", metadata.fullVersionList)
+	setDefault("sec-ch-ua-platform-version", browserSecCHUAPlatformVersion)
 }
 
 type browserHeaderMetadata struct {

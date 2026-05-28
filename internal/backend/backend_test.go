@@ -80,35 +80,58 @@ func TestUpstreamTransportErrorSummarizesSurfHandshakeFailure(t *testing.T) {
 	}
 }
 
-func TestBuildFingerprintUsesAccountFingerprint(t *testing.T) {
+func TestBuildFingerprintReadsFamilyVersionFromAccount(t *testing.T) {
+	firefoxUA := "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
 	client := &Client{
 		AccessToken: "token-1",
 		lookup: testAccountLookup{
 			"token-1": {
 				"fp": map[string]any{
-					"user-agent":     browserUserAgent,
-					"impersonate":    browserImpersonationProfile,
-					"oai-device-id":  "device-1",
-					"oai-session-id": "session-1",
+					"version":                2,
+					"browser-family":         "firefox",
+					"browser-version":        "150",
+					"user-agent":             firefoxUA,
+					"impersonate":            "firefox150",
+					"oai-device-id":          "device-1",
+					"oai-session-id":         "session-1",
+					"sec-ch-ua-full-version": `"150.0.0.0"`,
 				},
 			},
 		},
 	}
 	fp := client.buildFingerprint()
-	if fp["user-agent"] != browserUserAgent {
-		t.Fatalf("user-agent = %q", fp["user-agent"])
+	for key, want := range map[string]string{
+		"browser-family":         "firefox",
+		"browser-version":        "150",
+		"impersonate":            "firefox150",
+		"oai-device-id":          "device-1",
+		"oai-session-id":         "session-1",
+		"sec-ch-ua-full-version": `"150.0.0.0"`,
+	} {
+		if got := fp[key]; got != want {
+			t.Fatalf("fp[%s] = %q, want %q", key, got, want)
+		}
 	}
-	if fp["sec-ch-ua"] != browserSecCHUA {
-		t.Fatalf("sec-ch-ua = %q", fp["sec-ch-ua"])
+
+	fallbackClient := &Client{
+		AccessToken: "token-1",
+		lookup: testAccountLookup{
+			"token-1": {
+				"browser-family":         "firefox",
+				"browser-version":        "150",
+				"sec-ch-ua-full-version": `"150.0.0.0"`,
+			},
+		},
 	}
-	if fp["sec-ch-ua-full-version"] != browserSecCHUAFullVersion {
-		t.Fatalf("sec-ch-ua-full-version = %q", fp["sec-ch-ua-full-version"])
-	}
-	if fp["impersonate"] != browserImpersonationProfile {
-		t.Fatalf("impersonate = %q", fp["impersonate"])
-	}
-	if fp["oai-device-id"] != "device-1" || fp["oai-session-id"] != "session-1" {
-		t.Fatalf("device/session should be preserved: %#v", fp)
+	fallbackFP := fallbackClient.buildFingerprint()
+	for key, want := range map[string]string{
+		"browser-family":         "firefox",
+		"browser-version":        "150",
+		"sec-ch-ua-full-version": `"150.0.0.0"`,
+	} {
+		if got := fallbackFP[key]; got != want {
+			t.Fatalf("fallback fp[%s] = %q, want %q", key, got, want)
+		}
 	}
 }
 

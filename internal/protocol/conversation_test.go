@@ -279,6 +279,46 @@ func TestAssistantTextStripsCitationMarkers(t *testing.T) {
 	}
 }
 
+func TestAssistantTextStripsCitationMarkersAfterHistoryPrefix(t *testing.T) {
+	event := map[string]any{
+		"message": map[string]any{
+			"author": map[string]any{"role": "assistant"},
+			"content": map[string]any{"content_type": "text", "parts": []any{"前文 citeturn0news0turn0search13继续"}},
+		},
+	}
+
+	if got := AssistantText(event, "", "前文 citeturn0news0turn0search13"); got != "继续" {
+		t.Fatalf("AssistantText() = %q, want history prefix removed after citation stripping", got)
+	}
+}
+
+func TestAssistantHistoryHelpersStripCitationMarkers(t *testing.T) {
+	messages := []map[string]any{{"role": "assistant", "content": "答案 citeturn0news0turn0search13。"}}
+
+	if got := AssistantHistoryText(messages); got != "答案 。" {
+		t.Fatalf("AssistantHistoryText() = %q, want citation markers removed", got)
+	}
+	if got := AssistantHistoryMessages(messages); len(got) != 1 || got[0] != "答案 。" {
+		t.Fatalf("AssistantHistoryMessages() = %#v, want cleaned assistant history", got)
+	}
+}
+
+func TestApplyTextPatchStripsCitationMarkers(t *testing.T) {
+	event := map[string]any{"v": "citeturn0news0turn0search13继续"}
+
+	if got := ApplyTextPatch(event, "前文", ""); got != "前文继续" {
+		t.Fatalf("ApplyTextPatch() = %q, want citation markers removed", got)
+	}
+}
+
+func TestApplyPatchOpStripsCitationMarkers(t *testing.T) {
+	op := map[string]any{"o": "append", "v": "citeturn0news0turn0search13继续"}
+
+	if got := ApplyPatchOp(op, "前文", ""); got != "前文继续" {
+		t.Fatalf("ApplyPatchOp() = %q, want citation markers removed", got)
+	}
+}
+
 func TestFormatImageResultStoresOwnerName(t *testing.T) {
 	config := testProtocolImageConfig{root: t.TempDir()}
 	engine := &Engine{Config: config}

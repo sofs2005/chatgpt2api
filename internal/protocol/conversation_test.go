@@ -266,6 +266,19 @@ func TestCountMessageTokensIgnoresUnknownContentParts(t *testing.T) {
 	}
 }
 
+func TestAssistantTextStripsCitationMarkers(t *testing.T) {
+	event := map[string]any{
+		"message": map[string]any{
+			"author": map[string]any{"role": "assistant"},
+			"content": map[string]any{"content_type": "text", "parts": []any{"请看这里 citeturn0news0turn0search13。"}},
+		},
+	}
+
+	if got := AssistantText(event, "", ""); got != "请看这里 。" {
+		t.Fatalf("AssistantText() = %q, want citation markers removed", got)
+	}
+}
+
 func TestFormatImageResultStoresOwnerName(t *testing.T) {
 	config := testProtocolImageConfig{root: t.TempDir()}
 	engine := &Engine{Config: config}

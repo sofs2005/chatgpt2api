@@ -775,6 +775,24 @@ func TestStreamChatCompletionEventsEmitsFinalToolCalls(t *testing.T) {
 	}
 }
 
+func TestStreamChatCompletionEventsStripsCitationMarkers(t *testing.T) {
+	deltas := make(chan string, 1)
+	errs := make(chan error, 1)
+	deltas <- "请看这里 citeturn0news0turn0search13。"
+	close(deltas)
+	errs <- nil
+	close(errs)
+
+	events, errCh := streamChatCompletionEvents(context.Background(), "gpt-5", deltas, errs, nil, nil)
+	got := CollectChatContent(events)
+	if err := <-errCh; err != nil {
+		t.Fatalf("streamChatCompletionEvents() error = %v", err)
+	}
+	if got != "请看这里 。" {
+		t.Fatalf("CollectChatContent() = %q, want citation markers removed", got)
+	}
+}
+
 func TestStreamChatCompletionEventsRequiredToolErrorsWithoutTools(t *testing.T) {
 	deltas := make(chan string, 1)
 	errs := make(chan error, 1)
@@ -1439,6 +1457,20 @@ func TestResponseImageGenerationRequestKeepsPreviousContextOutOfOfficialPrompt(t
 	}
 	if !strings.Contains(finalPrompt, "16:9 横屏构图") {
 		t.Fatalf("finalPrompt missing size hint: %s", finalPrompt)
+	}
+}
+
+func TestResponseContextWithOutputStripsCitationMarkers(t *testing.T) {
+	ctx := ResponseContextWithOutput(ResponseContext{}, []map[string]any{{
+		"type": "message",
+		"role": "assistant",
+		"content": []any{map[string]any{"type": "text", "text": "答案 citeturn0news0turn0search13。"}},
+	}})
+	if len(ctx.Messages) != 1 {
+		t.Fatalf("ResponseContextWithOutput() messages = %#v, want one cleaned assistant message", ctx.Messages)
+	}
+	if got := ctx.Messages[0]["content"]; got != "答案 。" {
+		t.Fatalf("ResponseContextWithOutput() content = %q, want citation markers removed", got)
 	}
 }
 

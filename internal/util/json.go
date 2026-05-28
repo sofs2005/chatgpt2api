@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -77,8 +78,17 @@ var ResponsesImageToolModels = map[string]struct{}{
 	ImageModelGPT55:     {},
 }
 
+var citationMarkerPattern = regexp.MustCompile("[^]*")
+
 func Clean(v any) string {
 	return strings.TrimSpace(fmt.Sprint(ValueOr(v, "")))
+}
+
+func StripCitationMarkers(text string) string {
+	if text == "" {
+		return ""
+	}
+	return citationMarkerPattern.ReplaceAllString(text, "")
 }
 
 func ValueOr(v any, fallback any) any {

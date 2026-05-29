@@ -167,6 +167,24 @@ func TestAccountUsageFromContextIncludesAccountName(t *testing.T) {
 	}
 }
 
+func TestWithTextLeaseRecordsUpstreamAccountEmail(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1")
+	accounts.UpdateAccount("token-1", map[string]any{"name": "Alice Example", "email": "alice@example.com"})
+	ctx, _ := WithAccountUsageTracker(context.Background())
+
+	if err := engine.withTextLease(ctx, nil, func(_ *backend.Client, _ service.AccountLease) error { return nil }); err != nil {
+		t.Fatalf("withTextLease() error = %v", err)
+	}
+
+	usedAccounts := AccountUsageFromContext(ctx)
+	if len(usedAccounts) != 1 {
+		t.Fatalf("used accounts = %#v, want one account", usedAccounts)
+	}
+	if got := util.Clean(usedAccounts[0]["account_name"]); got != "alice@example.com" {
+		t.Fatalf("account_name = %q, want alice@example.com", got)
+	}
+}
+
 func TestTextModelDoesNotForceImageChatRoute(t *testing.T) {
 	if IsImageChatRequest(map[string]any{"model": "gpt-5", "messages": []any{map[string]any{"role": "user", "content": "hello"}}}) {
 		t.Fatal("gpt-5 text chat should not be routed as an image request without image modality")

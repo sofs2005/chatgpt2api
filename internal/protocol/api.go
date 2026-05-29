@@ -240,7 +240,7 @@ func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]s
 	defer lease.Release()
 	accountName := ""
 	if account := e.Accounts.GetAccount(lease.Token); account != nil {
-		accountName = util.Clean(account["name"])
+		accountName = util.Clean(account["email"])
 	}
 	recordAccountUsage(ctx, lease.Token, accountName)
 	if fn == nil {

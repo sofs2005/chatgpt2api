@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -461,6 +462,118 @@ func TestStreamTextDeltasWithTokenRetrySwitchesTokenAfterExpiredBeforeOutput(t *
 		t.Fatalf("acquired token = %q, want released retry token %q", lease.Token, attemptTokens[1])
 	}
 	lease.Release()
+}
+
+func TestStreamTextDeltasWithTokenRetrySwitchesTokenAfterGenericUpstreamErrorBeforeOutput(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1", "token-2")
+	attemptTokens := []string{}
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		attemptTokens = append(attemptTokens, client.AccessToken)
+		deltas := make(chan string, 1)
+		errs := make(chan error, 1)
+		if len(attemptTokens) == 1 {
+			close(deltas)
+			errs <- errors.New("upstream failed: status=500, body=server error")
+			close(errs)
+			return deltas, errs
+		}
+		deltas <- "ok"
+		close(deltas)
+		errs <- nil
+		close(errs)
+		return deltas, errs
+	})
+
+	deltas, errCh := engine.streamTextDeltasWithTokenRetry(context.Background(), ConversationRequest{Model: "auto"})
+	var text string
+	for delta := range deltas {
+		text += delta
+	}
+	if err := receiveRetryTestError(t, errCh); err != nil {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v", err)
+	}
+	if text != "ok" {
+		t.Fatalf("streamed text = %q, want ok", text)
+	}
+	if len(attemptTokens) != 2 {
+		t.Fatalf("attempt count = %d, want 2 (%#v)", len(attemptTokens), attemptTokens)
+	}
+	if attemptTokens[0] == attemptTokens[1] {
+		t.Fatalf("retry reused token %q, want token switch", attemptTokens[0])
+	}
+	lease, err := accounts.AcquireTextAccessToken(map[string]struct{}{attemptTokens[0]: {}})
+	if err != nil {
+		t.Fatalf("AcquireTextAccessToken() for successful retry token after stream error = %v", err)
+	}
+	if lease.Token != attemptTokens[1] {
+		t.Fatalf("acquired token = %q, want released retry token %q", lease.Token, attemptTokens[1])
+	}
+	lease.Release()
+}
+
+func TestStreamTextDeltasWithTokenRetryStopsAfterMaxGenericUpstreamErrors(t *testing.T) {
+	engine, _ := newTextLeaseTestEngine(t, "token-1", "token-2", "token-3", "token-4", "token-5", "token-6")
+	attemptTokens := []string{}
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		attemptTokens = append(attemptTokens, client.AccessToken)
+		deltas := make(chan string)
+		errs := make(chan error, 1)
+		close(deltas)
+		errs <- fmt.Errorf("upstream failed on attempt %d", len(attemptTokens))
+		close(errs)
+		return deltas, errs
+	})
+
+	deltas, errCh := engine.streamTextDeltasWithTokenRetry(context.Background(), ConversationRequest{Model: "auto"})
+	for range deltas {
+	}
+	err := receiveRetryTestError(t, errCh)
+	want := fmt.Sprintf("upstream failed on attempt %d", service.MaxTokenSwitchAttempts)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v, want last upstream attempt error containing %q", err, want)
+	}
+	if len(attemptTokens) != service.MaxTokenSwitchAttempts {
+		t.Fatalf("attempt count = %d, want %d (%#v)", len(attemptTokens), service.MaxTokenSwitchAttempts, attemptTokens)
+	}
+	seen := map[string]bool{}
+	for _, token := range attemptTokens {
+		if seen[token] {
+			t.Fatalf("token %q was reused before max attempts: %#v", token, attemptTokens)
+		}
+		seen[token] = true
+	}
+}
+
+func TestStreamTextDeltasWithTokenRetryReturnsLastUpstreamErrorWhenAccountsRunOut(t *testing.T) {
+	engine, _ := newTextLeaseTestEngine(t, "token-1", "token-2")
+	attemptTokens := []string{}
+	stubStreamTextDeltasForTokenRetry(t, func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
+		attemptTokens = append(attemptTokens, client.AccessToken)
+		deltas := make(chan string)
+		errs := make(chan error, 1)
+		close(deltas)
+		errs <- fmt.Errorf("upstream failed for %s", client.AccessToken)
+		close(errs)
+		return deltas, errs
+	})
+
+	deltas, errCh := engine.streamTextDeltasWithTokenRetry(context.Background(), ConversationRequest{Model: "auto"})
+	for range deltas {
+	}
+	err := receiveRetryTestError(t, errCh)
+	if err == nil {
+		t.Fatal("streamTextDeltasWithTokenRetry() error = nil, want last upstream token error")
+	}
+	if len(attemptTokens) != 2 {
+		t.Fatalf("attempt count = %d, want 2 (%#v)", len(attemptTokens), attemptTokens)
+	}
+	want := fmt.Sprintf("upstream failed for %s", attemptTokens[len(attemptTokens)-1])
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v, want last upstream token error containing %q", err, want)
+	}
+	if strings.Contains(err.Error(), "no available text account") {
+		t.Fatalf("streamTextDeltasWithTokenRetry() error = %v, want upstream error not availability error", err)
+	}
 }
 
 func TestStreamTextDeltasWithTokenRetryDoesNotSwitchTokenAfterPartialOutput(t *testing.T) {

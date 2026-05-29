@@ -257,14 +257,16 @@ func (e *Engine) handleTextAccountErrorForRetry(accessToken string, err error, e
 	if err == nil || e == nil || e.Accounts == nil {
 		return false
 	}
-	if allowRetry && service.IsAccountTokenExpiredErrorMessage(err.Error()) {
+	if allowRetry {
 		exhaustedTokens[accessToken] = struct{}{}
+	}
+	if service.IsAccountTokenExpiredErrorMessage(err.Error()) {
 		if _, shouldRetry := e.Accounts.HandleTokenExpiredOnRequest(accessToken); shouldRetry {
-			return true
+			return allowRetry
 		}
 	}
 	e.Accounts.ApplyAccountError(accessToken, "text_stream", err)
-	return false
+	return allowRetry
 }
 
 func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, request ConversationRequest) (<-chan string, <-chan error) {
@@ -325,7 +327,9 @@ func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, request Con
 				return nil
 			})
 			if err != nil {
-				lastErr = err
+				if lastErr == nil {
+					lastErr = err
+				}
 				break
 			}
 			if completed {

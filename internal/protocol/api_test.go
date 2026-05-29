@@ -115,6 +115,26 @@ func TestChatAndResponsesImageParsing(t *testing.T) {
 	}
 }
 
+func TestExtractChatContextImagesPreservesAllImages(t *testing.T) {
+	values := []string{"img0", "img1", "img2", "img3", "img4", "img5"}
+	parts := []any{map[string]any{"type": "text", "text": "画一张图"}}
+	for _, value := range values {
+		parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(value))}})
+	}
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": parts}},
+	}
+
+	images := ExtractChatContextImages(body)
+
+	if len(images) != len(values) {
+		t.Fatalf("len(images) = %d, want %d", len(images), len(values))
+	}
+	if string(images[0].Data) != "img0" || string(images[len(images)-1].Data) != "img5" {
+		t.Fatalf("images were truncated or reordered: %#v", images)
+	}
+}
+
 func TestImageRequestDefaultsToAutoModel(t *testing.T) {
 	body := map[string]any{
 		"messages": []any{
@@ -1439,6 +1459,23 @@ func TestResponseImageGenerationRequestKeepsPreviousContextOutOfOfficialPrompt(t
 	}
 	if !strings.Contains(finalPrompt, "16:9 横屏构图") {
 		t.Fatalf("finalPrompt missing size hint: %s", finalPrompt)
+	}
+}
+
+func TestResponseImageGenerationRequestPreservesAllPreviousImages(t *testing.T) {
+	previous := ResponseContext{Images: []string{"img1", "img2", "img3", "img4", "img5"}}
+	body := map[string]any{
+		"model": "gpt-5.5",
+		"input": "把它改成蓝色",
+		"tools": []any{map[string]any{"type": "image_generation", "model": "gpt-image-2"}},
+	}
+
+	request, _, err := ResponseImageGenerationRequest(body, "admin", &previous)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
+	}
+	if len(request.Images) != len(previous.Images) || request.Images[0] != "img1" || request.Images[len(request.Images)-1] != "img5" {
+		t.Fatalf("previous images were truncated: %#v", request.Images)
 	}
 }
 

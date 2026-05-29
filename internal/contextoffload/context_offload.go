@@ -2,7 +2,6 @@ package contextoffload
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -19,11 +18,8 @@ const (
 const attachmentNote = "完整对话上下文已作为附件上传。请阅读 history.txt，并优先执行其中的 Current User Task。"
 
 type Options struct {
-	InlineMaxChars        int
-	ForceFileMaxChars     int
-	LatestUserMaxChars    int
-	SummaryMaxChars       int
-	ContextPromptMaxChars int
+	InlineMaxChars    int
+	ForceFileMaxChars int
 }
 
 type File struct {
@@ -38,18 +34,14 @@ type Plan struct {
 	InlineMessages   []map[string]any
 	Files            []File
 	LatestUserText   string
-	LatestTooLong    bool
 	SummaryText      string
 	ToolFallbackText string
 }
 
 func DefaultOptions() Options {
 	return Options{
-		InlineMaxChars:        70000,
-		ForceFileMaxChars:     120000,
-		LatestUserMaxChars:    24000,
-		SummaryMaxChars:       1200,
-		ContextPromptMaxChars: 4000,
+		InlineMaxChars:    70000,
+		ForceFileMaxChars: 120000,
 	}
 }
 
@@ -58,9 +50,8 @@ func PlanContext(messages []map[string]any, tools any, choice any, options Optio
 	estimated := estimateChars(messages, tools)
 	historyEstimated := estimateChars(messages, nil)
 	latest, latestIndex := latestUserMessage(messages)
-	latestTooLong := len(latest) > options.LatestUserMaxChars
 	toolsText := toolsText(tools, choice)
-	historyNeedsFile := historyEstimated > options.InlineMaxChars || latestTooLong || historyEstimated > options.ForceFileMaxChars
+	historyNeedsFile := historyEstimated > options.InlineMaxChars || historyEstimated > options.ForceFileMaxChars
 	needsFile := historyNeedsFile || toolsText != ""
 	if !needsFile {
 		return Plan{Mode: ModeInline, InlineMessages: cloneMessages(messages), LatestUserText: latest}
@@ -86,19 +77,15 @@ func PlanContext(messages []map[string]any, tools any, choice any, options Optio
 	}
 
 	mode := ModeHybrid
-	if historyNeedsFile && (estimated > options.ForceFileMaxChars || latestTooLong) {
+	if historyNeedsFile && estimated > options.ForceFileMaxChars {
 		mode = ModeFile
 	}
 	summary := strings.TrimSpace(history)
-	if len(summary) > options.SummaryMaxChars {
-		summary = summary[:options.SummaryMaxChars]
-	}
 	return Plan{
 		Mode:             mode,
-		InlineMessages:   buildInlineMessages(mode, latest, latestTooLong, strings.TrimSpace(history) != "", toolsText, options),
+		InlineMessages:   buildInlineMessages(mode, latest, strings.TrimSpace(history) != "", toolsText),
 		Files:            files,
 		LatestUserText:   latest,
-		LatestTooLong:    latestTooLong,
 		SummaryText:      summary,
 		ToolFallbackText: toolFallbackText(tools, choice),
 	}
@@ -109,9 +96,6 @@ func (p Plan) NeedsUpload() bool {
 }
 
 func (p Plan) FallbackInlineMessages() ([]map[string]any, error) {
-	if p.LatestTooLong {
-		return nil, errors.New("latest user message is too large for inline fallback after context attachment upload failed")
-	}
 	messages := make([]map[string]any, 0, 2)
 	if strings.TrimSpace(p.SummaryText) != "" {
 		messages = append(messages, map[string]any{"role": "user", "content": "上下文附件上传失败，以下是可用的历史摘要：\n" + p.SummaryText})
@@ -135,15 +119,6 @@ func normalizeOptions(options Options) Options {
 	}
 	if options.ForceFileMaxChars <= 0 {
 		options.ForceFileMaxChars = defaults.ForceFileMaxChars
-	}
-	if options.LatestUserMaxChars <= 0 {
-		options.LatestUserMaxChars = defaults.LatestUserMaxChars
-	}
-	if options.SummaryMaxChars <= 0 {
-		options.SummaryMaxChars = defaults.SummaryMaxChars
-	}
-	if options.ContextPromptMaxChars <= 0 {
-		options.ContextPromptMaxChars = defaults.ContextPromptMaxChars
 	}
 	return options
 }
@@ -188,12 +163,12 @@ func historyText(messages []map[string]any, latestIndex int) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-func buildInlineMessages(mode, latest string, latestTooLong bool, hasHistoryFile bool, toolsText string, options Options) []map[string]any {
+func buildInlineMessages(mode, latest string, hasHistoryFile bool, toolsText string) []map[string]any {
 	var lines []string
 	if hasHistoryFile {
 		lines = append(lines, attachmentNote)
 	}
-	if strings.TrimSpace(latest) != "" && !latestTooLong {
+	if strings.TrimSpace(latest) != "" {
 		lines = append(lines, "Current User Task:\n"+latest)
 	} else if hasHistoryFile {
 		lines = append(lines, "当前用户任务在 history.txt 的 Current User Task 小节中。")
@@ -202,9 +177,6 @@ func buildInlineMessages(mode, latest string, latestTooLong bool, hasHistoryFile
 		lines = append(lines, "可用工具说明也在 tools.txt；必须优先遵守以下桥接工具规则，不要把 history.txt 或 tools.txt 当作本地路径读取。\n\n"+strings.TrimSpace(toolsText))
 	}
 	content := strings.Join(lines, "\n\n")
-	if len(content) > options.ContextPromptMaxChars {
-		content = content[:options.ContextPromptMaxChars]
-	}
 	return []map[string]any{{"role": "user", "content": content}}
 }
 

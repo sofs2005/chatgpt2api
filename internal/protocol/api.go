@@ -1053,9 +1053,6 @@ func ExtractChatContextImages(body map[string]any) []UploadedImage {
 	for _, message := range util.AsMapSlice(body["messages"]) {
 		images = append(images, ExtractImagesFromMessageContent(message["content"])...)
 	}
-	if len(images) > maxContextImages {
-		images = images[len(images)-maxContextImages:]
-	}
 	return images
 }
 
@@ -1221,9 +1218,6 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 		images = append(images, previous.Images...)
 	}
 	images = append(images, EncodeImages(inputImages)...)
-	if len(images) > maxContextImages {
-		images = images[len(images)-maxContextImages:]
-	}
 	toolModel := firstNonEmpty(util.Clean(tool["model"]), responseModel)
 	if !util.IsResponsesImageToolModel(toolModel) {
 		return ConversationRequest{}, "", HTTPError{Status: 400, Message: "unsupported image_generation model: " + toolModel}
@@ -1496,9 +1490,6 @@ func ExtractResponseImages(input any) []UploadedImage {
 		}
 	}
 	walk(input)
-	if len(images) > maxContextImages {
-		images = images[len(images)-maxContextImages:]
-	}
 	return images
 }
 

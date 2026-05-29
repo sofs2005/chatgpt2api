@@ -7,11 +7,8 @@ import (
 
 func tinyOptions() Options {
 	return Options{
-		InlineMaxChars:        80,
-		ForceFileMaxChars:     160,
-		LatestUserMaxChars:    60,
-		SummaryMaxChars:       40,
-		ContextPromptMaxChars: 120,
+		InlineMaxChars:    80,
+		ForceFileMaxChars: 160,
 	}
 }
 
@@ -67,10 +64,11 @@ func TestPlanContextMovesHugeLatestUserToFile(t *testing.T) {
 		t.Fatalf("len(Files) = %d, want 1", len(plan.Files))
 	}
 	inline := plan.InlineMessages[0]["content"].(string)
-	if strings.Contains(inline, latest[:80]) {
-		t.Fatalf("inline prompt contains oversized latest user text: %s", inline)
+	fullLatest := strings.TrimSpace(latest)
+	if !strings.Contains(inline, fullLatest) {
+		t.Fatalf("inline prompt missing full latest user text: %s", inline)
 	}
-	if !strings.Contains(plan.Files[0].Text, strings.TrimSpace(latest)) {
+	if !strings.Contains(plan.Files[0].Text, fullLatest) {
 		t.Fatalf("history file missing oversized latest task")
 	}
 }
@@ -80,10 +78,7 @@ func TestPlanContextKeepsCurrentTaskInlineWhenHistoryFileIsGenerated(t *testing.
 		{"role": "assistant", "content": strings.Repeat("prior ", 10)},
 		{"role": "user", "content": "current task"},
 	}
-	options := tinyOptions()
-	options.ContextPromptMaxChars = 240
-
-	plan := PlanContext(messages, nil, nil, options)
+	plan := PlanContext(messages, nil, nil, tinyOptions())
 
 	if plan.Mode != ModeHybrid {
 		t.Fatalf("Mode = %q, want hybrid", plan.Mode)
@@ -103,6 +98,27 @@ func TestPlanContextKeepsCurrentTaskInlineWhenHistoryFileIsGenerated(t *testing.
 	}
 }
 
+func TestPlanContextKeepsFullFallbackSummary(t *testing.T) {
+	history := strings.Repeat("历史上下文 ", 20) + "完整尾巴"
+	messages := []map[string]any{
+		{"role": "assistant", "content": history},
+		{"role": "user", "content": "current task"},
+	}
+
+	plan := PlanContext(messages, nil, nil, tinyOptions())
+
+	if !strings.Contains(plan.SummaryText, "完整尾巴") {
+		t.Fatalf("SummaryText was truncated: %s", plan.SummaryText)
+	}
+	fallback, err := plan.FallbackInlineMessages()
+	if err != nil {
+		t.Fatalf("FallbackInlineMessages() error = %v", err)
+	}
+	if !strings.Contains(fallback[0]["content"].(string), "完整尾巴") {
+		t.Fatalf("fallback summary was truncated: %#v", fallback[0])
+	}
+}
+
 func TestPlanContextKeepsBridgeToolInstructionsInline(t *testing.T) {
 	messages := []map[string]any{{"role": "user", "content": "use a tool"}}
 	tools := []map[string]any{{
@@ -113,10 +129,7 @@ func TestPlanContextKeepsBridgeToolInstructionsInline(t *testing.T) {
 			"parameters":  map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}}, "required": []any{"file_path"}},
 		},
 	}}
-	options := tinyOptions()
-	options.ContextPromptMaxChars = 1000
-
-	plan := PlanContext(messages, tools, nil, options)
+	plan := PlanContext(messages, tools, nil, tinyOptions())
 
 	inline := plan.InlineMessages[0]["content"].(string)
 	if !strings.Contains(inline, "<invoke name=\"bridge-0\"") {
@@ -182,12 +195,16 @@ func TestFallbackPreservesCurrentTaskWhenPossible(t *testing.T) {
 	}
 }
 
-func TestFallbackErrorsForHugeCurrentTask(t *testing.T) {
-	messages := []map[string]any{{"role": "user", "content": strings.Repeat("huge current ", 20)}}
+func TestFallbackKeepsHugeCurrentTask(t *testing.T) {
+	latest := strings.TrimSpace(strings.Repeat("huge current ", 20))
+	messages := []map[string]any{{"role": "user", "content": latest}}
 	plan := PlanContext(messages, nil, nil, tinyOptions())
 
-	_, err := plan.FallbackInlineMessages()
-	if err == nil {
-		t.Fatalf("FallbackInlineMessages() error = nil, want error")
+	fallback, err := plan.FallbackInlineMessages()
+	if err != nil {
+		t.Fatalf("FallbackInlineMessages() error = %v", err)
+	}
+	if got := fallback[len(fallback)-1]["content"]; got != latest {
+		t.Fatalf("latest fallback content = %#v, want full latest", got)
 	}
 }

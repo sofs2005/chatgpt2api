@@ -1,19 +1,13 @@
 package protocol
 
 import (
-	"regexp"
 	"strings"
 	"sync"
 
 	"chatgpt2api/internal/util"
 )
 
-const (
-	maxStoredResponseContexts = 32
-	maxContextMessages        = 16
-	maxContextImages          = 4
-	maxContextMessageChars    = 2000
-)
+const maxStoredResponseContexts = 32
 
 type ResponseContext struct {
 	Messages []map[string]any
@@ -169,7 +163,7 @@ func BuildImageContextPrompt(messages []map[string]any, fallbackPrompt, size, qu
 			currentIndex = index
 		}
 	}
-	currentPrompt = sanitizeImageContextText(currentPrompt)
+	currentPrompt = strings.TrimSpace(currentPrompt)
 	if len(normalized) == 0 || currentPrompt == "" {
 		return BuildImagePrompt(currentPrompt, size, quality)
 	}
@@ -179,7 +173,7 @@ func BuildImageContextPrompt(messages []map[string]any, fallbackPrompt, size, qu
 		if index == currentIndex {
 			continue
 		}
-		text := sanitizeImageContextText(util.Clean(message["content"]))
+		text := strings.TrimSpace(util.Clean(message["content"]))
 		if text == "" {
 			continue
 		}
@@ -187,9 +181,6 @@ func BuildImageContextPrompt(messages []map[string]any, fallbackPrompt, size, qu
 	}
 	if len(history) == 0 {
 		return BuildImagePrompt(currentPrompt, size, quality)
-	}
-	if len(history) > maxContextMessages {
-		history = history[len(history)-maxContextMessages:]
 	}
 	prompt := "请延续同一个图片生成对话，并把历史上下文用于理解代词、主体、风格、构图和连续修改意图。不要把历史说明文字原样画进画面，除非当前请求明确要求。\n\n历史上下文:\n" +
 		strings.Join(history, "\n") +
@@ -250,18 +241,11 @@ func responseContentText(content any) string {
 func trimResponseContext(ctx ResponseContext) ResponseContext {
 	messages := make([]map[string]any, 0, len(ctx.Messages))
 	for _, message := range NormalizeMessages(ctx.Messages, nil) {
-		text := sanitizeImageContextText(util.Clean(message["content"]))
+		text := strings.TrimSpace(util.Clean(message["content"]))
 		if text == "" {
 			continue
 		}
-		if len([]rune(text)) > maxContextMessageChars {
-			runes := []rune(text)
-			text = string(runes[:maxContextMessageChars]) + "...(truncated)"
-		}
 		messages = append(messages, map[string]any{"role": firstNonEmpty(util.Clean(message["role"]), "user"), "content": text})
-	}
-	if len(messages) > maxContextMessages {
-		messages = messages[len(messages)-maxContextMessages:]
 	}
 
 	var images []string
@@ -269,9 +253,6 @@ func trimResponseContext(ctx ResponseContext) ResponseContext {
 		if image = strings.TrimSpace(image); image != "" {
 			images = append(images, image)
 		}
-	}
-	if len(images) > maxContextImages {
-		images = images[len(images)-maxContextImages:]
 	}
 	return ResponseContext{Messages: messages, Images: images}
 }
@@ -286,17 +267,6 @@ func cloneMessages(messages []map[string]any) []map[string]any {
 		out = append(out, util.CopyMap(message))
 	}
 	return out
-}
-
-func sanitizeImageContextText(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	text = regexp.MustCompile(`!\[[^\]]*]\(data:image/[^)]+\)`).ReplaceAllString(text, "[generated image]")
-	text = regexp.MustCompile(`data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+`).ReplaceAllString(text, "[image data]")
-	text = regexp.MustCompile(`[A-Za-z0-9+/]{800,}={0,2}`).ReplaceAllString(text, "[long encoded data]")
-	return strings.TrimSpace(text)
 }
 
 func roleLabel(role string) string {

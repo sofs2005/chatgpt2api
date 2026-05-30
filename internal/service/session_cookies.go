@@ -73,7 +73,22 @@ func SessionCookieStringMap(raw any) map[string]string {
 
 func isAllowedSessionCookieName(name string) bool {
 	switch name {
-	case "__Secure-next-auth.session-token", "__Host-next-auth.csrf-token", "cf_clearance", "__cf_bm", "oai-did", "oai-sc", "__Secure-oai-is":
+	case "__Secure-next-auth.session-token",
+		"__Secure-next-auth.callback-url",
+		"__Host-next-auth.csrf-token",
+		"cf_clearance",
+		"__cf_bm",
+		"__cflb",
+		"_cfuvid",
+		"_puid",
+		"_account_is_fedramp",
+		"oai-did",
+		"oai-sc",
+		"oai-chat-web-route",
+		"oai-client-auth-info",
+		"oai-gn",
+		"oai-hlib",
+		"__Secure-oai-is":
 		return true
 	}
 	return strings.HasPrefix(name, "__Secure-next-auth.session-token.") ||

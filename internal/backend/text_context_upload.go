@@ -126,7 +126,7 @@ func (c *Client) putTextContextFile(ctx context.Context, uploadURL, mimeType str
 	req.Header.Set("Content-Type", mimeType)
 	req.Header.Set("x-ms-blob-type", "BlockBlob")
 	req.Header.Set("x-ms-version", "2020-04-08")
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return upstreamTransportError("text_context_blob_put", err)
 	}

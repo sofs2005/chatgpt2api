@@ -112,6 +112,77 @@ func TestBuildFingerprintUsesAccountFingerprint(t *testing.T) {
 	}
 }
 
+func TestClientSendsStoredAccountCookiesToUpstream(t *testing.T) {
+	var seenCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html data-build="build-1"></html>`))
+	}))
+	defer server.Close()
+
+	client := &Client{
+		BaseURL:     server.URL,
+		AccessToken: "token-1",
+		httpClient:  server.Client(),
+		lookup: testAccountLookup{
+			"token-1": {"session_cookies": map[string]string{
+				"cf_clearance": "cf-cookie",
+				"oai-sc":       "sc-cookie",
+				"_cfuvid":      "visitor-cookie",
+			}},
+		},
+	}
+	client.fp = client.buildFingerprint()
+	client.applyBrowserFingerprint()
+	client.userAgent = client.fp["user-agent"]
+	client.initAccountCookies()
+
+	if err := client.bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap() error = %v", err)
+	}
+	for _, want := range []string{"cf_clearance=cf-cookie", "oai-sc=sc-cookie", "_cfuvid=visitor-cookie"} {
+		if !strings.Contains(seenCookie, want) {
+			t.Fatalf("Cookie header = %q, missing %q", seenCookie, want)
+		}
+	}
+}
+
+func TestClientStoresUpstreamSetCookiesOnAccount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "new-bm", Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: "ignored_cookie", Value: "ignore", Path: "/"})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html data-build="build-1"></html>`))
+	}))
+	defer server.Close()
+
+	lookup := &recordingAccountLookup{accounts: map[string]map[string]any{
+		"token-1": {"session_cookies": map[string]string{"cf_clearance": "cf-cookie"}},
+	}}
+	client := &Client{
+		BaseURL:     server.URL,
+		AccessToken: "token-1",
+		httpClient:  server.Client(),
+		lookup:      lookup,
+	}
+	client.fp = client.buildFingerprint()
+	client.applyBrowserFingerprint()
+	client.userAgent = client.fp["user-agent"]
+	client.initAccountCookies()
+
+	if err := client.bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap() error = %v", err)
+	}
+	cookies := lookup.accounts["token-1"]["session_cookies"].(map[string]string)
+	if cookies["cf_clearance"] != "cf-cookie" || cookies["__cf_bm"] != "new-bm" {
+		t.Fatalf("stored session_cookies = %#v", cookies)
+	}
+	if _, ok := cookies["ignored_cookie"]; ok {
+		t.Fatalf("unexpected ignored cookie stored: %#v", cookies)
+	}
+}
+
 func TestApplyBrowserFingerprintPreservesAccountProfile(t *testing.T) {
 	client := &Client{fp: map[string]string{
 		"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
@@ -1486,6 +1557,25 @@ type testAccountLookup map[string]map[string]any
 
 func (l testAccountLookup) GetAccount(accessToken string) map[string]any {
 	return l[accessToken]
+}
+
+type recordingAccountLookup struct {
+	accounts map[string]map[string]any
+}
+
+func (l *recordingAccountLookup) GetAccount(accessToken string) map[string]any {
+	return l.accounts[accessToken]
+}
+
+func (l *recordingAccountLookup) UpdateAccount(accessToken string, updates map[string]any) map[string]any {
+	account := l.accounts[accessToken]
+	if account == nil {
+		return nil
+	}
+	for key, value := range updates {
+		account[key] = value
+	}
+	return account
 }
 
 func TestConversationPayloadEmbedsOpenAIMessageHistoryInSingleUserMessage(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -37,21 +38,26 @@ type AccountLookup interface {
 	GetAccount(accessToken string) map[string]any
 }
 
+type AccountCookieStore interface {
+	UpdateAccount(accessToken string, updates map[string]any) map[string]any
+}
+
 type Client struct {
 	BaseURL           string
 	ClientVersion     string
 	ClientBuildNumber string
 	AccessToken       string
 
-	lookup       AccountLookup
-	proxy        *service.ProxyService
-	httpClient   *http.Client
-	fp           map[string]string
-	userAgent    string
-	deviceID     string
-	sessionID    string
-	powSources   []string
-	powDataBuild string
+	lookup         AccountLookup
+	proxy          *service.ProxyService
+	httpClient     *http.Client
+	fp             map[string]string
+	userAgent      string
+	deviceID       string
+	sessionID      string
+	powSources     []string
+	powDataBuild   string
+	sessionCookies map[string]string
 }
 
 type ChatRequirements struct {
@@ -76,6 +82,7 @@ func NewClient(accessToken string, lookup AccountLookup, proxy *service.ProxySer
 	c.userAgent = c.fp["user-agent"]
 	c.deviceID = c.fp["oai-device-id"]
 	c.sessionID = c.fp["oai-session-id"]
+	c.initAccountCookies()
 	c.httpClient = proxy.BrowserHTTPClientWithProfile(c.fp["impersonate"], 300*time.Second)
 	return c
 }
@@ -96,7 +103,7 @@ func (c *Client) ListModels(ctx context.Context) (map[string]any, error) {
 	for key, value := range c.headers(route, map[string]string{}) {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, upstreamTransportError(contextName, err)
 	}
@@ -210,6 +217,95 @@ func (c *Client) buildFingerprint() map[string]string {
 
 func (c *Client) applyBrowserFingerprint() {
 	c.fp = service.BrowserFingerprintStringMap(c.fp)
+}
+
+func (c *Client) initAccountCookies() {
+	c.sessionCookies = map[string]string{}
+	if c.AccessToken == "" || c.lookup == nil {
+		return
+	}
+	account := c.lookup.GetAccount(c.AccessToken)
+	for name, value := range service.SessionCookieStringMap(account["session_cookies"]) {
+		c.sessionCookies[name] = value
+	}
+}
+
+func (c *Client) addAccountCookies(req *http.Request) {
+	if req == nil || len(c.sessionCookies) == 0 || !c.isAccountCookieURL(req) {
+		return
+	}
+	names := make([]string, 0, len(c.sessionCookies))
+	for name := range c.sessionCookies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if value := c.sessionCookies[name]; value != "" {
+			req.AddCookie(&http.Cookie{Name: name, Value: value})
+		}
+	}
+}
+
+func (c *Client) isAccountCookieURL(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	host := req.URL.Hostname()
+	if host == "" {
+		return false
+	}
+	base, err := url.Parse(c.BaseURL)
+	if err == nil && host == base.Hostname() {
+		return true
+	}
+	return host == "chatgpt.com" || strings.HasSuffix(host, ".chatgpt.com")
+}
+
+func (c *Client) rememberAccountCookies(resp *http.Response) {
+	if resp == nil || c.AccessToken == "" || len(resp.Cookies()) == 0 {
+		return
+	}
+	merged := map[string]string{}
+	for name, value := range c.sessionCookies {
+		merged[name] = value
+	}
+	changed := false
+	for _, cookie := range resp.Cookies() {
+		allowed := service.SessionCookieStringMap(map[string]string{cookie.Name: firstNonEmpty(cookie.Value, "x")})
+		if len(allowed) == 0 {
+			continue
+		}
+		if cookie.MaxAge < 0 || cookie.Value == "" {
+			if _, ok := merged[cookie.Name]; ok {
+				delete(merged, cookie.Name)
+				changed = true
+			}
+			continue
+		}
+		if merged[cookie.Name] != cookie.Value {
+			merged[cookie.Name] = cookie.Value
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	c.sessionCookies = merged
+	if store, ok := c.lookup.(AccountCookieStore); ok {
+		store.UpdateAccount(c.AccessToken, map[string]any{"session_cookies": merged})
+	}
+}
+
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	accountCookieURL := c.isAccountCookieURL(req)
+	if accountCookieURL {
+		c.addAccountCookies(req)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err == nil && accountCookieURL {
+		c.rememberAccountCookies(resp)
+	}
+	return resp, err
 }
 
 type browserHeaderMetadata struct {
@@ -344,7 +440,7 @@ func (c *Client) bootstrap(ctx context.Context) error {
 	for key, value := range c.bootstrapHeaders() {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return upstreamTransportError("bootstrap", err)
 	}
@@ -832,7 +928,7 @@ func (c *Client) postRaw(ctx context.Context, path string, data []byte, headers 
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, upstreamTransportError(path, err)
 	}

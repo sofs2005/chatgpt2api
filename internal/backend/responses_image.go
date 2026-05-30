@@ -806,7 +806,7 @@ func (c *Client) uploadImage(ctx context.Context, input ResponsesInputImage, fil
 	} {
 		req.Header.Set(key, value)
 	}
-	uploadResp, err := c.httpClient.Do(req)
+	uploadResp, err := c.do(req)
 	if err != nil {
 		return uploadedImageRef{}, upstreamTransportError("image_upload", err)
 	}
@@ -821,7 +821,7 @@ func (c *Client) uploadImage(ctx context.Context, input ResponsesInputImage, fil
 	for key, value := range c.headers(finalizePath, map[string]string{"Content-Type": "application/json", "Accept": "application/json"}) {
 		finalizeReq.Header.Set(key, value)
 	}
-	finalizeResp, err := c.httpClient.Do(finalizeReq)
+	finalizeResp, err := c.do(finalizeReq)
 	if err != nil {
 		return uploadedImageRef{}, upstreamTransportError(finalizePath, err)
 	}
@@ -1599,7 +1599,7 @@ func (c *Client) fetchOfficialConversationImageResult(ctx context.Context, conve
 	for key, value := range c.headers(path, map[string]string{"Accept": "application/json"}) {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return officialConversationPollResult{}, upstreamTransportError(path, err)
 	}
@@ -1807,7 +1807,7 @@ func (c *Client) fetchOfficialConversationText(ctx context.Context, conversation
 	for key, value := range c.headers(path, map[string]string{"Accept": "application/json"}) {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", upstreamTransportError(path, err)
 	}
@@ -1922,7 +1922,7 @@ func (c *Client) downloadOfficialInterpreterAsset(ctx context.Context, conversat
 	for key, value := range c.headers(targetPath, map[string]string{"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"}) {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, upstreamTransportError(path, err)
 	}
@@ -1952,7 +1952,7 @@ func (c *Client) getOfficialFileDownloadURL(ctx context.Context, conversationID,
 	for key, value := range c.headers(targetPath, map[string]string{"Accept": "application/json"}) {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", upstreamTransportError(path, err)
 	}
@@ -2017,7 +2017,7 @@ func (c *Client) downloadOfficialImage(ctx context.Context, url string) ([]byte,
 	} else if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, upstreamTransportError("image_download", err)
 	}

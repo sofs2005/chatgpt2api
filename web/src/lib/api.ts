@@ -844,10 +844,10 @@ export async function createAccounts(tokens: string[]) {
   });
 }
 
-export async function createAccountFromSession(sessionJson: string) {
+export async function createAccountFromSession(sessionJson: string, sessionCookies?: string) {
   return httpRequest<AccountMutationResponse>("/api/accounts/session", {
     method: "POST",
-    body: { session_json: sessionJson },
+    body: { session_json: sessionJson, session_cookies: sessionCookies?.trim() || undefined },
   });
 }
 

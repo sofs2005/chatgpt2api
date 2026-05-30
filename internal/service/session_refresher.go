@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,6 +45,11 @@ type refreshResult struct {
 	err            error
 }
 
+type SessionRefreshContext struct {
+	Cookies map[string]string
+	Headers map[string]string
+}
+
 const (
 	maxConcurrentRefreshes = 5
 	refreshTimeout         = 15 * time.Second
@@ -61,11 +67,19 @@ func NewSessionRefresher(httpDo func(req *http.Request) (*http.Response, error))
 // RefreshToken refreshes access_token with session_token.
 // If the same token is already refreshing, it waits for the in-flight result.
 func (r *SessionRefresher) RefreshToken(ctx context.Context, accessToken, sessionToken string) (newAccessToken, newSessionToken, newExpires string, err error) {
-	result, err := r.RefreshSession(ctx, accessToken, sessionToken)
+	return r.RefreshTokenWithContext(ctx, accessToken, sessionToken, SessionRefreshContext{})
+}
+
+func (r *SessionRefresher) RefreshTokenWithContext(ctx context.Context, accessToken, sessionToken string, requestContext SessionRefreshContext) (newAccessToken, newSessionToken, newExpires string, err error) {
+	result, err := r.RefreshSessionWithContext(ctx, accessToken, sessionToken, requestContext)
 	return result.AccessToken, result.SessionToken, result.Expires, err
 }
 
 func (r *SessionRefresher) RefreshSession(ctx context.Context, accessToken, sessionToken string) (SessionRefreshData, error) {
+	return r.RefreshSessionWithContext(ctx, accessToken, sessionToken, SessionRefreshContext{})
+}
+
+func (r *SessionRefresher) RefreshSessionWithContext(ctx context.Context, accessToken, sessionToken string, requestContext SessionRefreshContext) (SessionRefreshData, error) {
 	if sessionToken == "" {
 		return SessionRefreshData{}, fmt.Errorf("session_token is empty")
 	}
@@ -103,7 +117,7 @@ func (r *SessionRefresher) RefreshSession(ctx context.Context, accessToken, sess
 	}
 
 	// Execute the refresh request.
-	return finish(r.doRefresh(ctx, sessionToken))
+	return finish(r.doRefresh(ctx, sessionToken, requestContext))
 }
 
 func (r refreshResult) sessionData() SessionRefreshData {
@@ -115,7 +129,16 @@ func (r refreshResult) sessionData() SessionRefreshData {
 	}
 }
 
-func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string) refreshResult {
+func hasSessionTokenCookie(cookies map[string]string) bool {
+	for name, value := range cookies {
+		if value != "" && (name == "__Secure-next-auth.session-token" || strings.HasPrefix(name, "__Secure-next-auth.session-token.")) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string, requestContext SessionRefreshContext) refreshResult {
 	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 
@@ -124,17 +147,33 @@ func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string) r
 		return refreshResult{err: fmt.Errorf("create request: %w", err)}
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", DefaultBrowserUserAgent)
 	req.Header.Set("Accept", "application/json")
-	req.AddCookie(&http.Cookie{
-		Name:     "__Secure-next-auth.session-token",
-		Value:    sessionToken,
-		Domain:   ".chatgpt.com",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	req.Header.Set("Referer", "https://chatgpt.com/")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	for key, value := range requestContext.Headers {
+		if value != "" {
+			req.Header.Set(key, value)
+		}
+	}
+	for name, value := range requestContext.Cookies {
+		if value != "" {
+			req.AddCookie(&http.Cookie{Name: name, Value: value, Domain: ".chatgpt.com", Path: "/", Secure: true})
+		}
+	}
+	if !hasSessionTokenCookie(requestContext.Cookies) {
+		req.AddCookie(&http.Cookie{
+			Name:     "__Secure-next-auth.session-token",
+			Value:    sessionToken,
+			Domain:   ".chatgpt.com",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
 
 	resp, err := r.httpDo(req)
 	if err != nil {

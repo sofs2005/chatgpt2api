@@ -43,6 +43,51 @@ func TestSessionRefresherReturnsValidatedUser(t *testing.T) {
 	}
 }
 
+func TestSessionRefresherSendsBrowserCookiesAndHeaders(t *testing.T) {
+	refresher := NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("User-Agent"); got != "Browser UA" {
+			t.Fatalf("User-Agent = %q, want Browser UA", got)
+		}
+		if got := req.Header.Get("Sec-Ch-Ua"); got != `"Chromium";v="145"` {
+			t.Fatalf("Sec-Ch-Ua = %q", got)
+		}
+		if got := req.Header.Get("OAI-Device-Id"); got != "device-1" {
+			t.Fatalf("OAI-Device-Id = %q", got)
+		}
+		for name, want := range map[string]string{
+			"__Secure-next-auth.session-token": "session-cookie",
+			"cf_clearance":                     "cf-cookie",
+			"__cf_bm":                          "bm-cookie",
+			"oai-did":                          "did-cookie",
+		} {
+			cookie, err := req.Cookie(name)
+			if err != nil || cookie.Value != want {
+				t.Fatalf("cookie %s = %#v err %v, want %q", name, cookie, err, want)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access","sessionToken":"new-session","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+
+	_, err := refresher.RefreshSessionWithContext(context.Background(), "old-access", "session-cookie", SessionRefreshContext{
+		Cookies: map[string]string{
+			"cf_clearance": "cf-cookie",
+			"__cf_bm":      "bm-cookie",
+			"oai-did":      "did-cookie",
+		},
+		Headers: map[string]string{
+			"User-Agent":    "Browser UA",
+			"Sec-Ch-Ua":     `"Chromium";v="145"`,
+			"OAI-Device-Id": "device-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RefreshSessionWithContext() error = %v", err)
+	}
+}
+
 func TestSessionRefresherDeduplicatesConcurrentRefreshes(t *testing.T) {
 	var calls int32
 	release := make(chan struct{})

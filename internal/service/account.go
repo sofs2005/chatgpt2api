@@ -259,7 +259,14 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 	return map[string]any{"added": added, "skipped": skipped, "items": items}
 }
 
-func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]any, error) {
+func firstCookieInput(inputs []string) string {
+	if len(inputs) == 0 {
+		return ""
+	}
+	return inputs[0]
+}
+
+func (s *AccountService) AddAccountFromSession(sessionJSON string, cookieInputs ...string) (map[string]any, error) {
 	var session struct {
 		AccessToken  string `json:"accessToken"`
 		Expires      any    `json:"expires"`
@@ -281,8 +288,12 @@ func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]a
 	if sessionToken == "" {
 		return nil, fmt.Errorf("session JSON missing sessionToken")
 	}
+	sessionCookies, err := ParseSessionCookies(firstCookieInput(cookieInputs))
+	if err != nil {
+		return nil, fmt.Errorf("invalid session cookies: %w", err)
+	}
 
-	validated, err := s.refresher.RefreshSession(context.Background(), accessToken, sessionToken)
+	validated, err := s.refresher.RefreshSessionWithContext(context.Background(), accessToken, sessionToken, s.sessionRefreshContext(accessToken, sessionCookies))
 	if err != nil {
 		return nil, fmt.Errorf("session token validation failed: %w", err)
 	}
@@ -300,6 +311,9 @@ func (s *AccountService) AddAccountFromSession(sessionJSON string) (map[string]a
 	updates := map[string]any{
 		"session_token":   sessionToken,
 		"session_expires": sessionExpires,
+	}
+	if len(sessionCookies) > 0 {
+		updates["session_cookies"] = sessionCookies
 	}
 	if userID != "" {
 		updates["user_id"] = userID
@@ -649,7 +663,7 @@ func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken
 		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 		defer cancel()
 
-		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshToken(ctx, accessToken, sessionToken)
+		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshTokenWithContext(ctx, accessToken, sessionToken, s.sessionRefreshContext(accessToken, nil))
 		if err != nil {
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常"})
 			return
@@ -848,6 +862,22 @@ func (s *AccountService) GetAvailableAccessToken(ctx context.Context) (string, e
 	}
 	defer lease.Release()
 	return lease.Token, nil
+}
+
+func (s *AccountService) sessionRefreshContext(accessToken string, overrideCookies map[string]string) SessionRefreshContext {
+	account := s.GetAccount(accessToken)
+	headers := BrowserHeadersForFingerprint(nil)
+	cookies := map[string]string{}
+	if account != nil {
+		headers = BrowserHeadersForFingerprint(account["fp"])
+		for name, value := range SessionCookieStringMap(account["session_cookies"]) {
+			cookies[name] = value
+		}
+	}
+	for name, value := range overrideCookies {
+		cookies[name] = value
+	}
+	return SessionRefreshContext{Cookies: cookies, Headers: headers}
 }
 
 func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error) {
@@ -1066,7 +1096,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 	}
 	for _, item := range pendingRefresh {
 		detail := detailsByToken[item.accessToken]
-		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshToken(ctx, item.accessToken, item.sessionToken)
+		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshTokenWithContext(ctx, item.accessToken, item.sessionToken, s.sessionRefreshContext(item.accessToken, nil))
 		if err != nil {
 			s.UpdateAccount(item.accessToken, map[string]any{"status": "异常"})
 			failedRefreshCount++

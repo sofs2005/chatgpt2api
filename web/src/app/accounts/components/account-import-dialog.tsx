@@ -115,6 +115,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
   const [method, setMethod] = useState<ImportMethod>("menu");
   const [tokenInput, setTokenInput] = useState("");
   const [sessionInput, setSessionInput] = useState("");
+  const [sessionCookiesInput, setSessionCookiesInput] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pendingCpaImport, setPendingCpaImport] = useState<PendingCpaImport | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -126,6 +127,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
     setMethod("menu");
     setTokenInput("");
     setSessionInput("");
+    setSessionCookiesInput("");
     setPendingCpaImport(null);
     setConfirmOpen(false);
   };
@@ -224,7 +226,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
       }
 
       setIsSubmitting(true);
-      const data = await createAccountFromSession(sessionJson);
+      const data = await createAccountFromSession(sessionJson, sessionCookiesInput);
       onImported(data.items);
       setOpen(false);
       resetState();
@@ -364,7 +366,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
               {sessionUrl}
               <ExternalLink className="size-3.5" />
             </a>
-            ，复制页面返回的完整 JSON，系统会保存其中的 `accessToken` 和 `sessionToken`。
+            ，复制页面返回的完整 JSON；同时建议导入同一浏览器里的 ChatGPT cookies（至少包含 cf_clearance、__cf_bm、oai-did），否则后端刷新仍可能被 CF 拦截。
           </div>
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
             <div className="font-medium">风险提示</div>
@@ -380,6 +382,18 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
               onChange={(event) => setSessionInput(event.target.value)}
               className="min-h-56 resize-none rounded-xl border-stone-200 font-mono text-xs"
             />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-stone-700">ChatGPT Cookies</label>
+            <Textarea
+              placeholder='粘贴 Cookie Header，或 JSON，例如 {"cf_clearance":"...","__cf_bm":"...","oai-did":"..."}'
+              value={sessionCookiesInput}
+              onChange={(event) => setSessionCookiesInput(event.target.value)}
+              className="min-h-32 resize-none rounded-xl border-stone-200 font-mono text-xs"
+            />
+            <p className="text-xs leading-5 text-stone-500">
+              Cookies 会作为敏感账号凭据保存在本地，仅用于后端访问 ChatGPT session endpoint 时复用浏览器已通过的 CF 上下文。
+            </p>
           </div>
         </div>
       );

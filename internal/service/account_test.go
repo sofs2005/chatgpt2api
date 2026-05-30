@@ -539,6 +539,48 @@ func TestAddAccountFromSessionRecoversAbnormalAccountWhenAccessTokenMatches(t *t
 	}
 }
 
+func TestAddAccountFromSessionStoresAndUsesBrowserCookies(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		for name, want := range map[string]string{
+			"__Secure-next-auth.session-token": "browser-session-token",
+			"cf_clearance":                     "cf-cookie",
+			"__cf_bm":                          "bm-cookie",
+			"oai-did":                          "did-cookie",
+		} {
+			cookie, err := req.Cookie(name)
+			if err != nil || cookie.Value != want {
+				t.Fatalf("cookie %s = %#v err %v, want %q", name, cookie, err, want)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"browser-access-token","sessionToken":"browser-session-token","expires":"2026-05-12T00:00:00Z","user":{"id":"browser-user","email":"browser@example.com","name":"Browser User"}}`)),
+		}, nil
+	})
+
+	result, err := accounts.AddAccountFromSession(`{
+		"accessToken":"browser-access-token",
+		"sessionToken":"browser-session-token",
+		"expires":"2026-05-12T00:00:00Z",
+		"user":{"id":"browser-user","email":"browser@example.com","name":"Browser User"}
+	}`, `{"cf_clearance":"cf-cookie","__cf_bm":"bm-cookie","oai-did":"did-cookie"}`)
+	if err != nil {
+		t.Fatalf("AddAccountFromSession() error = %v", err)
+	}
+	if result["added"] != 1 {
+		t.Fatalf("AddAccountFromSession() result = %#v, want added account", result)
+	}
+	account := accounts.GetAccount("browser-access-token")
+	if account == nil {
+		t.Fatalf("browser-access-token account missing")
+	}
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	if cookies["cf_clearance"] != "cf-cookie" || cookies["__cf_bm"] != "bm-cookie" || cookies["oai-did"] != "did-cookie" {
+		t.Fatalf("stored session_cookies = %#v", account["session_cookies"])
+	}
+}
+
 func TestAddAccountFromSessionRejectsInvalidSessionWithoutMutatingExistingAccount(t *testing.T) {
 	accounts := newTestAccountService(t)
 	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
@@ -608,6 +650,53 @@ func TestApplyAccountErrorMessageDoesNotMarkGenericTooManyRequestsAsLimited(t *t
 	account := accounts.GetAccount("token-1")
 	if account["status"] != "正常" || account["quota"] != 5 || account["image_quota_unknown"] != true {
 		t.Fatalf("account = %#v, want unchanged normal account", account)
+	}
+}
+
+func TestRefreshAccountsUsesStoredBrowserCookiesForSessionRefresh(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			w.WriteHeader(http.StatusUnauthorized)
+			writeJSON(t, w, map[string]any{"detail": "authentication token is expired"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		cookie, err := req.Cookie("cf_clearance")
+		if err != nil || cookie.Value != "cf-cookie" {
+			t.Fatalf("cf_clearance = %#v err %v, want cf-cookie", cookie, err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access-token","sessionToken":"new-session-token","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"expired-access-token"})
+	accounts.UpdateAccount("expired-access-token", map[string]any{
+		"status":          "正常",
+		"quota":           5,
+		"session_token":   "refresh-session-token",
+		"session_cookies": map[string]string{"cf_clearance": "cf-cookie"},
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"expired-access-token"})
+	if result["session_refreshed"] != 1 || result["session_failed"] != 0 {
+		t.Fatalf("refresh result = %#v, want session refresh success", result)
+	}
+	if account := accounts.GetAccount("new-access-token"); account == nil {
+		t.Fatalf("new-access-token account missing after session refresh")
 	}
 }
 

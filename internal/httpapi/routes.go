@@ -1157,7 +1157,8 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusBadRequest, "session_json is required")
 			return
 		}
-		result, err := a.accounts.AddAccountFromSession(sessionJSON)
+		sessionCookies := util.Clean(body["session_cookies"])
+		result, err := a.accounts.AddAccountFromSession(sessionJSON, sessionCookies)
 		if err != nil {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return

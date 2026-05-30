@@ -321,6 +321,62 @@ func TestRefreshAccountsReturnsEmptyErrorsArray(t *testing.T) {
 	}
 }
 
+func TestRefreshAccountsUsesStoredCookiesForQuotaRefresh(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			if cookie, err := r.Cookie("cf_clearance"); err != nil || cookie.Value != "cf-cookie" {
+				t.Fatalf("bootstrap cf_clearance = %#v err %v, want cf-cookie", cookie, err)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "__cflb", Value: "route-cookie", Path: "/"})
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			if cookie, err := r.Cookie("cf_clearance"); err != nil || cookie.Value != "cf-cookie" {
+				t.Fatalf("me cf_clearance = %#v err %v, want cf-cookie", cookie, err)
+			}
+			if cookie, err := r.Cookie("__cflb"); err != nil || cookie.Value != "route-cookie" {
+				t.Fatalf("me __cflb = %#v err %v, want route-cookie", cookie, err)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "fresh-bm", Path: "/"})
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			if cookie, err := r.Cookie("cf_clearance"); err != nil || cookie.Value != "cf-cookie" {
+				t.Fatalf("init cf_clearance = %#v err %v, want cf-cookie", cookie, err)
+			}
+			writeJSON(t, w, map[string]any{
+				"default_model_slug": "gpt-5",
+				"limits_progress": []map[string]any{{
+					"feature_name": "image_gen",
+					"remaining":    7,
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{
+		"session_cookies": map[string]string{"cf_clearance": "cf-cookie"},
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"token-1"})
+	if result["refreshed"] != 1 || result["failed"] != 0 {
+		t.Fatalf("refresh result = %#v, want success", result)
+	}
+	cookies := SessionCookieStringMap(accounts.GetAccount("token-1")["session_cookies"])
+	if cookies["cf_clearance"] != "cf-cookie" || cookies["__cflb"] != "route-cookie" || cookies["__cf_bm"] != "fresh-bm" {
+		t.Fatalf("stored session_cookies = %#v", cookies)
+	}
+}
+
 func TestRefreshAccountStateMarksUnauthorizedInitAsInvalid(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

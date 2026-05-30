@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1356,10 +1357,13 @@ type UpstreamAccountActionOptions struct {
 }
 
 type remoteAccountClient struct {
-	ctx     context.Context
-	baseURL string
-	headers map[string]string
-	client  *http.Client
+	ctx            context.Context
+	baseURL        string
+	headers        map[string]string
+	client         *http.Client
+	service        *AccountService
+	accessToken    string
+	sessionCookies map[string]string
 }
 
 func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {
@@ -1472,10 +1476,12 @@ func (s *AccountService) newRemoteAccountClient(ctx context.Context, accessToken
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
-	if err := s.bootstrapRemote(ctx, client, baseURL, accessToken); err != nil {
+	sessionCookies := s.accountSessionCookies(accessToken)
+	updatedCookies, err := s.bootstrapRemote(ctx, client, baseURL, accessToken, sessionCookies)
+	if err != nil {
 		return nil, err
 	}
-	return &remoteAccountClient{ctx: ctx, baseURL: baseURL, headers: s.remoteHeaders(accessToken), client: client}, nil
+	return &remoteAccountClient{ctx: ctx, baseURL: baseURL, headers: s.remoteHeaders(accessToken), client: client, service: s, accessToken: accessToken, sessionCookies: updatedCookies}, nil
 }
 
 func (c *remoteAccountClient) doJSON(method, urlPath string, body any, extra map[string]string) (map[string]any, error) {
@@ -1493,9 +1499,13 @@ func (c *remoteAccountClient) doJSON(method, urlPath string, body any, extra map
 	for key, value := range extra {
 		req.Header.Set(key, value)
 	}
+	addSessionCookiesToRequest(req, c.sessionCookies)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if c.service != nil {
+		c.sessionCookies = c.service.rememberSessionCookies(c.accessToken, c.sessionCookies, resp)
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(resp.Body)
@@ -1563,21 +1573,84 @@ func (c *remoteAccountClient) deleteFiles(limit int) (map[string]any, error) {
 	return map[string]any{"files_seen": seen, "files_deleted": deleted}, nil
 }
 
-func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Client, baseURL, accessToken string) error {
+func (s *AccountService) accountSessionCookies(accessToken string) map[string]string {
+	cookies := map[string]string{}
+	if accessToken == "" {
+		return cookies
+	}
+	account := s.GetAccount(accessToken)
+	for name, value := range SessionCookieStringMap(account["session_cookies"]) {
+		cookies[name] = value
+	}
+	return cookies
+}
+
+func addSessionCookiesToRequest(req *http.Request, cookies map[string]string) {
+	if req == nil || len(cookies) == 0 {
+		return
+	}
+	names := make([]string, 0, len(cookies))
+	for name := range cookies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if value := cookies[name]; value != "" {
+			req.AddCookie(&http.Cookie{Name: name, Value: value})
+		}
+	}
+}
+
+func (s *AccountService) rememberSessionCookies(accessToken string, current map[string]string, resp *http.Response) map[string]string {
+	if resp == nil || accessToken == "" || len(resp.Cookies()) == 0 {
+		return current
+	}
+	merged := map[string]string{}
+	for name, value := range current {
+		merged[name] = value
+	}
+	changed := false
+	for _, cookie := range resp.Cookies() {
+		allowed := SessionCookieStringMap(map[string]string{cookie.Name: firstNonEmpty(cookie.Value, "x")})
+		if len(allowed) == 0 {
+			continue
+		}
+		if cookie.MaxAge < 0 || cookie.Value == "" {
+			if _, ok := merged[cookie.Name]; ok {
+				delete(merged, cookie.Name)
+				changed = true
+			}
+			continue
+		}
+		if merged[cookie.Name] != cookie.Value {
+			merged[cookie.Name] = cookie.Value
+			changed = true
+		}
+	}
+	if !changed {
+		return current
+	}
+	s.UpdateAccount(accessToken, map[string]any{"session_cookies": merged})
+	return merged
+}
+
+func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/", nil)
 	for key, value := range s.remoteBootstrapHeaders(accessToken) {
 		req.Header.Set(key, value)
 	}
+	addSessionCookiesToRequest(req, sessionCookies)
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return sessionCookies, err
 	}
+	sessionCookies = s.rememberSessionCookies(accessToken, sessionCookies, resp)
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return refreshHTTPError("bootstrap", resp.StatusCode, data)
+		return sessionCookies, refreshHTTPError("bootstrap", resp.StatusCode, data)
 	}
-	return nil
+	return sessionCookies, nil
 }
 
 func (s *AccountService) StartLimitedWatcher(ctx context.Context, interval time.Duration) {

@@ -15,7 +15,7 @@ const (
 	ModeFile   = "file"
 )
 
-const attachmentNote = "完整对话上下文已作为附件上传。请阅读 history.txt，并优先执行其中的 Current User Task。"
+const attachmentNote = "完整对话上下文已作为附件上传。请将 history.txt 作为历史参考，并优先执行下方 Current User Task。"
 
 type Options struct {
 	InlineMaxChars    int
@@ -49,7 +49,7 @@ func PlanContext(messages []map[string]any, tools any, choice any, options Optio
 	options = normalizeOptions(options)
 	estimated := estimateChars(messages, tools)
 	historyEstimated := estimateChars(messages, nil)
-	latest, latestIndex := latestUserMessage(messages)
+	latest, _ := latestUserMessage(messages)
 	toolsText := toolsText(tools, choice)
 	historyNeedsFile := historyEstimated > options.InlineMaxChars || historyEstimated > options.ForceFileMaxChars
 	needsFile := historyNeedsFile || toolsText != ""
@@ -59,13 +59,7 @@ func PlanContext(messages []map[string]any, tools any, choice any, options Optio
 
 	history := ""
 	if historyNeedsFile {
-		history = historyText(messages, latestIndex)
-		if latest != "" {
-			if history != "" {
-				history += "\n\n"
-			}
-			history += "## Current User Task\n" + latest + "\n"
-		}
+		history = historyText(messages, -1)
 	}
 
 	files := make([]File, 0, 2)
@@ -83,7 +77,7 @@ func PlanContext(messages []map[string]any, tools any, choice any, options Optio
 	summary := strings.TrimSpace(history)
 	return Plan{
 		Mode:             mode,
-		InlineMessages:   buildInlineMessages(mode, latest, strings.TrimSpace(history) != "", toolsText),
+		InlineMessages:   buildInlineMessages(latest, strings.TrimSpace(history) != "", toolsText),
 		Files:            files,
 		LatestUserText:   latest,
 		SummaryText:      summary,
@@ -138,7 +132,7 @@ func estimateChars(messages []map[string]any, tools any) int {
 func latestUserMessage(messages []map[string]any) (string, int) {
 	for index := len(messages) - 1; index >= 0; index-- {
 		if strings.EqualFold(util.Clean(messages[index]["role"]), "user") {
-			text := strings.TrimSpace(messageText(messages[index]["content"]))
+			text := strings.TrimSpace(userTaskText(messages[index]["content"]))
 			if text != "" {
 				return text, index
 			}
@@ -147,23 +141,23 @@ func latestUserMessage(messages []map[string]any) (string, int) {
 	return "", -1
 }
 
-func historyText(messages []map[string]any, latestIndex int) string {
+func historyText(messages []map[string]any, skipIndex int) string {
 	var parts []string
 	for index, message := range messages {
-		if index == latestIndex {
-			continue
-		}
-		text := strings.TrimSpace(messageText(message["content"]))
-		if text == "" {
+		if index == skipIndex {
 			continue
 		}
 		role := firstNonEmpty(util.Clean(message["role"]), "unknown")
+		text := strings.TrimSpace(messageTextForRole(role, message["content"]))
+		if text == "" {
+			continue
+		}
 		parts = append(parts, fmt.Sprintf("## Message %d [%s]\n%s\n", index+1, role, text))
 	}
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-func buildInlineMessages(mode, latest string, hasHistoryFile bool, toolsText string) []map[string]any {
+func buildInlineMessages(latest string, hasHistoryFile bool, toolsText string) []map[string]any {
 	var lines []string
 	if hasHistoryFile {
 		lines = append(lines, attachmentNote)
@@ -171,7 +165,7 @@ func buildInlineMessages(mode, latest string, hasHistoryFile bool, toolsText str
 	if strings.TrimSpace(latest) != "" {
 		lines = append(lines, "Current User Task:\n"+latest)
 	} else if hasHistoryFile {
-		lines = append(lines, "当前用户任务在 history.txt 的 Current User Task 小节中。")
+		lines = append(lines, "当前用户任务已包含在 history.txt 的最后一个 user 消息中。")
 	}
 	if strings.TrimSpace(toolsText) != "" {
 		lines = append(lines, "可用工具说明也在 tools.txt；必须优先遵守以下桥接工具规则，不要把 history.txt 或 tools.txt 当作本地路径读取。\n\n"+strings.TrimSpace(toolsText))
@@ -231,6 +225,168 @@ func messageText(content any) string {
 		return strings.TrimSpace(string(data))
 	}
 	return util.Clean(content)
+}
+
+func messageTextForRole(role string, content any) string {
+	if strings.EqualFold(role, "user") {
+		return userTaskText(content)
+	}
+	return messageText(content)
+}
+
+func userTaskText(content any) string {
+	if text, ok := content.(string); ok {
+		return sanitizeUserText(text)
+	}
+	parts, ok := content.([]any)
+	if !ok {
+		return sanitizeUserText(messageText(content))
+	}
+	chunks := make([]string, 0, len(parts))
+	for _, part := range parts {
+		item, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch util.Clean(item["type"]) {
+		case "text", "input_text", "output_text":
+			if text := sanitizeUserText(util.Clean(item["text"])); text != "" {
+				chunks = append(chunks, text)
+			}
+		case "tool_result":
+			if text := strings.TrimSpace(util.Clean(item["content"])); text != "" {
+				chunks = append(chunks, text)
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(chunks, "\n"))
+}
+
+func sanitizeUserText(text string) string {
+	cleaned := strings.TrimSpace(text)
+	if cleaned == "" {
+		return ""
+	}
+	if strings.HasPrefix(cleaned, "System:") {
+		return ""
+	}
+	if startsWithAny(cleaned, "## Memory Recall", "## Compiled Wiki") {
+		parts := splitParagraphs(cleaned)
+		for len(parts) > 0 && startsWithAny(parts[0], "## Memory Recall", "## Compiled Wiki") {
+			parts = parts[1:]
+		}
+		cleaned = strings.TrimSpace(strings.Join(parts, "\n\n"))
+		if cleaned == "" {
+			return ""
+		}
+	}
+	if containsAny(cleaned, "A new session was started via /new or /reset.", "If runtime-provided startup context is included for this first turn") {
+		return ""
+	}
+	if startsWithAny(cleaned, "Sender (untrusted metadata):", "Conversation info (untrusted metadata):", "System (untrusted):") {
+		cleaned = stripUntrustedMetadata(cleaned)
+		if cleaned == "" {
+			return ""
+		}
+	}
+	lowered := strings.ToLower(cleaned)
+	if strings.Contains(lowered, "the following skills provide specialized instructions for specific tasks.") && strings.Contains(lowered, "use the read tool to load a skill's file when the task matches its name.") && strings.Contains(lowered, "<available_skills>") {
+		if end := strings.Index(lowered, "</available_skills>"); end >= 0 {
+			cleaned = strings.TrimSpace(cleaned[end+len("</available_skills>"):])
+		}
+	}
+	if isAgentRuntimeProse(cleaned) {
+		cleaned = stripAgentRuntimeProse(cleaned)
+	}
+	return strings.TrimSpace(cleaned)
+}
+
+func stripUntrustedMetadata(text string) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	kept := make([]string, 0, len(lines))
+	for index := 0; index < len(lines); {
+		line := strings.TrimSpace(lines[index])
+		if startsWithAny(line, "Sender (untrusted metadata):", "Conversation info (untrusted metadata):", "System (untrusted):") {
+			index++
+			for index < len(lines) && strings.TrimSpace(lines[index]) == "" {
+				index++
+			}
+			if index < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index]), "```") {
+				index++
+				for index < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[index]), "```") {
+					index++
+				}
+				if index < len(lines) {
+					index++
+				}
+			}
+			continue
+		}
+		kept = append(kept, lines[index])
+		index++
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+func isAgentRuntimeProse(text string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(lowered, "you are a personal assistant running inside") || strings.Contains(lowered, "tool availability (filtered by policy):") || strings.Contains(lowered, "## tooling") || strings.Contains(lowered, "the opencode system prompt may describe native or built-in tool syntax.")
+}
+
+func stripAgentRuntimeProse(text string) string {
+	cleaned := strings.TrimSpace(text)
+	lowered := strings.ToLower(cleaned)
+	if index := strings.Index(lowered, "tool availability (filtered by policy):"); index >= 0 {
+		if end := strings.Index(cleaned[index:], "\n\n"); end >= 0 {
+			cleaned = strings.TrimSpace(cleaned[index+end+2:])
+		}
+	}
+	lowered = strings.ToLower(cleaned)
+	if strings.HasPrefix(lowered, "you are a personal assistant running inside ") {
+		if end := strings.Index(cleaned, "\n\n"); end >= 0 {
+			cleaned = strings.TrimSpace(cleaned[end+2:])
+		} else {
+			cleaned = ""
+		}
+	}
+	return cleaned
+}
+
+func splitParagraphs(text string) []string {
+	var parts []string
+	var current []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			if len(current) > 0 {
+				parts = append(parts, strings.TrimSpace(strings.Join(current, "\n")))
+				current = nil
+			}
+			continue
+		}
+		current = append(current, line)
+	}
+	if len(current) > 0 {
+		parts = append(parts, strings.TrimSpace(strings.Join(current, "\n")))
+	}
+	return parts
+}
+
+func startsWithAny(text string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAny(text string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneMessages(messages []map[string]any) []map[string]any {

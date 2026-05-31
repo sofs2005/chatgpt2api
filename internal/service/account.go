@@ -52,27 +52,29 @@ func (l AccountLease) Release() {
 }
 
 type AccountService struct {
-	mu                        sync.Mutex
-	storage                   storage.Backend
-	config                    AccountConfig
-	proxy                     *ProxyService
-	logs                      *LogService
-	index                     int
-	items                     []map[string]any
-	imageReservations         map[string]int
-	imageReservationAliases   map[string]string
-	imageReservationAliasRefs map[string]int
-	busyTokens                map[string]int
-	busyTokenAliases          map[string]string
-	busyTokenAliasRefs        map[string]int
-	remoteBaseURL             string
-	browserHTTPClient         func(profile string, timeout time.Duration) *http.Client
-	textRequestCount          map[string]int
-	stickyTextToken           string
-	stickyImageToken          string
-	textCooldownUntil         time.Time
-	random                    *rand.Rand
-	refresher                 *SessionRefresher
+	mu                                sync.Mutex
+	storage                           storage.Backend
+	config                            AccountConfig
+	proxy                             *ProxyService
+	logs                              *LogService
+	index                             int
+	items                             []map[string]any
+	imageReservations                 map[string]int
+	imageReservationAliases           map[string]string
+	imageReservationAliasRefs         map[string]int
+	busyTokens                        map[string]int
+	busyTokenAliases                  map[string]string
+	busyTokenAliasRefs                map[string]int
+	remoteBaseURL                     string
+	browserHTTPClient                 func(profile string, timeout time.Duration) *http.Client
+	textRequestCount                  map[string]int
+	freeTextCooldownUntil             map[string]time.Time
+	freeTextCooldownOverrideToken     string
+	freeTextCooldownOverrideRemaining int
+	stickyTextToken                   string
+	stickyImageToken                  string
+	random                            *rand.Rand
+	refresher                         *SessionRefresher
 }
 
 const (
@@ -102,6 +104,7 @@ func NewAccountService(backend storage.Backend, config AccountConfig, proxy *Pro
 		remoteBaseURL:             "https://chatgpt.com",
 		browserHTTPClient:         browserHTTPClient,
 		textRequestCount:          map[string]int{},
+		freeTextCooldownUntil:     map[string]time.Time{},
 		random:                    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	// Initialize SessionRefresher with the uTLS client for /api/auth/session.
@@ -402,6 +405,11 @@ func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 			s.clearImageReservationLocked(token)
 			s.clearBusyTokenLocked(token)
 			delete(s.textRequestCount, token)
+			delete(s.freeTextCooldownUntil, token)
+			if s.freeTextCooldownOverrideToken == token {
+				s.freeTextCooldownOverrideToken = ""
+				s.freeTextCooldownOverrideRemaining = 0
+			}
 			s.clearStickyLocked(token, true, true)
 			continue
 		}
@@ -558,6 +566,13 @@ func (s *AccountService) UpdateAccountFromSessionImport(oldAccessToken, newAcces
 			s.textRequestCount[newAccessToken] += count
 			delete(s.textRequestCount, oldAccessToken)
 		}
+		if until, ok := s.freeTextCooldownUntil[oldAccessToken]; ok {
+			s.freeTextCooldownUntil[newAccessToken] = until
+			delete(s.freeTextCooldownUntil, oldAccessToken)
+		}
+		if s.freeTextCooldownOverrideToken == oldAccessToken {
+			s.freeTextCooldownOverrideToken = newAccessToken
+		}
 		if s.stickyTextToken == oldAccessToken {
 			s.stickyTextToken = newAccessToken
 		}
@@ -622,13 +637,14 @@ func (s *AccountService) AcquireTextAccessToken(exhaustedTokens map[string]struc
 	paid := s.textCandidatesByPaidLocked(true, exhaustedTokens)
 	free := s.textCandidatesByPaidLocked(false, exhaustedTokens)
 	free = s.applyFreeTextCooldownLocked(free)
+	freeTokens := tokenSetFromCandidates(free)
 
 	if normalizeAccountScheduleMode(s.config.TextAccountScheduleMode()) == "fill_first" {
 		if len(paid) > 0 {
-			return s.selectTextLeaseLocked(paid)
+			return s.selectTextLeaseLocked(paid, nil)
 		}
 		if len(free) > 0 {
-			return s.selectTextLeaseLocked(free)
+			return s.selectTextLeaseLocked(free, freeTokens)
 		}
 		return AccountLease{}, fmt.Errorf("no available text account")
 	}
@@ -636,7 +652,7 @@ func (s *AccountService) AcquireTextAccessToken(exhaustedTokens map[string]struc
 	if len(candidates) == 0 {
 		return AccountLease{}, fmt.Errorf("no available text account")
 	}
-	return s.selectTextLeaseLocked(candidates)
+	return s.selectTextLeaseLocked(candidates, freeTokens)
 }
 
 func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newToken string, shouldRetry bool) {
@@ -785,36 +801,85 @@ func isAccountAvailableForScheduling(account map[string]any) bool {
 
 const maxFreeTextRequestsPerAccount = 10
 
+const freeTextCooldownDuration = 5 * time.Hour
+
 func (s *AccountService) applyFreeTextCooldownLocked(free []map[string]any) []map[string]any {
 	if len(free) == 0 {
 		return free
 	}
 	now := time.Now()
-	if s.textCooldownUntil.IsZero() || now.After(s.textCooldownUntil) {
-		s.resetTextCountsLocked(free)
-		s.textCooldownUntil = now.Add(5 * time.Hour)
+	s.clearExpiredFreeTextCooldownsLocked(now)
+	if token := s.freeTextCooldownOverrideToken; token != "" && s.freeTextCooldownOverrideRemaining > 0 {
+		if s.tokenInAccounts(token, free) {
+			return s.filterAccountsByTokenLocked(free, token)
+		}
+		s.clearFreeTextCooldownOverrideLocked()
 	}
-	out := free[:0:0]
+
+	available := free[:0:0]
+	cooling := free[:0:0]
 	for _, item := range free {
 		token := util.Clean(item["access_token"])
 		if token == "" {
 			continue
 		}
-		if s.textRequestCount[token] >= maxFreeTextRequestsPerAccount {
+		if until, ok := s.freeTextCooldownUntil[token]; ok && until.After(now) {
+			cooling = append(cooling, item)
 			continue
 		}
-		out = append(out, item)
+		available = append(available, item)
+	}
+	if len(available) > 0 {
+		return available
+	}
+	if len(cooling) == 0 {
+		return nil
+	}
+	token := s.selectRandomTokenLocked(cooling)
+	if token == "" {
+		return nil
+	}
+	s.freeTextCooldownOverrideToken = token
+	s.freeTextCooldownOverrideRemaining = maxFreeTextRequestsPerAccount
+	return s.filterAccountsByTokenLocked(cooling, token)
+}
+
+func (s *AccountService) clearExpiredFreeTextCooldownsLocked(now time.Time) {
+	for token, until := range s.freeTextCooldownUntil {
+		if until.After(now) {
+			continue
+		}
+		delete(s.freeTextCooldownUntil, token)
+		s.textRequestCount[token] = 0
+	}
+}
+
+func (s *AccountService) clearFreeTextCooldownOverrideLocked() {
+	s.freeTextCooldownOverrideToken = ""
+	s.freeTextCooldownOverrideRemaining = 0
+}
+
+func (s *AccountService) filterAccountsByTokenLocked(pool []map[string]any, token string) []map[string]any {
+	out := pool[:0:0]
+	for _, item := range pool {
+		if util.Clean(item["access_token"]) == token {
+			out = append(out, item)
+		}
 	}
 	return out
 }
 
-func (s *AccountService) resetTextCountsLocked(pool []map[string]any) {
-	for _, item := range pool {
-		s.textRequestCount[util.Clean(item["access_token"])] = 0
+func (s *AccountService) consumeFreeTextCooldownOverrideLocked(token string) {
+	if s.freeTextCooldownOverrideToken != token || s.freeTextCooldownOverrideRemaining <= 0 {
+		return
+	}
+	s.freeTextCooldownOverrideRemaining--
+	if s.freeTextCooldownOverrideRemaining == 0 {
+		s.clearFreeTextCooldownOverrideLocked()
 	}
 }
 
-func (s *AccountService) selectTextLeaseLocked(candidates []map[string]any) (AccountLease, error) {
+func (s *AccountService) selectTextLeaseLocked(candidates []map[string]any, freeTokens map[string]struct{}) (AccountLease, error) {
 	var token string
 	if normalizeAccountScheduleMode(s.config.TextAccountScheduleMode()) == "fill_first" {
 		token = s.selectStickyTextTokenLocked(candidates)
@@ -825,7 +890,30 @@ func (s *AccountService) selectTextLeaseLocked(candidates []map[string]any) (Acc
 		return AccountLease{}, fmt.Errorf("no available text account")
 	}
 	s.textRequestCount[token]++
+	if _, ok := freeTokens[token]; ok {
+		now := time.Now()
+		if until, exists := s.freeTextCooldownUntil[token]; exists && until.After(now) {
+			s.consumeFreeTextCooldownOverrideLocked(token)
+		} else if s.textRequestCount[token] >= maxFreeTextRequestsPerAccount {
+			s.freeTextCooldownUntil[token] = now.Add(freeTextCooldownDuration)
+		}
+	}
 	return s.occupyTokenLocked(token), nil
+}
+
+func tokenSetFromCandidates(candidates []map[string]any) map[string]struct{} {
+	if len(candidates) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(candidates))
+	for _, item := range candidates {
+		token := util.Clean(item["access_token"])
+		if token == "" {
+			continue
+		}
+		set[token] = struct{}{}
+	}
+	return set
 }
 
 func (s *AccountService) selectStickyTextTokenLocked(candidates []map[string]any) string {
@@ -1331,6 +1419,13 @@ func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, n
 		if count, ok := s.textRequestCount[accessToken]; ok {
 			s.textRequestCount[newAccessToken] += count
 			delete(s.textRequestCount, accessToken)
+		}
+		if until, ok := s.freeTextCooldownUntil[accessToken]; ok {
+			s.freeTextCooldownUntil[newAccessToken] = until
+			delete(s.freeTextCooldownUntil, accessToken)
+		}
+		if s.freeTextCooldownOverrideToken == accessToken {
+			s.freeTextCooldownOverrideToken = newAccessToken
 		}
 		if s.stickyTextToken == accessToken {
 			s.stickyTextToken = newAccessToken

@@ -663,7 +663,11 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
     const CookieIcon = meta.icon;
 
     return (
-      <Badge variant={meta.badge} className="inline-flex items-center gap-1 rounded-md px-2 py-1" title={title}>
+      <Badge
+        variant={meta.badge}
+        className="inline-flex items-center gap-1 rounded-md px-2 py-1"
+        title={title}
+      >
         <CookieIcon className="size-3.5" />
         {meta.label}
       </Badge>

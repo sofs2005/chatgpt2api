@@ -1045,26 +1045,67 @@ func TestGetAvailableAccessTokenUsesCachedAccountOnConnectionRefreshFailure(t *t
 	}
 }
 
-func TestGetTextAccessTokenEnforcesFreeCooldown(t *testing.T) {
-	accounts := newTestAccountService(t)
-	accounts.AddAccounts([]string{"free-token"})
-	accounts.UpdateAccount("free-token", map[string]any{"status": "正常", "type": "Free"})
+func TestGetTextAccessTokenUsesCoolingBurstWithoutResettingCooldown(t *testing.T) {
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{textMode: "fill_first"})
+	accounts.AddAccounts([]string{"free-a", "free-b"})
+	accounts.UpdateAccount("free-a", map[string]any{"status": "正常", "type": "Free"})
+	accounts.UpdateAccount("free-b", map[string]any{"status": "正常", "type": "Free"})
 
+	firstToken := ""
 	for i := 0; i < 10; i++ {
-		if token := accounts.GetTextAccessToken(); token != "free-token" {
-			t.Fatalf("GetTextAccessToken() call %d = %q, want free-token", i+1, token)
+		token := accounts.GetTextAccessToken()
+		if token == "" {
+			t.Fatalf("GetTextAccessToken() call %d = empty, want a free token", i+1)
+		}
+		if i == 0 {
+			firstToken = token
+		}
+		if token != firstToken {
+			t.Fatalf("GetTextAccessToken() call %d = %q, want %q", i+1, token, firstToken)
 		}
 	}
-	if token := accounts.GetTextAccessToken(); token != "" {
-		t.Fatalf("GetTextAccessToken() after free cooldown exhaustion = %q, want empty token", token)
-	}
-	if token, ok := accounts.GetTextAccessTokenWithRetry(nil); ok || token != "" {
-		t.Fatalf("GetTextAccessTokenWithRetry() after free cooldown exhaustion = %q %v, want no token", token, ok)
+
+	secondToken := ""
+	for i := 0; i < 10; i++ {
+		token := accounts.GetTextAccessToken()
+		if token == "" {
+			t.Fatalf("GetTextAccessToken() call %d = empty, want a free token", i+11)
+		}
+		if i == 0 {
+			secondToken = token
+			if secondToken == firstToken {
+				t.Fatalf("GetTextAccessToken() after first cooldown = %q, want a different token", token)
+			}
+		}
+		if token != secondToken {
+			t.Fatalf("GetTextAccessToken() call %d = %q, want %q", i+11, token, secondToken)
+		}
 	}
 
-	accounts.textCooldownUntil = time.Now().Add(-time.Second)
-	if token := accounts.GetTextAccessToken(); token != "free-token" {
-		t.Fatalf("GetTextAccessToken() after cooldown expiry = %q, want free-token", token)
+	burstToken := accounts.GetTextAccessToken()
+	if burstToken != firstToken && burstToken != secondToken {
+		t.Fatalf("GetTextAccessToken() after both cooling = %q, want %q or %q", burstToken, firstToken, secondToken)
+	}
+	burstUntil := accounts.freeTextCooldownUntil[burstToken]
+	if burstUntil.IsZero() {
+		t.Fatalf("cooldown until for %q was not recorded", burstToken)
+	}
+	otherToken := firstToken
+	if burstToken == firstToken {
+		otherToken = secondToken
+	}
+	for i := 1; i < 10; i++ {
+		if token := accounts.GetTextAccessToken(); token != burstToken {
+			t.Fatalf("GetTextAccessToken() burst call %d = %q, want %q", i+1, token, burstToken)
+		}
+	}
+	if got := accounts.freeTextCooldownUntil[burstToken]; !got.Equal(burstUntil) {
+		t.Fatalf("cooldown until for %q changed from %v to %v", burstToken, burstUntil, got)
+	}
+
+	accounts.freeTextCooldownUntil[otherToken] = time.Now().Add(-time.Second)
+	if token := accounts.GetTextAccessToken(); token != otherToken {
+		t.Fatalf("GetTextAccessToken() after burst expiry = %q, want %q", token, otherToken)
 	}
 }
 

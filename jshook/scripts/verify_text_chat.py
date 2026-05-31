@@ -16,21 +16,24 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from image_gen_full_flow import (
     ACCESS_TOKEN, DEVICE_ID, SESSION_ID, CLIENT_VERSION, CLIENT_BUILD_NUMBER,
-    FINGERPRINT, new_uuid, ensure_ok, build_proof_token,
+    new_uuid, ensure_ok, build_proof_token,
     build_legacy_requirements_token, parse_pow_resources, iter_sse_payloads,
 )
-from curl_cffi import requests
+from upstream_context import build_upstream_session
 
 BASE_URL = "https://chatgpt.com"
 POW_SCRIPT_DEFAULT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 
 def test_text_chat_endpoint():
     """测试 /backend-api/conversation (文本聊天) 端点"""
-    fp = FINGERPRINT
-    ua = fp["user-agent"]
-    impersonate = fp["impersonate"]
+    session = build_upstream_session()
+    headers = session.headers
+    ua = headers["User-Agent"]
+    sec_ch_ua = headers["Sec-Ch-Ua"]
+    sec_ch_ua_mobile = headers["Sec-Ch-Ua-Mobile"]
+    sec_ch_ua_platform = headers["Sec-Ch-Ua-Platform"]
+    impersonate = session.impersonate
 
-    session = requests.Session(impersonate=impersonate, verify=True)
     session.headers.update({
         "User-Agent": ua,
         "Origin": BASE_URL,
@@ -38,9 +41,9 @@ def test_text_chat_endpoint():
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
-        "Sec-Ch-Ua": fp["sec-ch-ua"],
-        "Sec-Ch-Ua-Mobile": fp["sec-ch-ua-mobile"],
-        "Sec-Ch-Ua-Platform": fp["sec-ch-ua-platform"],
+        "Sec-Ch-Ua": sec_ch_ua,
+        "Sec-Ch-Ua-Mobile": sec_ch_ua_mobile,
+        "Sec-Ch-Ua-Platform": sec_ch_ua_platform,
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",

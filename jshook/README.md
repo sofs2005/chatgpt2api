@@ -57,8 +57,11 @@
 | [scripts/image_gen_full_flow.py](scripts/image_gen_full_flow.py) | 完整认证生图链路验证：Bootstrap -> Chat Requirements -> PoW -> Prepare -> Generate SSE -> Download | `responses/image-gen-sse-response.json`、下载图片 |
 | [scripts/verify_text_chat.py](scripts/verify_text_chat.py) | 验证 `/backend-api/conversation` 文本聊天端点，并与生图端点对比 | `responses/text-chat-sse-response.json` |
 | [scripts/curl_cffi_request.py](scripts/curl_cffi_request.py) | 早期 curl-cffi 请求实验脚本，用于验证 TLS/浏览器指纹和基础请求体 | 调试输出或临时响应 |
+| [scripts/upstream_context.py](scripts/upstream_context.py) | 共享的上游指纹/cookie 会话构建器，供所有 probe 复用 | `requests.Session` |
 
 脚本通常需要本地有效认证状态、网络访问和 `curl-cffi` 等 Python 依赖。不要把真实 OAuth token、cookie、账号信息、代理凭据或可复用下载 URL 写入脚本或响应样本。
+
+运行上游探针前，请先导出当前项目使用的指纹和 cookie 上下文：`CHATGPT2API_UPSTREAM_FINGERPRINT_JSON` 与 `CHATGPT2API_UPSTREAM_COOKIES_JSON`。`scripts/upstream_context.py` 会把它们注入到所有上游请求里，保证验证流和当前项目实际使用的浏览器身份保持一致。
 
 ## 响应样本索引
 

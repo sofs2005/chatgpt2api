@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import pybase64
-from curl_cffi import requests
+from upstream_context import build_upstream_session
 # PIL only needed for image upload; text-only prompts don't need it
 
 # ============ 配置 ============
@@ -50,13 +50,6 @@ def ensure_ok(response, context: str) -> None:
 
 
 # ============ 指纹/设备信息 ============
-FINGERPRINT = {
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-    "impersonate": "edge101",
-    "sec-ch-ua": '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-}
 DEVICE_ID = new_uuid()
 SESSION_ID = new_uuid()
 
@@ -348,12 +341,15 @@ def iter_sse_payloads(response) -> Iterator[str]:
 
 # ============ 主流程 ============
 def main():
-    fp = FINGERPRINT
-    ua = fp["user-agent"]
-    impersonate = fp["impersonate"]
+    session = build_upstream_session()
+    headers = session.headers
+    ua = headers["User-Agent"]
+    sec_ch_ua = headers["Sec-Ch-Ua"]
+    sec_ch_ua_mobile = headers["Sec-Ch-Ua-Mobile"]
+    sec_ch_ua_platform = headers["Sec-Ch-Ua-Platform"]
+    impersonate = session.impersonate
 
     # 构建 Session
-    session = requests.Session(impersonate=impersonate, verify=True)
     session.headers.update({
         "User-Agent": ua,
         "Origin": BASE_URL,
@@ -362,14 +358,14 @@ def main():
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         "Priority": "u=1, i",
-        "Sec-Ch-Ua": fp["sec-ch-ua"],
+        "Sec-Ch-Ua": sec_ch_ua,
         "Sec-Ch-Ua-Arch": '"x86"',
         "Sec-Ch-Ua-Bitness": '"64"',
         "Sec-Ch-Ua-Full-Version": '"143.0.3650.96"',
         "Sec-Ch-Ua-Full-Version-List": '"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"',
-        "Sec-Ch-Ua-Mobile": fp["sec-ch-ua-mobile"],
+        "Sec-Ch-Ua-Mobile": sec_ch_ua_mobile,
         "Sec-Ch-Ua-Model": '""',
-        "Sec-Ch-Ua-Platform": fp["sec-ch-ua-platform"],
+        "Sec-Ch-Ua-Platform": sec_ch_ua_platform,
         "Sec-Ch-Ua-Platform-Version": '"19.0.0"',
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
@@ -397,9 +393,9 @@ def main():
         "User-Agent": ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Sec-Ch-Ua": fp["sec-ch-ua"],
-        "Sec-Ch-Ua-Mobile": fp["sec-ch-ua-mobile"],
-        "Sec-Ch-Ua-Platform": fp["sec-ch-ua-platform"],
+        "Sec-Ch-Ua": sec_ch_ua,
+        "Sec-Ch-Ua-Mobile": sec_ch_ua_mobile,
+        "Sec-Ch-Ua-Platform": sec_ch_ua_platform,
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",

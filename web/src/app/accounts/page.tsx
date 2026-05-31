@@ -648,6 +648,28 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
     );
   };
 
+  const renderCookieBadge = (account: Account) => {
+    const status = account.cookieStatus ?? "无";
+    const missingCookies = Array.isArray(account.missingCookies)
+      ? account.missingCookies.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const meta =
+      status === "完整"
+        ? { icon: CheckCircle2, label: "Cookie 完整", badge: "success" as const }
+        : status === "部分"
+          ? { icon: CircleAlert, label: "Cookie 部分", badge: "warning" as const }
+          : { icon: CircleOff, label: "Cookie 无", badge: "secondary" as const };
+    const title = missingCookies.length > 0 ? `缺少：${missingCookies.join("、")}` : "已包含完整关键 Cookie";
+    const CookieIcon = meta.icon;
+
+    return (
+      <Badge variant={meta.badge} className="inline-flex items-center gap-1 rounded-md px-2 py-1" title={title}>
+        <CookieIcon className="size-3.5" />
+        {meta.label}
+      </Badge>
+    );
+  };
+
   const renderRestoreInfo = (account: Account) => {
     const restore = formatRestoreAt(account.restoreAt);
     return (
@@ -1316,7 +1338,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                         </TableHead>
                         <TableHead className="w-16 text-center">序号</TableHead>
                         <TableHead className="w-[32%]">账号</TableHead>
-                        <TableHead className="w-48">状态 / 类型</TableHead>
+                        <TableHead className="w-[19rem]">状态 / 类型 / Cookie</TableHead>
                         <TableHead className="w-32">额度</TableHead>
                         <TableHead className="w-44">恢复时间</TableHead>
                         <TableHead className="w-36">调用</TableHead>
@@ -1350,6 +1372,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                               <Badge variant="secondary" className="rounded-md px-2 py-1">
                                 {account.type}
                               </Badge>
+                              {renderCookieBadge(account)}
                             </div>
                           </TableCell>
                           <TableCell>
@@ -1403,6 +1426,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                               <Badge variant="secondary" className="rounded-md px-2 py-1">
                                 {account.type}
                               </Badge>
+                              {renderCookieBadge(account)}
                               <Badge variant="info" className="rounded-md px-2 py-1">
                                 额度 {formatQuota(account)}
                               </Badge>

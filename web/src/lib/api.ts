@@ -151,6 +151,8 @@ export type Account = {
   enabled: boolean;
   quota: number;
   imageQuotaUnknown?: boolean;
+  cookieStatus?: "完整" | "部分" | "无";
+  missingCookies?: string[];
   email?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{

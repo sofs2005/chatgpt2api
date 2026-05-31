@@ -321,6 +321,75 @@ func TestRefreshAccountsReturnsEmptyErrorsArray(t *testing.T) {
 	}
 }
 
+func TestListAccountsIncludesCookieCompleteness(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-complete", "token-partial", "token-empty"})
+	accounts.UpdateAccount("token-complete", map[string]any{
+		"session_cookies": map[string]string{
+			"cf_clearance": "cf-cookie",
+			"__cf_bm":      "bm-cookie",
+			"oai-did":      "did-cookie",
+			"oai-sc":       "sc-cookie",
+		},
+	})
+	accounts.UpdateAccount("token-partial", map[string]any{
+		"session_cookies": map[string]string{
+			"cf_clearance": "cf-cookie",
+			"oai-did":      "did-cookie",
+		},
+	})
+
+	items := accounts.ListAccounts()
+	if len(items) != 3 {
+		t.Fatalf("items len = %d, want 3", len(items))
+	}
+	indexed := map[string]map[string]any{}
+	for _, item := range items {
+		indexed[util.Clean(item["access_token"])] = item
+	}
+
+	complete := indexed["token-complete"]
+	if complete == nil {
+		t.Fatal("token-complete account missing")
+	}
+	if complete["cookieStatus"] != "完整" {
+		t.Fatalf("complete cookieStatus = %#v, want 完整", complete["cookieStatus"])
+	}
+	if missing, ok := complete["missingCookies"].([]string); !ok || len(missing) != 0 {
+		t.Fatalf("complete missingCookies = %#v, want empty []string", complete["missingCookies"])
+	}
+
+	partial := indexed["token-partial"]
+	if partial == nil {
+		t.Fatal("token-partial account missing")
+	}
+	if partial["cookieStatus"] != "部分" {
+		t.Fatalf("partial cookieStatus = %#v, want 部分", partial["cookieStatus"])
+	}
+	missing, ok := partial["missingCookies"].([]string)
+	if !ok {
+		t.Fatalf("partial missingCookies type = %T, want []string", partial["missingCookies"])
+	}
+	if !reflect.DeepEqual(missing, []string{"__cf_bm", "oai-sc"}) {
+		t.Fatalf("partial missingCookies = %#v, want [__cf_bm oai-sc]", missing)
+	}
+
+	empty := indexed["token-empty"]
+	if empty == nil {
+		t.Fatal("token-empty account missing")
+	}
+	if empty["cookieStatus"] != "无" {
+		t.Fatalf("empty cookieStatus = %#v, want 无", empty["cookieStatus"])
+	}
+	missing, ok = empty["missingCookies"].([]string)
+	if !ok {
+		t.Fatalf("empty missingCookies type = %T, want []string", empty["missingCookies"])
+	}
+	if !reflect.DeepEqual(missing, []string{"cf_clearance", "__cf_bm", "oai-did", "oai-sc"}) {
+		t.Fatalf("empty missingCookies = %#v, want all required cookies", missing)
+	}
+}
+
 func TestRefreshAccountsUsesStoredCookiesForQuotaRefresh(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

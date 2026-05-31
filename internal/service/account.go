@@ -2432,6 +2432,29 @@ func normalizeAccount(item map[string]any) map[string]any {
 	return normalized
 }
 
+var accountCookieCompletenessNames = []string{"cf_clearance", "__cf_bm", "oai-did", "oai-sc"}
+
+func accountCookieCompleteness(account map[string]any) (string, []string) {
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	missing := make([]string, 0, len(accountCookieCompletenessNames))
+	present := 0
+	for _, name := range accountCookieCompletenessNames {
+		if value := cookies[name]; value != "" {
+			present++
+			continue
+		}
+		missing = append(missing, name)
+	}
+	switch {
+	case present == 0:
+		return "无", missing
+	case len(missing) == 0:
+		return "完整", nil
+	default:
+		return "部分", missing
+	}
+}
+
 func publicAccounts(accounts []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(accounts))
 	for _, account := range accounts {
@@ -2439,6 +2462,7 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 		if token == "" {
 			continue
 		}
+		cookieStatus, missingCookies := accountCookieCompleteness(account)
 		out = append(out, map[string]any{
 			"id":                 accountIDFromToken(token),
 			"token_preview":      util.AnonymizeToken(token),
@@ -2448,6 +2472,8 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			"enabled":            accountEnabledValue(account),
 			"quota":              util.ValueOr(account["quota"], 0),
 			"imageQuotaUnknown":  util.ToBool(account["image_quota_unknown"]),
+			"cookieStatus":       cookieStatus,
+			"missingCookies":     missingCookies,
 			"email":              account["email"],
 			"user_id":            account["user_id"],
 			"chatgpt_account_id": account["chatgpt_account_id"],

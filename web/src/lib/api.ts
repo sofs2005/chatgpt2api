@@ -514,6 +514,37 @@ type CreationTaskListResponse = {
   missing_ids?: string[] | null;
 };
 
+export type EditableFileTaskKind = "ppt" | "psd";
+export type EditableFileTaskStatus = "queued" | "running" | "success" | "error";
+
+export type EditableFileTaskResult = {
+  conversation_id?: string;
+  primary_path?: string;
+  zip_path?: string;
+};
+
+export type EditableFileTask = {
+  id: string;
+  taskId: string;
+  status: EditableFileTaskStatus;
+  kind: EditableFileTaskKind;
+  created_at: string;
+  updated_at: string;
+  elapsed_seconds?: number;
+  result?: EditableFileTaskResult;
+  error?: string;
+};
+
+export type EditableFileTaskListResponse = {
+  items?: EditableFileTask[] | null;
+  missing_ids?: string[] | null;
+};
+
+export function buildEditableFileDownloadUrl(relativePath: string) {
+  const value = relativePath.trim();
+  return value ? `/files/${encodeURIComponent(value)}` : "";
+}
+
 export type LoginResponse = {
   ok: boolean;
   version: string;
@@ -1141,6 +1172,52 @@ export async function fetchCreationTasks(ids: string[]) {
     params.set("ids", ids.join(","));
   }
   const data = await httpRequest<CreationTaskListResponse>(`/api/creation-tasks${params.toString() ? `?${params.toString()}` : ""}`, {
+    headers: {
+      "Cache-Control": "no-cache",
+      Pragma: "no-cache",
+    },
+  });
+  return {
+    items: Array.isArray(data.items) ? data.items : [],
+    missing_ids: Array.isArray(data.missing_ids) ? data.missing_ids : [],
+  };
+}
+
+export async function createPptGenerationTask({ prompt, clientTaskId }: { prompt: string; clientTaskId: string }) {
+  return httpRequest<EditableFileTask>("/v1/ppt/generations", {
+    method: "POST",
+    body: {
+      prompt,
+      client_task_id: clientTaskId,
+    },
+  });
+}
+
+export async function createPsdGenerationTask({
+  prompt,
+  base64Images,
+  clientTaskId,
+}: {
+  prompt: string;
+  base64Images: string[];
+  clientTaskId: string;
+}) {
+  return httpRequest<EditableFileTask>("/v1/psd/generations", {
+    method: "POST",
+    body: {
+      prompt,
+      base64_images: base64Images,
+      client_task_id: clientTaskId,
+    },
+  });
+}
+
+export async function fetchEditableFileTasks(ids: string[]) {
+  const params = new URLSearchParams();
+  if (ids.length > 0) {
+    params.set("ids", ids.join(","));
+  }
+  const data = await httpRequest<EditableFileTaskListResponse>(`/v1/editable-file-tasks${params.toString() ? `?${params.toString()}` : ""}`, {
     headers: {
       "Cache-Control": "no-cache",
       Pragma: "no-cache",

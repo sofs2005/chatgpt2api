@@ -9,6 +9,7 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
 import { ChatTracePanel } from "./components/chat-panel";
+import { EditableFilePanel } from "./components/editable-file-panel";
 import { SearchProbePanel } from "./components/search-panel";
 import { SkillsReferencePanel } from "./components/skill-panel";
 import type { DebugTab, DebugTabItem } from "./components/types";
@@ -17,6 +18,7 @@ const tabs: DebugTabItem[] = [
   { id: "chat-trace", label: "Chat Trace" },
   { id: "search-probe", label: "Search Probe" },
   { id: "skills-reference", label: "Skills Reference" },
+  { id: "editable-files", label: "Editable Files" },
 ];
 
 function DebugPageContent() {
@@ -45,6 +47,7 @@ function DebugPageContent() {
         {activeTab === "chat-trace" ? <ChatTracePanel /> : null}
         {activeTab === "search-probe" ? <SearchProbePanel /> : null}
         {activeTab === "skills-reference" ? <SkillsReferencePanel /> : null}
+        {activeTab === "editable-files" ? <EditableFilePanel /> : null}
       </section>
     </>
   );

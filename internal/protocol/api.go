@@ -357,6 +357,14 @@ func (e *Engine) collectTextWithTokenRetry(ctx context.Context, request Conversa
 	return strings.Join(parts, ""), <-errCh
 }
 
+func (e *Engine) collectCachedTextWithTokenRetry(ctx context.Context, request ConversationRequest) (string, error) {
+	request.Messages = NormalizeMessages(request.Messages, nil)
+	key := textCompletionCacheKey(request)
+	return e.collectTextWithCache(key, func() (string, error) {
+		return e.collectTextWithTokenRetry(ctx, request)
+	})
+}
+
 func (e *Engine) collectVisionTextWithTokenRetry(ctx context.Context, messages []map[string]any, model string, images []backend.VisionImage) (string, error) {
 	exhaustedTokens := map[string]struct{}{}
 	var lastErr error
@@ -475,6 +483,9 @@ func (e *Engine) streamVisionDeltasWithTokenRetry(ctx context.Context, messages 
 }
 
 func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {
+	if e != nil && e.HandleChatCompletionsFunc != nil {
+		return e.HandleChatCompletionsFunc(ctx, body)
+	}
 	if util.ToBool(body["stream"]) {
 		var items <-chan map[string]any
 		var errCh <-chan error
@@ -513,7 +524,7 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 	if err != nil {
 		return nil, nil, err
 	}
-	text, err := e.collectTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages, Tools: body["tools"], ToolChoice: body["tool_choice"]})
+	text, err := e.collectCachedTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages, Tools: body["tools"], ToolChoice: body["tool_choice"]})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1138,6 +1149,13 @@ func (e *Engine) HandleResponses(ctx context.Context, body map[string]any) (map[
 }
 
 func (e *Engine) HandleResponsesScoped(ctx context.Context, body map[string]any, scope string) (map[string]any, *StreamResult, error) {
+	if !util.ToBool(body["stream"]) && !HasResponseImageGenerationTool(body) {
+		completed, err := e.cachedTextResponse(ctx, body, scope)
+		if err != nil {
+			return nil, nil, err
+		}
+		return completed, nil, nil
+	}
 	events, errCh, err := e.ResponseEventsScoped(ctx, body, scope)
 	if err != nil {
 		return nil, nil, err
@@ -1160,6 +1178,26 @@ func (e *Engine) HandleResponsesScoped(ctx context.Context, body map[string]any,
 		return nil, nil, fmt.Errorf("response generation failed")
 	}
 	return completed, nil, nil
+}
+
+func (e *Engine) cachedTextResponse(ctx context.Context, body map[string]any, scope string) (map[string]any, error) {
+	previous, err := e.responseContextFromPreviousScoped(scope, body["previous_response_id"])
+	if err != nil {
+		return nil, err
+	}
+	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	currentMessages := MessagesFromInput(body["input"], body["instructions"])
+	baseContext := MergeResponseContext(previous, currentMessages, nil)
+	text, err := e.collectCachedTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: baseContext.Messages})
+	if err != nil {
+		return nil, err
+	}
+	responseID := "resp_" + util.NewHex(32)
+	created := time.Now().Unix()
+	item := TextOutputItem(text, "", "completed")
+	completed := ResponseCompleted(responseID, model, created, []map[string]any{item})["response"].(map[string]any)
+	e.responseContextStore().SetScoped(scope, responseID, ResponseContextWithOutput(baseContext, []map[string]any{item}))
+	return completed, nil
 }
 
 func (e *Engine) ResponseEvents(ctx context.Context, body map[string]any) (<-chan map[string]any, <-chan error, error) {

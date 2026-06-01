@@ -78,6 +78,7 @@ func (a *App) routes() []appRoute {
 		exact("", "/api/images/storage-governance", a.handleImageStorageGovernance),
 		exact("", "/api/logs/governance", a.handleLogGovernance),
 		exact(http.MethodGet, "/api/logs", a.handleLogs),
+		exact(http.MethodPost, "/api/debug/search", a.handleDebugSearch),
 		exact("", "/api/proxy", a.handleProxy),
 		exact("", "/api/proxy/test", a.handleProxy),
 		exact(http.MethodGet, "/api/storage/info", a.handleStorageInfo),

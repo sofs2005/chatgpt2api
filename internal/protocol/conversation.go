@@ -43,13 +43,16 @@ type Engine struct {
 	Logger                    *service.Logger
 	ImageConversationSessions *service.ImageConversationSessionService
 
-	ListModelsFunc         func(context.Context) (map[string]any, error)
-	StreamImageOutputsFunc func(context.Context, *backend.Client, ConversationRequest, int, int) (<-chan ImageOutput, <-chan error)
-	ImageTokenProvider     func(context.Context) (string, error)
-	ImageClientFactory     func(string) *backend.Client
+	ListModelsFunc            func(context.Context) (map[string]any, error)
+	HandleChatCompletionsFunc func(context.Context, map[string]any) (map[string]any, *StreamResult, error)
+	StreamImageOutputsFunc    func(context.Context, *backend.Client, ConversationRequest, int, int) (<-chan ImageOutput, <-chan error)
+	ImageTokenProvider        func(context.Context) (string, error)
+	ImageClientFactory        func(string) *backend.Client
 
-	responseContextMu sync.Mutex
-	ResponseContexts  *ResponseContextStore
+	responseContextMu     sync.Mutex
+	ResponseContexts      *ResponseContextStore
+	chatCompletionCacheMu sync.Mutex
+	ChatCompletionCache   *ChatCompletionCache
 }
 
 type ImageOutputSlotAcquirer func(context.Context, int) (func(), error)

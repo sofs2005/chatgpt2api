@@ -38,6 +38,7 @@ var fullMenuPermissions = []MenuPermission{
 	{ID: "users", Label: "用户管理", Path: "/users", Icon: "users", Order: 50},
 	{ID: "rbac", Label: "角色权限", Path: "/rbac", Icon: "shield-check", Order: 60},
 	{ID: "logs", Label: "日志管理", Path: "/logs", Icon: "scroll-text", Order: 70},
+	{ID: "debug", Label: "调试台", Path: "/debug", Icon: "bug", Order: 75},
 	{ID: "settings", Label: "设置", Path: "/settings", Icon: "settings", Order: 80},
 }
 
@@ -71,6 +72,7 @@ var apiPermissionCatalog = []APIPermission{
 	apiPermission("GET", "/api/register", "查看注册机", "注册机", true),
 	apiPermission("POST", "/api/register", "控制注册机", "注册机", true),
 	apiPermission("GET", "/api/logs", "查看日志", "日志管理", false),
+	apiPermission("POST", "/api/debug/search", "执行 Search 调试探针", "调试", false),
 	apiPermission("GET", "/api/logs/governance", "查看日志治理", "日志管理", false),
 	apiPermission("POST", "/api/logs/governance", "清理日志数据", "日志管理", false),
 	apiPermission("GET", "/api/settings", "查看设置", "设置", false),

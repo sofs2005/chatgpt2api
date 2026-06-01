@@ -38,6 +38,7 @@ const navItems = [
   { href: "/users", label: "用户管理" },
   { href: "/rbac", label: "角色权限" },
   { href: "/logs", label: "日志管理" },
+  { href: "/debug", label: "调试台" },
   { href: "/settings", label: "设置" },
 ];
 const profileNavItem = { href: "/profile", label: "个人中心" };

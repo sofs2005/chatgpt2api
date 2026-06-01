@@ -496,6 +496,17 @@ export type ChatCompletionResponse = {
   }>;
 };
 
+export type DebugSearchRequest = {
+  query: string;
+  model?: string;
+};
+
+export type DebugSearchResponse = {
+  payload: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error?: string;
+};
+
 type CreationTaskListResponse = {
   items?: CreationTask[] | null;
   missing_ids?: string[] | null;
@@ -1112,6 +1123,13 @@ export async function createChatCompletion(model: ImageModel, messages: Creation
       messages,
       stream: false,
     },
+  });
+}
+
+export async function runDebugSearchProbe(request: DebugSearchRequest) {
+  return httpRequest<DebugSearchResponse>("/api/debug/search", {
+    method: "POST",
+    body: request,
   });
 }
 

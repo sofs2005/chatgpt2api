@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import AccountsPage from "@/app/accounts/page";
 import LinuxDoCallbackPage from "@/app/auth/linuxdo/callback/page";
+import DebugPage from "@/app/debug/page";
 import ImagePage from "@/app/image/page";
 import ImageManagerPage from "@/app/image-manager/page";
 import HomePage from "@/app/page";
@@ -30,6 +31,7 @@ export const appRoutes: AppRouteConfig[] = [
   { path: "/profile", element: <ProfilePage />, requiredPath: "/profile" },
   { path: "/rbac", element: <RBACPage />, requiredPath: "/rbac" },
   { path: "/logs", element: <LogsPage />, requiredPath: "/logs" },
+  { path: "/debug", element: <DebugPage />, requiredPath: "/debug" },
   { path: "/settings", element: <SettingsPage />, requiredPath: "/settings" },
   { path: "/image", element: <ImagePage />, requiredPath: "/image" },
   { path: "*", element: <HomePage /> },

@@ -270,6 +270,62 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, billingRef)
 }
 
+func (a *App) handleDebugSearch(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	body, err := readJSONMap(r)
+	if err != nil {
+		util.WriteError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	query := strings.TrimSpace(util.Clean(body["query"]))
+	if query == "" {
+		util.WriteError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	payload := protocol.BuildOpenAISearchPayload(query, model)
+	chatPayload := map[string]any{
+		"model":       payload["model"],
+		"stream":      false,
+		"temperature": 0,
+		"messages": []map[string]any{
+			{
+				"role":    "system",
+				"content": "You are a narrow search debug probe. Answer the operator query concisely and include useful source-oriented clues when available.",
+			},
+			{
+				"role":    "user",
+				"content": query,
+			},
+		},
+		"metadata": map[string]any{
+			"debug_payload": payload,
+		},
+	}
+	chatPayload["owner_id"] = identityScope(identity)
+	chatPayload["owner_name"] = identityDisplayName(identity)
+	ctx, _ := protocol.WithAccountUsageTracker(r.Context())
+	start := time.Now()
+	requestCapture := payloadAuditCapture(chatPayload)
+	result, stream, err := a.engine.HandleChatCompletions(ctx, chatPayload)
+	if stream != nil {
+		err = errors.New("debug search streaming is not supported")
+	}
+	if err != nil {
+		status := protocolErrorHTTPStatus(err)
+		a.logCall(ctx, identity, "Search 调试", http.MethodPost, "/api/debug/search", model, start, "failed", status, err.Error(), nil, requestCapture)
+		markRequestBusinessLogged(r)
+		util.WriteJSON(w, status, map[string]any{"payload": payload, "result": result, "error": err.Error()})
+		return
+	}
+	a.logCall(ctx, identity, "Search 调试", http.MethodPost, "/api/debug/search", model, start, "success", http.StatusOK, "", nil, requestCapture)
+	markRequestBusinessLogged(r)
+	util.WriteJSON(w, http.StatusOK, map[string]any{"payload": payload, "result": result})
+}
+
 func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	identity, ok := a.requireIdentity(w, r, "")
 	if !ok {

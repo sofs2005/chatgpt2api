@@ -8,8 +8,12 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeEditableFileImageSupportsBase64AndDataURL(t *testing.T) {
@@ -182,6 +186,67 @@ func TestEditableFileConversationIDSearchesNestedValues(t *testing.T) {
 	}
 }
 
+func TestExportEditableFileDownloadsArtifactsFromConversationDetail(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialPreparePath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conduit_token":"conduit-token"}`))
+		case r.Method == http.MethodPost && r.URL.Path == officialStreamPath:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\"}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"id":"msg-1","create_time":100,"author":{"role":"assistant"},"metadata":{"attachments":[{"id":"file-deck","file_id":"file-deck","name":"deck.pptx","mime_type":"application/vnd.openxmlformats-officedocument.presentationml.presentation"},{"id":"file-zip","file_id":"file-zip","name":"assets.zip","mime_type":"application/zip"}]}}}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1/attachment/file-deck/download":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/deck.pptx"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1/attachment/file-zip/download":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/assets.zip"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/deck.pptx":
+			_, _ = w.Write([]byte("deck-bytes"))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/assets.zip":
+			_, _ = w.Write([]byte("zip-bytes"))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := newTestBackendClient(server).ExportEditableFile(ctx, "ppt", "make slides", nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("ExportEditableFile() error = %v", err)
+	}
+	if result.ConversationID != "conv-1" {
+		t.Fatalf("ConversationID = %q, want conv-1", result.ConversationID)
+	}
+	primaryData, err := os.ReadFile(result.PrimaryPath)
+	if err != nil {
+		t.Fatalf("ReadFile(primary) error = %v", err)
+	}
+	if string(primaryData) != "deck-bytes" {
+		t.Fatalf("primary data = %q, want deck-bytes", string(primaryData))
+	}
+	zipData, err := os.ReadFile(result.ZipPath)
+	if err != nil {
+		t.Fatalf("ReadFile(zip) error = %v", err)
+	}
+	if string(zipData) != "zip-bytes" {
+		t.Fatalf("zip data = %q, want zip-bytes", string(zipData))
+	}
+}
+
 func TestEditableFileCollectFromNestedAssetMap(t *testing.T) {
 	value := map[string]any{"message": map[string]any{"content": map[string]any{"assets": []any{map[string]any{"file_name": "nested.psd", "base64": base64.StdEncoding.EncodeToString([]byte("data"))}}}}}
 	assets := editableAssetsFromValue(context.Background(), value, map[string]struct{}{})
@@ -218,5 +283,60 @@ func TestEditableFileCollectDoesNotRequireDownloadURL(t *testing.T) {
 	asset, ok := editableAssetFromMap(map[string]any{"file_name": "deck.pptx", "url": "https://example.test/deck.pptx"}, map[string]struct{}{})
 	if ok {
 		t.Fatalf("asset with no embedded data should be ignored: %#v", asset)
+	}
+}
+
+func TestEditableArtifactsFromConversationFindsAttachmentFileIDs(t *testing.T) {
+	conversation := map[string]any{
+		"mapping": map[string]any{
+			"node-1": map[string]any{"message": map[string]any{
+				"id":          "msg-1",
+				"create_time": 100.0,
+				"author":      map[string]any{"role": "assistant"},
+				"metadata": map[string]any{"attachments": []any{
+					map[string]any{"id": "file-deck", "file_id": "file-deck", "name": "deck.pptx", "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+					map[string]any{"id": "file-zip", "file_id": "file-zip", "name": "assets.zip", "mime_type": "application/zip"},
+				}},
+			}},
+		},
+	}
+
+	artifacts := editableArtifactsFromConversation(conversation, "ppt")
+	targets := pickEditableTargetArtifacts(artifacts, "ppt")
+	if len(targets) != 2 {
+		t.Fatalf("targets = %#v, want primary and zip", targets)
+	}
+	if targets[0].FileID != "file-deck" || targets[0].FileName != "deck.pptx" {
+		t.Fatalf("primary target = %#v", targets[0])
+	}
+	if targets[1].FileID != "file-zip" || targets[1].FileName != "assets.zip" {
+		t.Fatalf("zip target = %#v", targets[1])
+	}
+}
+
+func TestEditableArtifactsFromConversationFindsSandboxPaths(t *testing.T) {
+	conversation := map[string]any{
+		"mapping": map[string]any{
+			"node-1": map[string]any{"message": map[string]any{
+				"id":          "msg-psd",
+				"create_time": 200.0,
+				"author":      map[string]any{"role": "tool"},
+				"content": map[string]any{"content_type": "text", "parts": []any{
+					"created sandbox:/mnt/data/poster.psd and /mnt/data/layers.zip",
+				}},
+			}},
+		},
+	}
+
+	artifacts := editableArtifactsFromConversation(conversation, "psd")
+	targets := pickEditableTargetArtifacts(artifacts, "psd")
+	if len(targets) != 2 {
+		t.Fatalf("targets = %#v, want psd and zip", targets)
+	}
+	if targets[0].SandboxPath != "/mnt/data/poster.psd" || targets[0].MessageID != "msg-psd" {
+		t.Fatalf("primary target = %#v", targets[0])
+	}
+	if targets[1].SandboxPath != "/mnt/data/layers.zip" || targets[1].MessageID != "msg-psd" {
+		t.Fatalf("zip target = %#v", targets[1])
 	}
 }

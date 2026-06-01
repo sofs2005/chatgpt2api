@@ -13,8 +13,12 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -226,24 +230,50 @@ func (c *Client) ExportEditableFile(ctx context.Context, kind, prompt string, ba
 		return EditableFileExportResult{}, err
 	}
 	if len(assets) == 0 {
-		return EditableFileExportResult{ConversationID: conversationID}, fmt.Errorf("upstream completed without editable file asset")
+		if conversationID == "" {
+			return EditableFileExportResult{}, fmt.Errorf("upstream completed without editable file asset")
+		}
+		targets, err := c.waitEditableFileTargets(ctx, conversationID, kind)
+		if err != nil {
+			return EditableFileExportResult{ConversationID: conversationID}, err
+		}
+		if len(targets) == 0 {
+			return EditableFileExportResult{ConversationID: conversationID}, fmt.Errorf("upstream completed without editable file asset")
+		}
+		assets = make([]editableAsset, 0, len(targets))
+		for _, target := range targets {
+			data, err := c.downloadEditableArtifact(ctx, conversationID, target)
+			if err != nil {
+				return EditableFileExportResult{ConversationID: conversationID}, err
+			}
+			assets = append(assets, editableAsset{FileName: target.FileName, Data: data})
+		}
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return EditableFileExportResult{}, err
 	}
 	var primaryPath string
+	var zipPath string
+	writtenPaths := make([]string, 0, len(assets))
 	for i, asset := range assets {
 		name := safeEditableFileName(asset.FileName, kind, i+1)
 		path := filepath.Join(outputDir, name)
 		if err := os.WriteFile(path, asset.Data, 0o644); err != nil {
 			return EditableFileExportResult{}, err
 		}
-		if primaryPath == "" {
+		writtenPaths = append(writtenPaths, path)
+		artifact := editableArtifact{FileName: name}
+		if primaryPath == "" && editableArtifactIsPrimary(kind, artifact) {
 			primaryPath = path
 		}
+		if zipPath == "" && editableArtifactIsZip(artifact) {
+			zipPath = path
+		}
 	}
-	zipPath := ""
-	if len(assets) > 1 {
+	if primaryPath == "" && len(writtenPaths) > 0 {
+		primaryPath = writtenPaths[0]
+	}
+	if zipPath == "" && len(assets) > 1 {
 		zipPath = filepath.Join(outputDir, "editable_files.zip")
 		if err := writeEditableZip(zipPath, assets, kind); err != nil {
 			return EditableFileExportResult{}, err
@@ -354,6 +384,19 @@ type editableAsset struct {
 	Data     []byte
 }
 
+type editableArtifact struct {
+	AttachmentID string
+	FileID       string
+	FileName     string
+	MIMEType     string
+	CreateTime   float64
+	AuthorRole   string
+	SandboxPath  string
+	MessageID    string
+}
+
+var editableSandboxPathRE = regexp.MustCompile(`(?:sandbox:)?(/mnt/data/[^\s"'\)\]]+\.(?:pptx?|psd|zip))`)
+
 func collectEditableFileAssets(ctx context.Context, reader io.Reader) (string, []editableAsset, error) {
 	data, err := io.ReadAll(reader)
 	if err != nil {
@@ -447,6 +490,655 @@ func editableAssetsFromValue(ctx context.Context, value any, seen map[string]str
 	}
 	walk(value)
 	return assets
+}
+
+func editableArtifactsFromAny(value any) []editableArtifact {
+	var artifacts []editableArtifact
+	var walk func(any)
+	walk = func(current any) {
+		switch v := current.(type) {
+		case map[string]any:
+			if artifact, ok := editableArtifactFromMap(v, nil); ok {
+				artifacts = append(artifacts, artifact)
+			}
+			for _, nested := range v {
+				walk(nested)
+			}
+		case []any:
+			for _, nested := range v {
+				walk(nested)
+			}
+		case []map[string]any:
+			for _, nested := range v {
+				walk(nested)
+			}
+		}
+	}
+	walk(value)
+	return artifacts
+}
+
+func editableArtifactsFromConversation(conversation map[string]any, kind string) []editableArtifact {
+	if len(conversation) == 0 {
+		return nil
+	}
+	mapping, _ := conversation["mapping"].(map[string]any)
+	if len(mapping) == 0 {
+		return nil
+	}
+	items := make([]map[string]any, 0, len(mapping))
+	for _, raw := range mapping {
+		node, _ := raw.(map[string]any)
+		if len(node) == 0 {
+			continue
+		}
+		message, _ := node["message"].(map[string]any)
+		if len(message) == 0 {
+			continue
+		}
+		items = append(items, message)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return editableMessageCreateTime(items[i]) < editableMessageCreateTime(items[j])
+	})
+	artifacts := make(map[string]editableArtifact)
+	for _, message := range items {
+		artifactList := editableArtifactsFromMessage(message, kind)
+		for _, artifact := range artifactList {
+			key := firstNonEmpty(artifact.AttachmentID, artifact.FileID, artifact.FileName, artifact.SandboxPath)
+			if key == "" {
+				continue
+			}
+			artifacts[key] = mergeEditableArtifact(artifacts[key], artifact)
+		}
+	}
+	result := make([]editableArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		result = append(result, artifact)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreateTime == result[j].CreateTime {
+			return result[i].FileName < result[j].FileName
+		}
+		return result[i].CreateTime < result[j].CreateTime
+	})
+	return result
+}
+
+func pickEditableTargetArtifacts(artifacts []editableArtifact, kind string) []editableArtifact {
+	var primary []editableArtifact
+	var zip []editableArtifact
+	for _, artifact := range artifacts {
+		if editableArtifactIsZip(artifact) {
+			zip = append(zip, artifact)
+			continue
+		}
+		if editableArtifactIsPrimary(kind, artifact) {
+			primary = append(primary, artifact)
+		}
+	}
+	if len(primary) == 0 {
+		return nil
+	}
+	result := make([]editableArtifact, 0, 2)
+	result = append(result, primary[0])
+	if len(zip) > 0 {
+		result = append(result, zip[0])
+	}
+	return result
+}
+
+type editableConversationPollRetryError struct {
+	Delay time.Duration
+}
+
+func (e editableConversationPollRetryError) Error() string {
+	return "editable conversation poll rate limited"
+}
+
+func (c *Client) waitEditableFileTargets(ctx context.Context, conversationID, kind string) ([]editableArtifact, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, nil
+	}
+	timeout := time.NewTimer(20 * time.Minute)
+	defer timeout.Stop()
+	delay := 5 * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout.C:
+			return nil, fmt.Errorf("timed out waiting for editable file assets")
+		default:
+		}
+		conversation, err := c.fetchEditableConversationDetail(ctx, conversationID)
+		if err != nil {
+			if retry, ok := err.(editableConversationPollRetryError); ok {
+				delay = retry.Delay
+			} else {
+				return nil, err
+			}
+		} else {
+			targets := pickEditableTargetArtifacts(editableArtifactsFromConversation(conversation, kind), kind)
+			if len(targets) > 0 {
+				return targets, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout.C:
+			return nil, fmt.Errorf("timed out waiting for editable file assets")
+		case <-time.After(delay):
+		}
+		delay = 5 * time.Second
+	}
+}
+
+func (c *Client) fetchEditableConversationDetail(ctx context.Context, conversationID string) (map[string]any, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, fmt.Errorf("conversation_id is required for editable file polling")
+	}
+	path := "/backend-api/conversation/" + urlpkg.PathEscape(conversationID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range c.headers(path, map[string]string{
+		"Accept":                "application/json",
+		"Referer":               c.BaseURL + "/c/" + urlpkg.PathEscape(conversationID),
+		"X-OpenAI-Target-Route": "/backend-api/conversation/{conversation_id}",
+		"X-OpenAI-Target-Path":  path,
+		"Cache-Control":         "no-cache",
+		"Pragma":                "no-cache",
+	}) {
+		req.Header.Set(key, value)
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, upstreamTransportError(path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		io.Copy(io.Discard, resp.Body)
+		return nil, editableConversationPollRetryError{Delay: 5 * time.Second}
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusLocked || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusInternalServerError || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+		io.Copy(io.Discard, resp.Body)
+		return nil, editableConversationPollRetryError{Delay: 5 * time.Second}
+	}
+	if err := ensureOK(resp, path); err != nil {
+		return nil, err
+	}
+	var data map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (c *Client) downloadEditableArtifact(ctx context.Context, conversationID string, artifact editableArtifact) ([]byte, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, fmt.Errorf("conversation_id is required for editable file download")
+	}
+	if artifact.SandboxPath != "" && artifact.MessageID != "" {
+		if data, err := c.downloadEditableInterpreterAsset(ctx, conversationID, artifact.MessageID, artifact.SandboxPath); err == nil {
+			return data, nil
+		}
+	}
+	for _, attachmentID := range uniqueNonEmptyStrings(artifact.AttachmentID, artifact.FileID) {
+		if data, err := c.downloadEditableAttachmentAsset(ctx, conversationID, attachmentID); err == nil {
+			return data, nil
+		}
+	}
+	for _, fileID := range uniqueNonEmptyStrings(artifact.FileID, artifact.AttachmentID) {
+		if data, err := c.downloadEditableFileAsset(ctx, fileID); err == nil {
+			return data, nil
+		}
+	}
+	if artifact.SandboxPath != "" && artifact.MessageID != "" {
+		return nil, fmt.Errorf("editable file asset %s could not be downloaded", artifact.FileName)
+	}
+	return nil, fmt.Errorf("editable file asset %s could not be downloaded", artifact.FileName)
+}
+
+func (c *Client) downloadEditableInterpreterAsset(ctx context.Context, conversationID, messageID, sandboxPath string) ([]byte, error) {
+	path := "/backend-api/conversation/" + urlpkg.PathEscape(conversationID) + "/interpreter/download"
+	query := urlpkg.Values{}
+	query.Set("message_id", messageID)
+	query.Set("sandbox_path", sandboxPath)
+	return c.downloadEditableEndpoint(ctx, path+"?"+query.Encode(), map[string]string{"Accept": "application/json, */*"})
+}
+
+func (c *Client) downloadEditableAttachmentAsset(ctx context.Context, conversationID, attachmentID string) ([]byte, error) {
+	path := "/backend-api/conversation/" + urlpkg.PathEscape(conversationID) + "/attachment/" + urlpkg.PathEscape(attachmentID) + "/download"
+	return c.downloadEditableEndpoint(ctx, path, map[string]string{"Accept": "application/json, */*"})
+}
+
+func (c *Client) downloadEditableFileAsset(ctx context.Context, fileID string) ([]byte, error) {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return nil, fmt.Errorf("file_id is required for editable file download")
+	}
+	path := "/backend-api/files/download/" + urlpkg.PathEscape(fileID)
+	query := urlpkg.Values{}
+	query.Set("post_id", "")
+	query.Set("inline", "false")
+	if data, err := c.downloadEditableEndpoint(ctx, path+"?"+query.Encode(), map[string]string{"Accept": "application/json, */*"}); err == nil {
+		return data, nil
+	}
+	return c.downloadEditableEndpoint(ctx, "/backend-api/files/"+urlpkg.PathEscape(fileID)+"/download", map[string]string{"Accept": "application/json, */*"})
+}
+
+func (c *Client) downloadEditableEndpoint(ctx context.Context, path string, extra map[string]string) ([]byte, error) {
+	target := path
+	parsed, err := urlpkg.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	if !parsed.IsAbs() {
+		base, baseErr := urlpkg.Parse(c.BaseURL)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		parsed = base.ResolveReference(parsed)
+		target = parsed.String()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.isChatGPTBackendURL(parsed) {
+		for key, value := range c.headers(parsed.EscapedPath(), extra) {
+			req.Header.Set(key, value)
+		}
+	} else if c.userAgent != "" {
+		req.Header.Set("User-Agent", c.userAgent)
+		for key, value := range extra {
+			req.Header.Set(key, value)
+		}
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, upstreamTransportError(path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if location := strings.TrimSpace(resp.Header.Get("Location")); location != "" {
+			return c.downloadEditableURL(ctx, location)
+		}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return nil, upstreamHTTPError(path, resp.StatusCode, data)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if downloadURL := editableDownloadURLFromBody(data); downloadURL != "" {
+		return c.downloadEditableURL(ctx, downloadURL)
+	}
+	return data, nil
+}
+
+func (c *Client) downloadEditableURL(ctx context.Context, target string) ([]byte, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, fmt.Errorf("editable download url is empty")
+	}
+	parsed, err := urlpkg.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	if !parsed.IsAbs() {
+		base, baseErr := urlpkg.Parse(c.BaseURL)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		parsed = base.ResolveReference(parsed)
+		target = parsed.String()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.isChatGPTBackendURL(parsed) {
+		for key, value := range c.headers(parsed.EscapedPath(), map[string]string{"Accept": "*/*"}) {
+			req.Header.Set(key, value)
+		}
+	} else if c.userAgent != "" {
+		req.Header.Set("User-Agent", c.userAgent)
+		req.Header.Set("Accept", "*/*")
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, upstreamTransportError("editable_download", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return nil, upstreamHTTPError("editable_download", resp.StatusCode, data)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func editableDownloadURLFromBody(data []byte) string {
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err == nil {
+		if url := firstNonEmpty(util.Clean(payload["download_url"]), util.Clean(payload["downloadUrl"]), util.Clean(payload["url"])); url != "" {
+			return url
+		}
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" || strings.HasPrefix(text, "{") || strings.HasPrefix(text, "[") {
+		return ""
+	}
+	if parsed, err := urlpkg.ParseRequestURI(text); err == nil && parsed.Scheme != "" {
+		return text
+	}
+	return ""
+}
+
+func uniqueNonEmptyStrings(values ...string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func editableArtifactsFromMessage(message map[string]any, kind string) []editableArtifact {
+	if len(message) == 0 {
+		return nil
+	}
+	createTime := editableMessageCreateTime(message)
+	authorRole := strings.ToLower(strings.TrimSpace(util.Clean(message["author"])))
+	if author, ok := message["author"].(map[string]any); ok {
+		authorRole = strings.ToLower(strings.TrimSpace(util.Clean(author["role"])))
+	}
+	messageID := firstNonEmpty(util.Clean(message["id"]), util.Clean(message["message_id"]))
+	var artifacts []editableArtifact
+	if metadata, ok := message["metadata"].(map[string]any); ok {
+		artifacts = append(artifacts, editableArtifactsFromAttachmentContainer(metadata, createTime, authorRole, messageID)...)
+	}
+	artifacts = append(artifacts, editableArtifactsFromAttachmentContainer(message, createTime, authorRole, messageID)...)
+	if text := editableMessageText(message); text != "" {
+		for _, path := range editableSandboxPaths(text) {
+			artifacts = append(artifacts, editableArtifact{
+				FileName:    filepath.Base(path),
+				CreateTime:  createTime,
+				AuthorRole:  authorRole,
+				SandboxPath: path,
+				MessageID:   messageID,
+			})
+		}
+	}
+	return artifacts
+}
+
+func editableArtifactsFromAttachmentContainer(value map[string]any, createTime float64, authorRole, messageID string) []editableArtifact {
+	var artifacts []editableArtifact
+	for _, key := range []string{"attachments", "files", "assets"} {
+		raw, ok := value[key]
+		if !ok {
+			continue
+		}
+		artifacts = append(artifacts, editableArtifactsFromAny(raw)...)
+	}
+	if artifact, ok := editableArtifactFromMap(value, nil); ok {
+		artifact.CreateTime = createTime
+		artifact.AuthorRole = authorRole
+		artifact.MessageID = messageID
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts
+}
+
+func editableArtifactFromMap(value map[string]any, seen map[string]struct{}) (editableArtifact, bool) {
+	name := firstNonEmpty(util.Clean(value["file_name"]), util.Clean(value["name"]), util.Clean(value["filename"]))
+	if name == "" {
+		return editableArtifact{}, false
+	}
+	artifact := editableArtifact{
+		AttachmentID: firstNonEmpty(util.Clean(value["attachment_id"]), util.Clean(value["id"]), util.Clean(value["file_id"])),
+		FileID:       firstNonEmpty(util.Clean(value["file_id"]), util.Clean(value["library_file_id"]), util.Clean(value["id"])),
+		FileName:     name,
+		MIMEType:     firstNonEmpty(util.Clean(value["mime_type"]), util.Clean(value["mimeType"]), util.Clean(value["content_type"])),
+		SandboxPath:  firstNonEmpty(util.Clean(value["sandbox_path"]), util.Clean(value["path"])),
+	}
+	if artifact.FileID == "" && artifact.AttachmentID != "" {
+		artifact.FileID = artifact.AttachmentID
+	}
+	if artifact.SandboxPath == "" {
+		if path := editableSandboxPathFromValue(value); path != "" {
+			artifact.SandboxPath = path
+		}
+	}
+	if artifact.FileID == "" && artifact.SandboxPath == "" {
+		return editableArtifact{}, false
+	}
+	if seen != nil {
+		key := firstNonEmpty(artifact.AttachmentID, artifact.FileID, artifact.FileName, artifact.SandboxPath)
+		if key != "" {
+			if _, ok := seen[key]; ok {
+				return editableArtifact{}, false
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	return artifact, true
+}
+
+func mergeEditableArtifact(existing, incoming editableArtifact) editableArtifact {
+	if existing.AttachmentID == "" {
+		existing.AttachmentID = incoming.AttachmentID
+	}
+	if existing.FileID == "" {
+		existing.FileID = incoming.FileID
+	}
+	if existing.FileName == "" {
+		existing.FileName = incoming.FileName
+	}
+	if existing.MIMEType == "" {
+		existing.MIMEType = incoming.MIMEType
+	}
+	if existing.SandboxPath == "" {
+		existing.SandboxPath = incoming.SandboxPath
+	}
+	if existing.MessageID == "" {
+		existing.MessageID = incoming.MessageID
+	}
+	if incoming.CreateTime > existing.CreateTime {
+		existing.CreateTime = incoming.CreateTime
+	}
+	if existing.AuthorRole == "" {
+		existing.AuthorRole = incoming.AuthorRole
+	}
+	return existing
+}
+
+func editableMessageCreateTime(message map[string]any) float64 {
+	for _, key := range []string{"update_time", "create_time"} {
+		switch value := message[key].(type) {
+		case float64:
+			if value > 0 {
+				return value
+			}
+		case int:
+			if value > 0 {
+				return float64(value)
+			}
+		case int64:
+			if value > 0 {
+				return float64(value)
+			}
+		case json.Number:
+			if parsed, err := strconv.ParseFloat(value.String(), 64); err == nil && parsed > 0 {
+				return parsed
+			}
+		case string:
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func editableMessageText(message map[string]any) string {
+	content, _ := message["content"].(map[string]any)
+	if len(content) == 0 {
+		return ""
+	}
+	parts, _ := content["parts"].([]any)
+	if len(parts) == 0 {
+		if text := util.Clean(content["text"]); text != "" {
+			return text
+		}
+		if text := util.Clean(content["content"]); text != "" {
+			return text
+		}
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		if text := editablePlainText(part); text != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(text)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func editablePlainText(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		for _, key := range []string{"text", "content", "value", "body"} {
+			if text := util.Clean(v[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func editableSandboxPaths(text string) []string {
+	matches := editableSandboxPathRE.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(matches))
+	seen := map[string]struct{}{}
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		path := strings.TrimSpace(match[1])
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func editableSandboxPathFromValue(value map[string]any) string {
+	for _, key := range []string{"sandbox_path", "sandboxPath", "path"} {
+		if path := util.Clean(value[key]); path != "" {
+			return path
+		}
+	}
+	for _, key := range []string{"text", "content", "body"} {
+		if text := util.Clean(value[key]); text != "" {
+			if path := firstEditableSandboxPath(text); path != "" {
+				return path
+			}
+		}
+	}
+	for _, raw := range value {
+		switch nested := raw.(type) {
+		case string:
+			if path := firstEditableSandboxPath(nested); path != "" {
+				return path
+			}
+		case map[string]any:
+			if path := editableSandboxPathFromValue(nested); path != "" {
+				return path
+			}
+		case []any:
+			for _, item := range nested {
+				if path := editableSandboxPathFromAny(item); path != "" {
+					return path
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func editableSandboxPathFromAny(value any) string {
+	switch v := value.(type) {
+	case string:
+		return firstEditableSandboxPath(v)
+	case map[string]any:
+		return editableSandboxPathFromValue(v)
+	case []any:
+		for _, item := range v {
+			if path := editableSandboxPathFromAny(item); path != "" {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func firstEditableSandboxPath(text string) string {
+	matches := editableSandboxPathRE.FindStringSubmatch(text)
+	if len(matches) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[1])
+}
+
+func editableArtifactIsZip(artifact editableArtifact) bool {
+	name := strings.ToLower(strings.TrimSpace(artifact.FileName))
+	if strings.HasSuffix(name, ".zip") {
+		return true
+	}
+	mime := strings.ToLower(strings.TrimSpace(artifact.MIMEType))
+	return mime == "application/zip" || mime == "application/x-zip-compressed"
+}
+
+func editableArtifactIsPrimary(kind string, artifact editableArtifact) bool {
+	name := strings.ToLower(strings.TrimSpace(artifact.FileName))
+	mime := strings.ToLower(strings.TrimSpace(artifact.MIMEType))
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "psd":
+		return strings.HasSuffix(name, ".psd") || mime == "image/vnd.adobe.photoshop" || mime == "application/vnd.adobe.photoshop"
+	default:
+		return strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx") || mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" || mime == "application/vnd.ms-powerpoint"
+	}
 }
 
 func editableAssetFromMap(value map[string]any, seen map[string]struct{}) (editableAsset, bool) {

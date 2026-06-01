@@ -43,6 +43,7 @@ function buildHistoryItemFromTask(task: EditableFileTask, existing?: EditableFil
       updatedAt: task.updated_at,
       ...(task.result ? { result: task.result } : {}),
       ...(task.error ? { error: task.error } : {}),
+      ...(task.logs ? { logs: task.logs } : {}),
     };
   }
 
@@ -54,6 +55,7 @@ function buildHistoryItemFromTask(task: EditableFileTask, existing?: EditableFil
     updatedAt: task.updated_at,
     ...(task.result ? { result: task.result } : existing.result ? { result: existing.result } : {}),
     ...(task.error ? { error: task.error } : {}),
+    ...(task.logs ? { logs: task.logs } : existing.logs ? { logs: existing.logs } : {}),
   };
 }
 
@@ -98,6 +100,20 @@ function EditableFileHistoryList({ items }: { items: EditableFileHistoryItem[] }
           {item.error ? (
             <div className="mt-3 rounded-xl border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
               {item.error}
+            </div>
+          ) : null}
+
+          {item.logs && item.logs.length > 0 ? (
+            <div className="mt-3 rounded-xl border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+              <div className="mb-1 font-medium text-foreground">任务日志</div>
+              <div className="max-h-40 space-y-1 overflow-auto">
+                {item.logs.slice(-12).map((log, index) => (
+                  <div key={`${item.taskId}-log-${index}`} className="flex gap-2">
+                    <span className="shrink-0 text-muted-foreground/80">{log.time || "--"}</span>
+                    <span className="min-w-0 break-words">{log.message}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : null}
 
@@ -245,6 +261,7 @@ export function EditableFilePanel() {
       clientTaskId,
       ...(task.result ? { result: task.result } : {}),
       ...(task.error ? { error: task.error } : {}),
+      ...(task.logs ? { logs: task.logs } : {}),
     });
 
     setHistory((current) => mergeEditableFileHistoryItems(current, [nextItem]));

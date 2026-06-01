@@ -523,6 +523,11 @@ export type EditableFileTaskResult = {
   zip_path?: string;
 };
 
+export type EditableFileTaskLog = {
+  time?: string;
+  message: string;
+};
+
 export type EditableFileTask = {
   id: string;
   taskId: string;
@@ -533,6 +538,7 @@ export type EditableFileTask = {
   elapsed_seconds?: number;
   result?: EditableFileTaskResult;
   error?: string;
+  logs?: EditableFileTaskLog[];
 };
 
 export type EditableFileTaskListResponse = {

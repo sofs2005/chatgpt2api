@@ -96,6 +96,33 @@ func TestEditableFileTaskServiceSubmitListAndPathSecurity(t *testing.T) {
 	}
 }
 
+func TestEditableFileTaskServiceExposesProgressLogs(t *testing.T) {
+	store := newTestStorageBackend(t).(storage.JSONDocumentBackend)
+	svc := NewEditableFileTaskService(store, t.TempDir(), func(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (EditableFileRunResult, error) {
+		util.LogProgress(ctx, "正在轮询上游会话文件")
+		return EditableFileRunResult{}, nil
+	})
+	identity := Identity{ID: "alice", Role: AuthRoleUser}
+	if _, err := svc.Submit(context.Background(), identity, "ppt", "make deck", nil, "task-log"); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	waitForEditableFileTaskStatus(t, svc, identity, "task-log", TaskStatusSuccess)
+	items, _ := editableFileTaskListResult(t, svc.List(identity, []string{"task-log"}))
+	logs, ok := items[0]["logs"].([]map[string]any)
+	if !ok || len(logs) < 3 {
+		t.Fatalf("logs = %#v, want progress entries", items[0]["logs"])
+	}
+	joined := ""
+	for _, log := range logs {
+		joined += util.Clean(log["message"]) + "\n"
+	}
+	for _, want := range []string{"任务已入队", "任务开始执行", "正在轮询上游会话文件", "任务执行成功"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("logs missing %q: %#v", want, logs)
+		}
+	}
+}
+
 func TestEditableFileTaskServiceRestartsQueuedTasksAsErrors(t *testing.T) {
 	store := newTestStorageBackend(t).(storage.JSONDocumentBackend)
 	if err := store.SaveJSONDocument(editableFileTasksDocument, map[string]any{

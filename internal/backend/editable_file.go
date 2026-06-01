@@ -193,15 +193,18 @@ func (c *Client) ExportEditableFile(ctx context.Context, kind, prompt string, ba
 	if c.AccessToken == "" {
 		return EditableFileExportResult{}, fmt.Errorf("access_token is required for editable file export")
 	}
+	util.LogProgress(ctx, "正在初始化上游会话环境")
 	if err := c.bootstrap(ctx); err != nil {
 		return EditableFileExportResult{}, err
 	}
+	util.LogProgress(ctx, "正在获取上游 Chat Requirements")
 	reqs, err := c.getChatRequirements(ctx)
 	if err != nil {
 		return EditableFileExportResult{}, err
 	}
 	refs := make([]uploadedImageRef, 0, len(base64Images))
 	for i, raw := range base64Images {
+		util.LogProgress(ctx, fmt.Sprintf("正在上传输入图片 %d/%d", i+1, len(base64Images)))
 		img, err := DecodeEditableFileImage(raw)
 		if err != nil {
 			return EditableFileExportResult{}, err
@@ -213,10 +216,12 @@ func (c *Client) ExportEditableFile(ctx context.Context, kind, prompt string, ba
 		}
 		refs = append(refs, ref)
 	}
+	util.LogProgress(ctx, "正在准备可编辑文件会话")
 	conduitToken, err := c.prepareEditableFileConversation(ctx, prompt, reqs, refs)
 	if err != nil {
 		return EditableFileExportResult{}, err
 	}
+	util.LogProgress(ctx, "正在启动上游可编辑文件生成")
 	resp, err := c.startEditableFileConversation(ctx, kind, prompt, conduitToken, reqs, refs)
 	if err != nil {
 		return EditableFileExportResult{}, err
@@ -225,14 +230,19 @@ func (c *Client) ExportEditableFile(ctx context.Context, kind, prompt string, ba
 	if err := ensureOK(resp, officialStreamPath); err != nil {
 		return EditableFileExportResult{}, err
 	}
+	util.LogProgress(ctx, "正在读取上游 SSE 响应")
 	conversationID, assets, err := collectEditableFileAssets(ctx, resp.Body)
 	if err != nil {
 		return EditableFileExportResult{}, err
+	}
+	if conversationID != "" {
+		util.LogProgress(ctx, "已获取上游会话 ID："+conversationID)
 	}
 	if len(assets) == 0 {
 		if conversationID == "" {
 			return EditableFileExportResult{}, fmt.Errorf("upstream completed without editable file asset")
 		}
+		util.LogProgress(ctx, "SSE 未包含文件内容，开始轮询会话详情")
 		targets, err := c.waitEditableFileTargets(ctx, conversationID, kind)
 		if err != nil {
 			return EditableFileExportResult{ConversationID: conversationID}, err
@@ -240,8 +250,10 @@ func (c *Client) ExportEditableFile(ctx context.Context, kind, prompt string, ba
 		if len(targets) == 0 {
 			return EditableFileExportResult{ConversationID: conversationID}, fmt.Errorf("upstream completed without editable file asset")
 		}
+		util.LogProgress(ctx, fmt.Sprintf("已找到 %d 个可下载文件，开始下载", len(targets)))
 		assets = make([]editableAsset, 0, len(targets))
 		for _, target := range targets {
+			util.LogProgress(ctx, "正在下载文件："+target.FileName)
 			data, err := c.downloadEditableArtifact(ctx, conversationID, target)
 			if err != nil {
 				return EditableFileExportResult{ConversationID: conversationID}, err
@@ -249,6 +261,7 @@ func (c *Client) ExportEditableFile(ctx context.Context, kind, prompt string, ba
 			assets = append(assets, editableAsset{FileName: target.FileName, Data: data})
 		}
 	}
+	util.LogProgress(ctx, fmt.Sprintf("正在写入 %d 个文件到本地", len(assets)))
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return EditableFileExportResult{}, err
 	}
@@ -612,18 +625,23 @@ func (c *Client) waitEditableFileTargets(ctx context.Context, conversationID, ki
 			return nil, fmt.Errorf("timed out waiting for editable file assets")
 		default:
 		}
+		util.LogProgress(ctx, "正在轮询上游会话详情")
 		conversation, err := c.fetchEditableConversationDetail(ctx, conversationID)
 		if err != nil {
 			if retry, ok := err.(editableConversationPollRetryError); ok {
 				delay = retry.Delay
+				util.LogProgress(ctx, "会话详情暂不可用，稍后重试")
 			} else {
 				return nil, err
 			}
 		} else {
-			targets := pickEditableTargetArtifacts(editableArtifactsFromConversation(conversation, kind), kind)
+			artifacts := editableArtifactsFromConversation(conversation, kind)
+			targets := pickEditableTargetArtifacts(artifacts, kind)
 			if len(targets) > 0 {
+				util.LogProgress(ctx, fmt.Sprintf("会话详情中找到 %d 个目标文件", len(targets)))
 				return targets, nil
 			}
+			util.LogProgress(ctx, fmt.Sprintf("会话详情暂未发现目标文件，已扫描到 %d 个候选项", len(artifacts)))
 		}
 		select {
 		case <-ctx.Done():

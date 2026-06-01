@@ -4,6 +4,7 @@ import localforage from "localforage";
 
 import {
   type EditableFileTaskKind,
+  type EditableFileTaskLog,
   type EditableFileTaskResult,
   type EditableFileTaskStatus,
 } from "@/lib/api";
@@ -19,6 +20,7 @@ export type EditableFileHistoryItem = {
   clientTaskId?: string;
   result?: EditableFileTaskResult;
   error?: string;
+  logs?: EditableFileTaskLog[];
 };
 
 const editableFileHistoryStorage = localforage.createInstance({
@@ -70,6 +72,24 @@ function isEditableFileTaskResult(value: unknown): value is EditableFileTaskResu
   );
 }
 
+function normalizeEditableFileTaskLogs(value: unknown): EditableFileTaskLog[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const logs = value
+    .map((item) => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const message = typeof record.message === "string" ? record.message.trim() : "";
+      const time = typeof record.time === "string" ? record.time.trim() : "";
+      return message ? { message, ...(time ? { time } : {}) } : null;
+    })
+    .filter((item): item is EditableFileTaskLog => Boolean(item));
+  return logs.length > 0 ? logs : undefined;
+}
+
 function normalizeEditableFileHistoryItem(item: Partial<EditableFileHistoryItem>): EditableFileHistoryItem | null {
   const taskId = typeof item.taskId === "string" ? item.taskId.trim() : "";
   const kind = isEditableFileTaskKind(item.kind) ? item.kind : null;
@@ -84,6 +104,7 @@ function normalizeEditableFileHistoryItem(item: Partial<EditableFileHistoryItem>
   const clientTaskId = typeof item.clientTaskId === "string" ? item.clientTaskId.trim() : "";
   const result = isEditableFileTaskResult(item.result) ? item.result : undefined;
   const error = typeof item.error === "string" && item.error.trim() ? item.error : undefined;
+  const logs = normalizeEditableFileTaskLogs(item.logs);
 
   return {
     taskId,
@@ -95,6 +116,7 @@ function normalizeEditableFileHistoryItem(item: Partial<EditableFileHistoryItem>
     ...(clientTaskId ? { clientTaskId } : {}),
     ...(typeof result !== "undefined" ? { result } : {}),
     ...(error ? { error } : {}),
+    ...(logs ? { logs } : {}),
   };
 }
 

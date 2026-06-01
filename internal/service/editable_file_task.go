@@ -15,6 +15,7 @@ import (
 )
 
 const editableFileTasksDocument = "editable_file_tasks"
+const editableFileTaskMaxLogs = 80
 
 type EditableFileRunResult struct {
 	ConversationID string
@@ -95,15 +96,16 @@ func (s *EditableFileTaskService) Submit(ctx context.Context, identity Identity,
 		return item, nil
 	}
 	task := map[string]any{
-		"id":             id,
-		"taskId":         id,
-		"owner_id":       owner,
-		"client_task_id": clientTaskID,
-		"status":         TaskStatusQueued,
-		"kind":           kind,
-		"created_at":     now,
-		"updated_at":     now,
+		"id":              id,
+		"taskId":          id,
+		"owner_id":        owner,
+		"client_task_id":  clientTaskID,
+		"status":          TaskStatusQueued,
+		"kind":            kind,
+		"created_at":      now,
+		"updated_at":      now,
 		"elapsed_seconds": 0,
+		"logs":            []map[string]any{{"time": now, "message": "任务已入队"}},
 	}
 	s.tasks[key] = task
 	if clientKey != "" {
@@ -182,20 +184,26 @@ func (s *EditableFileTaskService) runTask(ctx context.Context, key, kind, prompt
 	if !s.markRunning(key) {
 		return
 	}
+	runCtx := util.WithProgressLogger(ctx, func(message string) {
+		s.appendTaskLog(key, message)
+	})
 	outputDir := filepath.Join(s.filesDir, time.Now().Format("2006"), time.Now().Format("01"), time.Now().Format("02"), strings.ReplaceAll(key, ":", "_"))
 	_ = os.MkdirAll(outputDir, 0o755)
-	result, err := s.runner(ctx, kind, prompt, base64Images, outputDir)
+	util.LogProgress(runCtx, "正在调用上游导出链路")
+	result, err := s.runner(runCtx, kind, prompt, base64Images, outputDir)
 	updates := map[string]any{"elapsed_seconds": int(time.Since(started).Seconds())}
 	if err != nil {
 		updates["status"] = TaskStatusError
 		updates["error"] = err.Error()
 		s.updateTask(key, updates)
+		s.appendTaskLog(key, "任务执行失败："+err.Error())
 		return
 	}
 	updates["status"] = TaskStatusSuccess
 	updates["error"] = ""
 	updates["result"] = editableResultMap(result, s.filesDir)
 	s.updateTask(key, updates)
+	s.appendTaskLog(key, "任务执行成功")
 }
 
 func (s *EditableFileTaskService) markRunning(key string) bool {
@@ -206,9 +214,56 @@ func (s *EditableFileTaskService) markRunning(key string) bool {
 		return false
 	}
 	task["status"] = TaskStatusRunning
-	task["updated_at"] = util.NowLocal()
+	now := util.NowLocal()
+	task["updated_at"] = now
+	appendEditableTaskLogLocked(task, now, "任务开始执行")
 	_ = s.saveLocked()
 	return true
+}
+
+func (s *EditableFileTaskService) appendTaskLog(key, message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task := s.tasks[key]
+	if task == nil {
+		return
+	}
+	now := util.NowLocal()
+	appendEditableTaskLogLocked(task, now, message)
+	task["updated_at"] = now
+	_ = s.saveLocked()
+}
+
+func appendEditableTaskLogLocked(task map[string]any, timestamp, message string) {
+	logs := editableTaskLogs(task["logs"])
+	logs = append(logs, map[string]any{"time": timestamp, "message": message})
+	if len(logs) > editableFileTaskMaxLogs {
+		logs = logs[len(logs)-editableFileTaskMaxLogs:]
+	}
+	task["logs"] = logs
+}
+
+func editableTaskLogs(raw any) []map[string]any {
+	logs := make([]map[string]any, 0)
+	for _, item := range anyList(raw) {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		message := util.Clean(entry["message"])
+		if message == "" {
+			continue
+		}
+		logs = append(logs, map[string]any{
+			"time":    util.Clean(entry["time"]),
+			"message": message,
+		})
+	}
+	return logs
 }
 
 func (s *EditableFileTaskService) updateTask(key string, updates map[string]any) {
@@ -263,6 +318,9 @@ func (s *EditableFileTaskService) loadLocked() map[string]map[string]any {
 		if result := util.StringMap(task["result"]); len(result) > 0 {
 			normalized["result"] = result
 		}
+		if logs := editableTaskLogs(task["logs"]); len(logs) > 0 {
+			normalized["logs"] = logs
+		}
 		tasks[taskKey(owner, id)] = normalized
 	}
 	return tasks
@@ -286,7 +344,9 @@ func (s *EditableFileTaskService) recoverUnfinishedLocked() bool {
 		if task["status"] == TaskStatusQueued || task["status"] == TaskStatusRunning {
 			task["status"] = TaskStatusError
 			task["error"] = "服务已重启，未完成的任务已中断"
-			task["updated_at"] = util.NowLocal()
+			now := util.NowLocal()
+			task["updated_at"] = now
+			appendEditableTaskLogLocked(task, now, "服务已重启，未完成的任务已中断")
 			changed = true
 		}
 	}
@@ -308,6 +368,9 @@ func publicEditableFileTask(task map[string]any) map[string]any {
 	}
 	if errText := util.Clean(task["error"]); errText != "" {
 		item["error"] = errText
+	}
+	if logs := editableTaskLogs(task["logs"]); len(logs) > 0 {
+		item["logs"] = logs
 	}
 	return item
 }

@@ -31,6 +31,26 @@ import (
 	"chatgpt2api/internal/version"
 )
 
+func TestAppLogCallWritesRuntimeLogger(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	app.logCall(context.Background(), service.Identity{ID: "alice", Role: service.AuthRoleUser}, "聊天", http.MethodPost, "/v1/chat/completions", "gpt-5", time.Now(), "success", http.StatusOK, "", nil, auditRequestCapture{})
+	if err := app.logger.Close(); err != nil {
+		t.Fatalf("logger.Close() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(app.config.DataDir, "logs", "server.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(server.log) error = %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{"api call completed", "/v1/chat/completions", "gpt-5", "success"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("server.log missing %q: %s", want, text)
+		}
+	}
+}
+
 func TestAppAuthAndSPACompatibility(t *testing.T) {
 	originalVersion := version.Version
 	version.Version = "test-build"

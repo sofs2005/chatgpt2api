@@ -40,26 +40,26 @@ const (
 )
 
 type App struct {
-	config     *config.Store
-	auth       *service.AuthService
-	accounts   *service.AccountService
-	billing    *service.BillingService
-	logs       *service.LogService
-	logger     *service.Logger
-	proxy      *service.ProxyService
-	engine     *protocol.Engine
-	images     *service.ImageService
-	tasks      *service.ImageTaskService
+	config        *config.Store
+	auth          *service.AuthService
+	accounts      *service.AccountService
+	billing       *service.BillingService
+	logs          *service.LogService
+	logger        *service.Logger
+	proxy         *service.ProxyService
+	engine        *protocol.Engine
+	images        *service.ImageService
+	tasks         *service.ImageTaskService
 	editableFiles *service.EditableFileTaskService
-	announce   *service.AnnouncementService
-	prompts    *service.PromptFavoriteService
-	cpa        *service.CPAConfig
-	cpaImport  *service.CPAImportService
-	sub2       *service.Sub2APIConfig
-	sub2Import *service.Sub2APIService
-	register   *service.RegisterService
-	update     *service.UpdateService
-	cancel     context.CancelFunc
+	announce      *service.AnnouncementService
+	prompts       *service.PromptFavoriteService
+	cpa           *service.CPAConfig
+	cpaImport     *service.CPAImportService
+	sub2          *service.Sub2APIConfig
+	sub2Import    *service.Sub2APIService
+	register      *service.RegisterService
+	update        *service.UpdateService
+	cancel        context.CancelFunc
 }
 
 func NewApp() (*App, error) {
@@ -104,6 +104,7 @@ func NewApp() (*App, error) {
 		}
 		return app.engine.RunEditableFileExport(ctx, kind, prompt, base64Images, outputDir)
 	})
+	app.editableFiles.SetLogger(logger)
 	app.cpaImport = service.NewCPAImportService(app.cpa, accounts, proxy)
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
 	app.register = service.NewRegisterService(accounts, storageBackend)
@@ -1503,8 +1504,23 @@ func (a *App) logCall(ctx context.Context, identity service.Identity, summary, m
 	}
 	addAuditRequestDetail(detail, requestCapture)
 	suffix := "调用完成"
+	runtimeMessage := "api call completed"
 	if outcome == "failed" {
 		suffix = "调用失败"
+		runtimeMessage = "api call failed"
+	}
+	if a.logger != nil {
+		attrs := []any{"summary", summary, "method", method, "endpoint", endpoint, "model", model, "status", status, "outcome", outcome, "duration_ms", detail["duration_ms"]}
+		if errText != "" {
+			attrs = append(attrs, "error", errText)
+		}
+		if status >= http.StatusInternalServerError {
+			a.logger.Error(runtimeMessage, attrs...)
+		} else if status >= http.StatusBadRequest || outcome == "failed" {
+			a.logger.Warning(runtimeMessage, attrs...)
+		} else {
+			a.logger.Info(runtimeMessage, attrs...)
+		}
 	}
 	a.logs.Add(summary+suffix, detail)
 }

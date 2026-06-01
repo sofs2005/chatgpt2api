@@ -340,3 +340,52 @@ func TestEditableArtifactsFromConversationFindsSandboxPaths(t *testing.T) {
 		t.Fatalf("zip target = %#v", targets[1])
 	}
 }
+
+func TestPickEditableTargetArtifactsRequiresZipAndUsesLatestArtifacts(t *testing.T) {
+	if targets := pickEditableTargetArtifacts([]editableArtifact{{FileName: "deck.pptx", MIMEType: "application/vnd.openxmlformats-officedocument.presentationml.presentation"}}, "ppt"); len(targets) != 0 {
+		t.Fatalf("targets = %#v, want none until zip is available", targets)
+	}
+
+	artifacts := []editableArtifact{
+		{FileName: "old.pptx", FileID: "old-deck", MIMEType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", CreateTime: 100},
+		{FileName: "old.zip", FileID: "old-zip", MIMEType: "application/zip", CreateTime: 101},
+		{FileName: "new.pptx", FileID: "new-deck", MIMEType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", CreateTime: 200},
+		{FileName: "new.zip", FileID: "new-zip", MIMEType: "application/zip", CreateTime: 201},
+	}
+	targets := pickEditableTargetArtifacts(artifacts, "ppt")
+	if len(targets) != 2 {
+		t.Fatalf("targets = %#v, want latest primary and zip", targets)
+	}
+	if targets[0].FileID != "new-deck" || targets[1].FileID != "new-zip" {
+		t.Fatalf("targets = %#v, want latest artifacts", targets)
+	}
+}
+
+func TestEditableArtifactsFromConversationFindsDeepAssetPointerObjects(t *testing.T) {
+	message := map[string]any{
+		"id":          "msg-asset-pointer",
+		"create_time": 300.0,
+		"author":      map[string]any{"role": "assistant"},
+		"content": map[string]any{"parts": []any{map[string]any{"outputs": []any{
+			map[string]any{"asset_pointer": "file-service://file-deck", "title": "deck.pptx", "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+			map[string]any{"asset_pointer": "sediment://file-zip", "title": "assets.zip", "mime_type": "application/zip"},
+		}}}},
+	}
+	conversation := map[string]any{
+		"mapping": map[string]any{
+			"node-1": map[string]any{"message": message},
+		},
+	}
+
+	artifacts := editableArtifactsFromConversation(conversation, "ppt")
+	targets := pickEditableTargetArtifacts(artifacts, "ppt")
+	if len(targets) != 2 {
+		t.Fatalf("artifacts = %#v targets = %#v, want primary and zip", artifacts, targets)
+	}
+	if targets[0].FileID != "file-deck" || targets[0].FileName != "deck.pptx" || targets[0].MessageID != "msg-asset-pointer" {
+		t.Fatalf("primary target = %#v", targets[0])
+	}
+	if targets[1].FileID != "file-zip" || targets[1].FileName != "assets.zip" || targets[1].MessageID != "msg-asset-pointer" {
+		t.Fatalf("zip target = %#v", targets[1])
+	}
+}

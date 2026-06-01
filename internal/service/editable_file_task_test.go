@@ -123,6 +123,38 @@ func TestEditableFileTaskServiceExposesProgressLogs(t *testing.T) {
 	}
 }
 
+func TestEditableFileTaskServiceWritesProgressToRuntimeLogger(t *testing.T) {
+	store := newTestStorageBackend(t).(storage.JSONDocumentBackend)
+	dataDir := t.TempDir()
+	logger, err := NewLogger(dataDir, func() []string { return []string{"info", "warning", "error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+	svc := NewEditableFileTaskService(store, dataDir, func(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (EditableFileRunResult, error) {
+		util.LogProgress(ctx, "正在轮询上游会话文件")
+		return EditableFileRunResult{}, nil
+	})
+	svc.SetLogger(logger)
+	identity := Identity{ID: "alice", Role: AuthRoleUser}
+	if _, err := svc.Submit(context.Background(), identity, "ppt", "make deck", nil, "task-log-runtime"); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	waitForEditableFileTaskStatus(t, svc, identity, "task-log-runtime", TaskStatusSuccess)
+	if err := logger.Close(); err != nil {
+		t.Fatalf("logger.Close() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dataDir, "logs", "server.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(server.log) error = %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{"editable file task progress", "task-log-runtime", "正在轮询上游会话文件"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("server.log missing %q: %s", want, text)
+		}
+	}
+}
+
 func TestEditableFileTaskServiceRestartsQueuedTasksAsErrors(t *testing.T) {
 	store := newTestStorageBackend(t).(storage.JSONDocumentBackend)
 	if err := store.SaveJSONDocument(editableFileTasksDocument, map[string]any{

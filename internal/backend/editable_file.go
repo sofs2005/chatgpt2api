@@ -408,7 +408,10 @@ type editableArtifact struct {
 	MessageID    string
 }
 
-var editableSandboxPathRE = regexp.MustCompile(`(?:sandbox:)?(/mnt/data/[^\s"'\)\]]+\.(?:pptx?|psd|zip))`)
+var (
+	editableSandboxPathRE  = regexp.MustCompile(`(?:sandbox:)?(/mnt/data/[^\s"'\)\]]+\.(?:pptx?|psd|zip))`)
+	editableAssetPointerRE = regexp.MustCompile(`(?:file-service|sediment)://([^\s"'\)\]\}]+)`)
+)
 
 func collectEditableFileAssets(ctx context.Context, reader io.Reader) (string, []editableAsset, error) {
 	data, err := io.ReadAll(reader)
@@ -579,26 +582,20 @@ func editableArtifactsFromConversation(conversation map[string]any, kind string)
 }
 
 func pickEditableTargetArtifacts(artifacts []editableArtifact, kind string) []editableArtifact {
-	var primary []editableArtifact
-	var zip []editableArtifact
-	for _, artifact := range artifacts {
-		if editableArtifactIsZip(artifact) {
-			zip = append(zip, artifact)
-			continue
+	var primary editableArtifact
+	var zip editableArtifact
+	for i := len(artifacts) - 1; i >= 0; i-- {
+		artifact := artifacts[i]
+		if zip.FileName == "" && editableArtifactIsZip(artifact) {
+			zip = artifact
+		} else if primary.FileName == "" && editableArtifactIsPrimary(kind, artifact) {
+			primary = artifact
 		}
-		if editableArtifactIsPrimary(kind, artifact) {
-			primary = append(primary, artifact)
+		if primary.FileName != "" && zip.FileName != "" {
+			return []editableArtifact{primary, zip}
 		}
 	}
-	if len(primary) == 0 {
-		return nil
-	}
-	result := make([]editableArtifact, 0, 2)
-	result = append(result, primary[0])
-	if len(zip) > 0 {
-		result = append(result, zip[0])
-	}
-	return result
+	return nil
 }
 
 type editableConversationPollRetryError struct {
@@ -887,12 +884,21 @@ func editableArtifactsFromMessage(message map[string]any, kind string) []editabl
 	if author, ok := message["author"].(map[string]any); ok {
 		authorRole = strings.ToLower(strings.TrimSpace(util.Clean(author["role"])))
 	}
+	if authorRole != "assistant" && authorRole != "tool" {
+		return nil
+	}
 	messageID := firstNonEmpty(util.Clean(message["id"]), util.Clean(message["message_id"]))
 	var artifacts []editableArtifact
 	if metadata, ok := message["metadata"].(map[string]any); ok {
 		artifacts = append(artifacts, editableArtifactsFromAttachmentContainer(metadata, createTime, authorRole, messageID)...)
 	}
 	artifacts = append(artifacts, editableArtifactsFromAttachmentContainer(message, createTime, authorRole, messageID)...)
+	for _, artifact := range editableArtifactsFromAny(message) {
+		artifact.CreateTime = createTime
+		artifact.AuthorRole = authorRole
+		artifact.MessageID = messageID
+		artifacts = append(artifacts, artifact)
+	}
 	if text := editableMessageText(message); text != "" {
 		for _, path := range editableSandboxPaths(text) {
 			artifacts = append(artifacts, editableArtifact{
@@ -926,24 +932,30 @@ func editableArtifactsFromAttachmentContainer(value map[string]any, createTime f
 }
 
 func editableArtifactFromMap(value map[string]any, seen map[string]struct{}) (editableArtifact, bool) {
-	name := firstNonEmpty(util.Clean(value["file_name"]), util.Clean(value["name"]), util.Clean(value["filename"]))
-	if name == "" {
-		return editableArtifact{}, false
+	assetPointer := firstNonEmpty(util.Clean(value["asset_pointer"]), util.Clean(value["assetPointer"]))
+	assetPointerID := editableFileIDFromAssetPointer(assetPointer)
+	sandboxPath := firstNonEmpty(util.Clean(value["sandbox_path"]), util.Clean(value["sandboxPath"]), util.Clean(value["path"]))
+	if sandboxPath == "" {
+		if path := editableSandboxPathFromValue(value); path != "" {
+			sandboxPath = path
+		}
+	}
+	name := firstNonEmpty(util.Clean(value["file_name"]), util.Clean(value["name"]), util.Clean(value["filename"]), util.Clean(value["title"]))
+	if name == "" && sandboxPath != "" {
+		name = filepath.Base(sandboxPath)
 	}
 	artifact := editableArtifact{
-		AttachmentID: firstNonEmpty(util.Clean(value["attachment_id"]), util.Clean(value["id"]), util.Clean(value["file_id"])),
-		FileID:       firstNonEmpty(util.Clean(value["file_id"]), util.Clean(value["library_file_id"]), util.Clean(value["id"])),
+		AttachmentID: firstNonEmpty(util.Clean(value["attachment_id"]), util.Clean(value["attachmentId"]), util.Clean(value["id"]), util.Clean(value["file_id"]), assetPointerID),
+		FileID:       firstNonEmpty(util.Clean(value["file_id"]), util.Clean(value["fileId"]), util.Clean(value["library_file_id"]), util.Clean(value["libraryFileId"]), assetPointerID, util.Clean(value["id"])),
 		FileName:     name,
-		MIMEType:     firstNonEmpty(util.Clean(value["mime_type"]), util.Clean(value["mimeType"]), util.Clean(value["content_type"])),
-		SandboxPath:  firstNonEmpty(util.Clean(value["sandbox_path"]), util.Clean(value["path"])),
+		MIMEType:     firstNonEmpty(util.Clean(value["mime_type"]), util.Clean(value["mimeType"]), util.Clean(value["content_type"]), util.Clean(value["contentType"])),
+		SandboxPath:  sandboxPath,
 	}
 	if artifact.FileID == "" && artifact.AttachmentID != "" {
 		artifact.FileID = artifact.AttachmentID
 	}
-	if artifact.SandboxPath == "" {
-		if path := editableSandboxPathFromValue(value); path != "" {
-			artifact.SandboxPath = path
-		}
+	if artifact.FileName == "" && artifact.FileID != "" {
+		artifact.FileName = artifact.FileID
 	}
 	if artifact.FileID == "" && artifact.SandboxPath == "" {
 		return editableArtifact{}, false
@@ -958,6 +970,17 @@ func editableArtifactFromMap(value map[string]any, seen map[string]struct{}) (ed
 		}
 	}
 	return artifact, true
+}
+
+func editableFileIDFromAssetPointer(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if match := editableAssetPointerRE.FindStringSubmatch(value); len(match) > 1 {
+		return strings.Trim(strings.TrimSpace(match[1]), "/")
+	}
+	return ""
 }
 
 func mergeEditableArtifact(existing, incoming editableArtifact) editableArtifact {

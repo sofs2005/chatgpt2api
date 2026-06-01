@@ -31,6 +31,7 @@ type EditableFileTaskService struct {
 	dataDir   string
 	filesDir  string
 	runner    EditableFileRunner
+	logger    *Logger
 	tasks     map[string]map[string]any
 	clientIDs map[string]string
 }
@@ -51,6 +52,12 @@ func NewEditableFileTaskService(store storage.JSONDocumentBackend, dataDir strin
 	}
 	s.mu.Unlock()
 	return s
+}
+
+func (s *EditableFileTaskService) SetLogger(logger *Logger) {
+	if s != nil {
+		s.logger = logger
+	}
 }
 
 func (s *EditableFileTaskService) Submit(ctx context.Context, identity Identity, kind, prompt string, base64Images []string, clientTaskID string) (map[string]any, error) {
@@ -114,6 +121,7 @@ func (s *EditableFileTaskService) Submit(ctx context.Context, identity Identity,
 	_ = s.saveLocked()
 	item := publicEditableFileTask(task)
 	s.mu.Unlock()
+	s.logTaskProgress(key, kind, "任务已入队")
 	go s.runTask(context.Background(), key, kind, prompt, cleanEditableImages(base64Images))
 	return item, nil
 }
@@ -218,6 +226,7 @@ func (s *EditableFileTaskService) markRunning(key string) bool {
 	task["updated_at"] = now
 	appendEditableTaskLogLocked(task, now, "任务开始执行")
 	_ = s.saveLocked()
+	s.logTaskProgress(key, util.Clean(task["kind"]), "任务开始执行")
 	return true
 }
 
@@ -236,6 +245,22 @@ func (s *EditableFileTaskService) appendTaskLog(key, message string) {
 	appendEditableTaskLogLocked(task, now, message)
 	task["updated_at"] = now
 	_ = s.saveLocked()
+	s.logTaskProgress(key, util.Clean(task["kind"]), message)
+}
+
+func (s *EditableFileTaskService) logTaskProgress(key, kind, message string) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	taskID := strings.TrimSpace(key)
+	if index := strings.LastIndex(taskID, ":"); index >= 0 && index+1 < len(taskID) {
+		taskID = taskID[index+1:]
+	}
+	s.logger.Info("editable file task progress", "task_id", taskID, "kind", strings.ToLower(strings.TrimSpace(kind)), "message", message)
 }
 
 func appendEditableTaskLogLocked(task map[string]any, timestamp, message string) {

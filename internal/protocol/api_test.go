@@ -136,6 +136,40 @@ func TestExtractChatContextImagesPreservesAllImages(t *testing.T) {
 	}
 }
 
+func TestExtractChatContextImagesPreservesRemoteImageURLAndDetail(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "看这张图"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.test/image.png", "detail": "high"}},
+		}}},
+	}
+
+	images := ExtractChatContextImages(body)
+	if len(images) != 1 {
+		t.Fatalf("ExtractChatContextImages() len = %d, want 1", len(images))
+	}
+	if images[0].URL != "https://example.test/image.png" || images[0].Detail != "high" {
+		t.Fatalf("ExtractChatContextImages() = %#v, want remote url and detail preserved", images[0])
+	}
+}
+
+func TestExtractChatContextImagesDecodesRawBase64ImageURL(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("raw image"))
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": encoded, "detail": "low"}},
+		}}},
+	}
+
+	images := ExtractChatContextImages(body)
+	if len(images) != 1 {
+		t.Fatalf("ExtractChatContextImages() len = %d, want 1", len(images))
+	}
+	if string(images[0].Data) != "raw image" || images[0].URL != "" || images[0].Detail != "low" {
+		t.Fatalf("ExtractChatContextImages() = %#v, want decoded raw base64 with detail", images[0])
+	}
+}
+
 func TestImageRequestDefaultsToAutoModel(t *testing.T) {
 	body := map[string]any{
 		"messages": []any{
@@ -1550,6 +1584,54 @@ func TestResponseImageGenerationRequestPreservesOfficialToolOptions(t *testing.T
 	}
 }
 
+func TestResponseImageGenerationRequestPreservesRemoteImageURLs(t *testing.T) {
+	body := map[string]any{
+		"model": "gpt-5.5",
+		"input": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "input_text", "text": "生成封面"},
+			map[string]any{"type": "input_image", "image_url": map[string]any{"url": "https://example.test/input.png", "detail": "high"}},
+		}}},
+		"tools": []any{map[string]any{"type": "image_generation", "model": "gpt-image-2", "input_image_mask": map[string]any{"image_url": map[string]any{"url": "https://example.test/mask.png", "detail": "low"}}}},
+	}
+
+	request, _, err := ResponseImageGenerationRequest(body, "admin", nil)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
+	}
+	if len(request.Images) != 1 || request.Images[0] != "https://example.test/input.png" {
+		t.Fatalf("request.Images = %#v, want remote url preserved", request.Images)
+	}
+	if len(request.InputImages) != 1 || request.InputImages[0].URL != "https://example.test/input.png" || request.InputImages[0].Detail != "high" {
+		t.Fatalf("request.InputImages = %#v, want remote url and detail preserved", request.InputImages)
+	}
+	if request.InputImageMask != "https://example.test/mask.png" {
+		t.Fatalf("InputImageMask = %q, want remote url preserved", request.InputImageMask)
+	}
+	if request.InputImageMaskImage == nil || request.InputImageMaskImage.URL != "https://example.test/mask.png" || request.InputImageMaskImage.Detail != "low" {
+		t.Fatalf("InputImageMaskImage = %#v, want remote url and detail preserved", request.InputImageMaskImage)
+	}
+}
+
+func TestResponseImageGenerationRequestKeepsRawBase64AsData(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("raw image"))
+	body := map[string]any{
+		"model": "gpt-5.5",
+		"input": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "input_text", "text": "生成封面"},
+			map[string]any{"type": "input_image", "image_url": map[string]any{"url": encoded, "detail": "low"}},
+		}}},
+		"tools": []any{map[string]any{"type": "image_generation", "model": "gpt-image-2"}},
+	}
+
+	request, _, err := ResponseImageGenerationRequest(body, "admin", nil)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
+	}
+	if len(request.InputImages) != 1 || string(request.InputImages[0].Data) != "raw image" || request.InputImages[0].URL != "" || request.InputImages[0].Detail != "low" {
+		t.Fatalf("request.InputImages = %#v, want decoded raw base64 with detail", request.InputImages)
+	}
+}
+
 func TestCodexImageModelStillUsesSeparateCodexImageRoute(t *testing.T) {
 	request := ConversationRequest{Model: "codex-gpt-image-2"}
 	if !request.UsesResponsesImageRoute() {
@@ -1997,6 +2079,76 @@ func TestStreamImageResponseErrorsWhenNoImageOutput(t *testing.T) {
 	}
 	if err := <-errCh; err == nil || err.Error() != "upstream image stream completed without image output" {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStreamImageResponsePreservesAllImageItems(t *testing.T) {
+	outputs := make(chan ImageOutput, 1)
+	outputs <- ImageOutput{Kind: "result", Model: "gpt-image-2", Created: 123, Data: []map[string]any{{"b64_json": base64.StdEncoding.EncodeToString([]byte("first"))}, {"b64_json": base64.StdEncoding.EncodeToString([]byte("second"))}}}
+	close(outputs)
+	events, errCh := StreamImageResponse(outputs, "draw", "gpt-image-2")
+	var doneCount int
+	var completed map[string]any
+	for event := range events {
+		if eventType, _ := event["type"].(string); eventType == "response.output_item.done" {
+			doneCount++
+		}
+		if eventType, _ := event["type"].(string); eventType == "response.completed" {
+			completed = util.StringMap(event["response"])
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamImageResponse() err = %v", err)
+	}
+	if doneCount != 2 {
+		t.Fatalf("output item done count = %d, want 2", doneCount)
+	}
+	if output := util.AsMapSlice(completed["output"]); len(output) != 2 {
+		t.Fatalf("response.completed output = %#v, want 2 items", completed["output"])
+	}
+}
+
+func TestStreamImageResponsePreservesResultBatches(t *testing.T) {
+	outputs := make(chan ImageOutput, 2)
+	outputs <- ImageOutput{Kind: "result", Model: "gpt-image-2", Created: 123, Data: []map[string]any{{"b64_json": base64.StdEncoding.EncodeToString([]byte("first"))}}}
+	outputs <- ImageOutput{Kind: "result", Model: "gpt-image-2", Created: 123, Data: []map[string]any{{"b64_json": base64.StdEncoding.EncodeToString([]byte("second"))}}}
+	close(outputs)
+	events, errCh := StreamImageResponse(outputs, "draw", "gpt-image-2")
+	var completed map[string]any
+	for event := range events {
+		if eventType, _ := event["type"].(string); eventType == "response.completed" {
+			completed = util.StringMap(event["response"])
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamImageResponse() err = %v", err)
+	}
+	output := util.AsMapSlice(completed["output"])
+	if len(output) != 2 {
+		t.Fatalf("response.completed output = %#v, want both result batches", completed["output"])
+	}
+	if output[0]["id"] != "ig_1" || output[1]["id"] != "ig_2" {
+		t.Fatalf("response.completed output ids = %#v, want unique sequential ids", output)
+	}
+}
+
+func TestStreamImageResponseDrainsAfterMessageOutput(t *testing.T) {
+	outputs := make(chan ImageOutput, 2)
+	outputs <- ImageOutput{Kind: "message", Model: "gpt-image-2", Created: 123, Text: "text result"}
+	outputs <- ImageOutput{Kind: "result", Model: "gpt-image-2", Created: 123, Data: []map[string]any{{"b64_json": base64.StdEncoding.EncodeToString([]byte("image"))}}}
+	close(outputs)
+	events, errCh := StreamImageResponse(outputs, "draw", "gpt-image-2")
+	var completed map[string]any
+	for event := range events {
+		if eventType, _ := event["type"].(string); eventType == "response.completed" {
+			completed = util.StringMap(event["response"])
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("StreamImageResponse() err = %v", err)
+	}
+	if output := util.AsMapSlice(completed["output"]); len(output) != 2 {
+		t.Fatalf("response.completed output = %#v, want text and image output", completed["output"])
 	}
 }
 

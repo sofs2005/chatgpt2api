@@ -163,6 +163,8 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		Messages:               NormalizeMessages(util.AsMapSlice(body["messages"]), nil),
 		Images:                 encoded,
 		InputImageMask:         responseImageMask(body["input_image_mask"]),
+		InputImages:            responsesInputImagesFromUploads(images),
+		InputImageMaskImage:    responseImageMaskImage(body["input_image_mask"]),
 		MessageAsError:         true,
 		AcquireImageOutputSlot: imageOutputSlotAcquirer(body),
 		ChargeImageOutput:      imageOutputCharger(body),
@@ -233,6 +235,9 @@ func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]s
 	if e == nil || e.Accounts == nil {
 		return fmt.Errorf("no account service configured")
 	}
+	if exhaustedTokens == nil {
+		exhaustedTokens = map[string]struct{}{}
+	}
 	lease, err := e.Accounts.AcquireTextAccessToken(exhaustedTokens)
 	if err != nil {
 		return err
@@ -247,6 +252,32 @@ func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]s
 		return nil
 	}
 	return fn(e.TextBackend(lease.Token), lease)
+}
+
+func (e *Engine) RunEditableFileExport(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (service.EditableFileRunResult, error) {
+	if e == nil {
+		return service.EditableFileRunResult{}, fmt.Errorf("no engine configured")
+	}
+	var result service.EditableFileRunResult
+	var exhausted map[string]struct{}
+	err := e.withTextLease(ctx, exhausted, func(client *backend.Client, lease service.AccountLease) error {
+		accountName := ""
+		if account := e.Accounts.GetAccount(lease.Token); account != nil {
+			accountName = util.Clean(account["email"])
+		}
+		recordAccountUsage(ctx, lease.Token, accountName)
+		exported, exportErr := client.ExportEditableFile(ctx, kind, prompt, base64Images, outputDir)
+		if exportErr != nil {
+			return exportErr
+		}
+		result = service.EditableFileRunResult{
+			ConversationID: exported.ConversationID,
+			PrimaryPath:    exported.PrimaryPath,
+			ZipPath:        exported.ZipPath,
+		}
+		return nil
+	})
+	return result, err
 }
 
 var streamTextDeltasForTokenRetry = func(ctx context.Context, e *Engine, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
@@ -888,7 +919,7 @@ func (e *Engine) ImageChatResponse(ctx context.Context, body map[string]any) (ma
 		return nil, nil, err
 	}
 	size := util.Clean(body["size"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), InputImages: responsesInputImagesFromUploads(images), InputImageMaskImage: responseImageMaskImage(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
@@ -914,7 +945,7 @@ func (e *Engine) ImageChatEvents(ctx context.Context, body map[string]any) (<-ch
 			return
 		}
 		size := util.Clean(body["size"])
-		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
+		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), Background: util.Clean(body["background"]), Moderation: util.Clean(body["moderation"]), Style: util.Clean(body["style"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), InputImageMask: responseImageMask(body["input_image_mask"]), InputImages: responsesInputImagesFromUploads(images), InputImageMaskImage: responseImageMaskImage(body["input_image_mask"]), AcquireImageOutputSlot: imageOutputSlotAcquirer(body), ChargeImageOutput: imageOutputCharger(body)}
 		if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 			request.PartialImages = &partialImages
 		}
@@ -977,6 +1008,7 @@ func applyImageToolOptionsToRequest(request *ConversationRequest, options ImageT
 	request.Style = options.Style
 	request.PartialImages = options.PartialImages
 	request.InputImageMask = options.InputImageMask
+	request.InputImageMaskImage = options.InputImageMaskImage
 }
 
 func ChatImageArgs(body map[string]any) (string, string, int, []UploadedImage, []map[string]any, error) {
@@ -1107,23 +1139,44 @@ func ExtractImagesFromMessageContent(content any) []UploadedImage {
 		}
 		itemType := util.Clean(item["type"])
 		imageURL := ""
+		detail := ""
 		if itemType == "image_url" {
 			if obj, ok := item["image_url"].(map[string]any); ok {
-				imageURL = util.Clean(obj["url"])
+				imageURL = firstNonEmpty(util.Clean(obj["url"]), util.Clean(obj["image_url"]))
+				detail = firstNonEmpty(util.Clean(obj["detail"]), util.Clean(item["detail"]))
 			} else {
-				imageURL = util.Clean(item["image_url"])
+				imageURL = firstNonEmpty(util.Clean(item["image_url"]), util.Clean(item["url"]))
+				detail = util.Clean(item["detail"])
 			}
 		}
 		if itemType == "input_image" {
-			imageURL = util.Clean(item["image_url"])
+			if obj, ok := item["image_url"].(map[string]any); ok {
+				imageURL = firstNonEmpty(util.Clean(obj["url"]), util.Clean(obj["image_url"]))
+				detail = firstNonEmpty(util.Clean(obj["detail"]), util.Clean(item["detail"]))
+			} else {
+				imageURL = firstNonEmpty(util.Clean(item["image_url"]), util.Clean(item["url"]))
+				detail = util.Clean(item["detail"])
+			}
+		}
+		if imageURL == "" {
+			continue
 		}
 		if strings.HasPrefix(imageURL, "data:") {
 			header, data, _ := strings.Cut(imageURL, ",")
 			mime := strings.TrimPrefix(strings.Split(header, ";")[0], "data:")
 			bytes, err := base64.StdEncoding.DecodeString(data)
 			if err == nil {
-				images = append(images, UploadedImage{Data: bytes, Filename: "image.png", ContentType: firstNonEmpty(mime, "image/png")})
+				images = append(images, UploadedImage{Data: bytes, Filename: "image.png", ContentType: firstNonEmpty(mime, "image/png"), URL: imageURL, Detail: detail})
 			}
+			continue
+		}
+		if strings.HasPrefix(imageURL, "http://") || strings.HasPrefix(imageURL, "https://") {
+			images = append(images, UploadedImage{Filename: "image.png", URL: imageURL, Detail: detail})
+			continue
+		}
+		bytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(imageURL))
+		if err == nil {
+			images = append(images, UploadedImage{Data: bytes, Filename: "image.png", ContentType: "image/png", Detail: detail})
 		}
 	}
 	return images
@@ -1256,10 +1309,13 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 		size = "auto"
 	}
 	images := []string(nil)
+	structuredImages := []backend.ResponsesInputImage(nil)
 	if previous != nil {
 		images = append(images, previous.Images...)
+		structuredImages = append(structuredImages, responsesInputImages(previous.Images)...)
 	}
 	images = append(images, EncodeImages(inputImages)...)
+	structuredImages = append(structuredImages, responsesInputImagesFromUploads(inputImages)...)
 	toolModel := firstNonEmpty(util.Clean(tool["model"]), responseModel)
 	if !util.IsResponsesImageToolModel(toolModel) {
 		return ConversationRequest{}, "", HTTPError{Status: 400, Message: "unsupported image_generation model: " + toolModel}
@@ -1267,21 +1323,23 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 	outputFormat := NormalizeImageOutputFormat(firstNonEmpty(util.Clean(tool["output_format"]), util.Clean(body["output_format"])))
 	partialImages, hasPartialImages := normalizedPositiveInt(firstNonNil(tool["partial_images"], body["partial_images"]))
 	request := ConversationRequest{
-		Prompt:         prompt,
-		Model:          responseImageGenerationModel(toolModel),
-		Messages:       messages,
-		N:              n,
-		Size:           size,
-		Quality:        firstNonEmpty(util.Clean(tool["quality"]), util.Clean(body["quality"])),
-		Background:     firstNonEmpty(util.Clean(tool["background"]), util.Clean(body["background"])),
-		Moderation:     firstNonEmpty(util.Clean(tool["moderation"]), util.Clean(body["moderation"])),
-		Style:          firstNonEmpty(util.Clean(tool["style"]), util.Clean(body["style"])),
-		OutputFormat:   outputFormat,
-		ResponseFormat: firstNonEmpty(util.Clean(tool["response_format"]), util.Clean(body["response_format"]), "b64_json"),
-		OwnerID:        scope,
-		OwnerName:      util.Clean(body["owner_name"]),
-		Images:         images,
-		InputImageMask: responseImageMask(firstNonNil(tool["input_image_mask"], body["input_image_mask"])),
+		Prompt:              prompt,
+		Model:               responseImageGenerationModel(toolModel),
+		Messages:            messages,
+		N:                   n,
+		Size:                size,
+		Quality:             firstNonEmpty(util.Clean(tool["quality"]), util.Clean(body["quality"])),
+		Background:          firstNonEmpty(util.Clean(tool["background"]), util.Clean(body["background"])),
+		Moderation:          firstNonEmpty(util.Clean(tool["moderation"]), util.Clean(body["moderation"])),
+		Style:               firstNonEmpty(util.Clean(tool["style"]), util.Clean(body["style"])),
+		OutputFormat:        outputFormat,
+		ResponseFormat:      firstNonEmpty(util.Clean(tool["response_format"]), util.Clean(body["response_format"]), "b64_json"),
+		OwnerID:             scope,
+		OwnerName:           util.Clean(body["owner_name"]),
+		Images:              images,
+		InputImageMask:      responseImageMask(firstNonNil(tool["input_image_mask"], body["input_image_mask"])),
+		InputImages:         structuredImages,
+		InputImageMaskImage: responseImageMaskImage(firstNonNil(tool["input_image_mask"], body["input_image_mask"])),
 	}
 	if hasPartialImages {
 		request.PartialImages = &partialImages
@@ -1398,27 +1456,31 @@ func StreamImageResponse(outputs <-chan ImageOutput, prompt, model string) (<-ch
 		responseID := "resp_" + util.NewHex(32)
 		created := time.Now().Unix()
 		out <- ResponseCreated(responseID, model, created)
+		items := []map[string]any(nil)
 		for output := range outputs {
 			if output.Kind == "message" {
 				item := TextOutputItem(output.Text, "", "completed")
-				out <- map[string]any{"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0, "content_index": 0, "delta": output.Text}
-				out <- map[string]any{"type": "response.output_text.done", "item_id": item["id"], "output_index": 0, "content_index": 0, "text": output.Text}
-				out <- map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item}
-				out <- ResponseCompleted(responseID, model, created, []map[string]any{item})
-				errCh <- nil
-				return
+				index := len(items)
+				items = append(items, item)
+				out <- map[string]any{"type": "response.output_text.delta", "item_id": item["id"], "output_index": index, "content_index": 0, "delta": output.Text}
+				out <- map[string]any{"type": "response.output_text.done", "item_id": item["id"], "output_index": index, "content_index": 0, "text": output.Text}
+				out <- map[string]any{"type": "response.output_item.done", "output_index": index, "item": item}
+				continue
 			}
 			if output.Kind != "result" {
 				continue
 			}
-			items := ImageOutputItems(prompt, output.Data, "")
-			if len(items) > 0 {
-				item := items[0]
-				out <- map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item}
-				out <- ResponseCompleted(responseID, model, created, []map[string]any{item})
-				errCh <- nil
-				return
+			for _, item := range ImageOutputItems(prompt, output.Data, "") {
+				index := len(items)
+				item["id"] = fmt.Sprintf("ig_%d", index+1)
+				items = append(items, item)
+				out <- map[string]any{"type": "response.output_item.done", "output_index": index, "item": item}
 			}
+		}
+		if len(items) > 0 {
+			out <- ResponseCompleted(responseID, model, created, items)
+			errCh <- nil
+			return
 		}
 		errCh <- fmt.Errorf("upstream image stream completed without image output")
 	}()
@@ -1473,15 +1535,33 @@ func ResponseImageGenerationTool(body map[string]any) map[string]any {
 }
 
 func responseImageMask(value any) string {
+	if image := responseImageMaskImage(value); image != nil {
+		return image.URL
+	}
+	return util.Clean(value)
+}
+
+func responseImageMaskImage(value any) *backend.ResponsesInputImage {
 	item := util.StringMap(value)
-	imageURL := util.Clean(item["image_url"])
+	detail := ""
+	imageURL := ""
+	if nested := util.StringMap(item["image_url"]); nested != nil {
+		imageURL = firstNonEmpty(util.Clean(nested["url"]), util.Clean(nested["image_url"]))
+		detail = firstNonEmpty(util.Clean(nested["detail"]), util.Clean(item["detail"]))
+	}
+	if imageURL == "" {
+		imageURL = firstNonEmpty(util.Clean(item["image_url"]), util.Clean(item["url"]))
+		detail = util.Clean(item["detail"])
+	}
 	if imageURL == "" {
 		imageURL = util.Clean(value)
 	}
-	if !strings.HasPrefix(imageURL, "data:") {
-		return ""
+	image := responsesInputImage(imageURL)
+	image.Detail = strings.TrimSpace(detail)
+	if len(image.Data) == 0 && strings.TrimSpace(image.URL) == "" {
+		return nil
 	}
-	return imageURL
+	return &image
 }
 
 func ExtractResponsePrompt(input any) string {
@@ -1516,10 +1596,7 @@ func ExtractResponseImages(input any) []UploadedImage {
 		}
 		switch util.Clean(item["type"]) {
 		case "input_image":
-			imageURL := util.Clean(item["image_url"])
-			if strings.HasPrefix(imageURL, "data:") {
-				images = append(images, ExtractImagesFromMessageContent([]any{item})...)
-			}
+			images = append(images, ExtractImagesFromMessageContent([]any{item})...)
 		case "image_generation_call":
 			if result := util.Clean(item["result"]); result != "" {
 				if data, err := base64.StdEncoding.DecodeString(result); err == nil {

@@ -36,6 +36,9 @@ func (a *App) routes() []appRoute {
 		exact(http.MethodGet, "/v1/models", a.handleModels),
 		exact(http.MethodPost, "/v1/images/generations", a.handleImageGenerations),
 		exact(http.MethodPost, "/v1/images/edits", a.handleImageEdits),
+			exact(http.MethodPost, "/v1/ppt/generations", a.handleEditableFileGenerations),
+			exact(http.MethodPost, "/v1/psd/generations", a.handleEditableFileGenerations),
+			exact(http.MethodGet, "/v1/editable-file-tasks", a.handleEditableFileTasks),
 		exact(http.MethodPost, "/v1/chat/completions", a.handleChatCompletions),
 		exact(http.MethodPost, "/v1/responses", a.handleResponses),
 		exact(http.MethodPost, "/v1/messages", a.handleMessages),
@@ -85,6 +88,7 @@ func (a *App) routes() []appRoute {
 
 		prefix("/images/", a.handleImageFile),
 		prefix("/image-references/", a.handleImageReferenceFile),
+			prefix("/files/", a.handlePublicEditableFile),
 		prefix("/image-thumbnails/", a.handleImageThumbnail),
 		prefix("/login-page-images/", http.StripPrefix("/login-page-images/", http.FileServer(http.Dir(a.config.LoginPageImagesDir()))).ServeHTTP),
 	}

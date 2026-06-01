@@ -71,6 +71,8 @@ type ConversationRequest struct {
 	ToolChoice              any
 	Images                  []string
 	InputImageMask          string
+	InputImages             []backend.ResponsesInputImage
+	InputImageMaskImage     *backend.ResponsesInputImage
 	N                       int
 	Size                    string
 	Quality                 string
@@ -133,11 +135,12 @@ type ImageOutputOptions struct {
 }
 
 type ImageToolOptions struct {
-	Background     string
-	Moderation     string
-	Style          string
-	PartialImages  *int
-	InputImageMask string
+	Background          string
+	Moderation          string
+	Style               string
+	PartialImages       *int
+	InputImageMask      string
+	InputImageMaskImage *backend.ResponsesInputImage
 }
 
 func ImageOutputOptionsFromPayload(payload map[string]any) ImageOutputOptions {
@@ -154,10 +157,11 @@ func ImageOutputOptionsFromPayload(payload map[string]any) ImageOutputOptions {
 
 func ImageToolOptionsFromPayload(payload map[string]any) ImageToolOptions {
 	options := ImageToolOptions{
-		Background:     util.Clean(payload["background"]),
-		Moderation:     util.Clean(payload["moderation"]),
-		Style:          util.Clean(payload["style"]),
-		InputImageMask: responseImageMask(payload["input_image_mask"]),
+		Background:          util.Clean(payload["background"]),
+		Moderation:          util.Clean(payload["moderation"]),
+		Style:               util.Clean(payload["style"]),
+		InputImageMask:      responseImageMask(payload["input_image_mask"]),
+		InputImageMaskImage: responseImageMaskImage(payload["input_image_mask"]),
 	}
 	if partialImages, ok := normalizedPositiveInt(payload["partial_images"]); ok {
 		options.PartialImages = &partialImages
@@ -611,6 +615,7 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 				requestForToken.UpstreamParentMessageID = ""
 				if requestForToken.FallbackReferenceImage != "" {
 					requestForToken.Images = append(append([]string(nil), request.Images...), requestForToken.FallbackReferenceImage)
+					requestForToken.InputImages = append(append([]backend.ResponsesInputImage(nil), request.InputImages...), responsesInputImage(requestForToken.FallbackReferenceImage))
 				}
 			}
 			emittedForToken := false
@@ -851,6 +856,14 @@ func (e *Engine) StreamResponsesImageOutputs(ctx context.Context, client *backen
 		if strings.TrimSpace(prompt) == "" {
 			prompt = request.Prompt
 		}
+		inputImages := request.InputImages
+		if len(inputImages) == 0 {
+			inputImages = responsesInputImages(request.Images)
+		}
+		inputImageMask := request.InputImageMaskImage
+		if inputImageMask == nil {
+			inputImageMask = responsesInputImagePtr(request.InputImageMask)
+		}
 		events, upstreamErr := client.StreamResponsesImage(ctx, backend.ResponsesImageRequest{
 			Prompt:            prompt,
 			Model:             request.Model,
@@ -862,8 +875,8 @@ func (e *Engine) StreamResponsesImageOutputs(ctx context.Context, client *backen
 			OutputFormat:      request.OutputFormat,
 			OutputCompression: request.OutputCompression,
 			PartialImages:     request.PartialImages,
-			InputImages:       responsesInputImages(request.Images),
-			InputImageMask:    responsesInputImagePtr(request.InputImageMask),
+			InputImages:       inputImages,
+			InputImageMask:    inputImageMask,
 			ConversationID:    request.UpstreamConversationID,
 			ParentMessageID:   request.UpstreamParentMessageID,
 		})
@@ -941,7 +954,7 @@ func responsesInputImages(values []string) []backend.ResponsesInputImage {
 	out := make([]backend.ResponsesInputImage, 0, len(values))
 	for _, value := range values {
 		image := responsesInputImage(value)
-		if len(image.Data) > 0 {
+		if len(image.Data) > 0 || strings.TrimSpace(image.URL) != "" {
 			out = append(out, image)
 		}
 	}
@@ -950,7 +963,7 @@ func responsesInputImages(values []string) []backend.ResponsesInputImage {
 
 func responsesInputImagePtr(value string) *backend.ResponsesInputImage {
 	image := responsesInputImage(value)
-	if len(image.Data) == 0 {
+	if len(image.Data) == 0 && strings.TrimSpace(image.URL) == "" {
 		return nil
 	}
 	return &image
@@ -961,9 +974,9 @@ func responsesInputImage(value string) backend.ResponsesInputImage {
 	if value == "" {
 		return backend.ResponsesInputImage{}
 	}
-	contentType := "image/png"
-	dataPart := value
 	if strings.HasPrefix(value, "data:") {
+		contentType := "image/png"
+		dataPart := value
 		header, data, ok := strings.Cut(value, ",")
 		if ok {
 			dataPart = data
@@ -971,12 +984,20 @@ func responsesInputImage(value string) backend.ResponsesInputImage {
 				contentType = mimeType
 			}
 		}
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(dataPart))
+		if err != nil {
+			return backend.ResponsesInputImage{URL: value}
+		}
+		return backend.ResponsesInputImage{Data: decoded, ContentType: contentType, URL: value}
 	}
-	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(dataPart))
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+		return backend.ResponsesInputImage{URL: value}
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
 	if err != nil {
 		return backend.ResponsesInputImage{}
 	}
-	return backend.ResponsesInputImage{Data: data, ContentType: contentType}
+	return backend.ResponsesInputImage{Data: decoded, ContentType: "image/png"}
 }
 
 func firstNonZeroInt64(values ...int64) int64 {
@@ -1660,9 +1681,30 @@ func CountTextTokens(text, model string) int {
 func EncodeImages(images []UploadedImage) []string {
 	out := make([]string, 0, len(images))
 	for _, image := range images {
+		if url := strings.TrimSpace(image.URL); url != "" {
+			out = append(out, url)
+			continue
+		}
 		if len(image.Data) > 0 {
 			out = append(out, base64.StdEncoding.EncodeToString(image.Data))
 		}
+	}
+	return out
+}
+
+func responsesInputImagesFromUploads(images []UploadedImage) []backend.ResponsesInputImage {
+	out := make([]backend.ResponsesInputImage, 0, len(images))
+	for _, image := range images {
+		input := backend.ResponsesInputImage{
+			Data:        image.Data,
+			ContentType: image.ContentType,
+			URL:         strings.TrimSpace(image.URL),
+			Detail:      strings.TrimSpace(image.Detail),
+		}
+		if input.URL == "" && len(input.Data) == 0 {
+			continue
+		}
+		out = append(out, input)
 	}
 	return out
 }
@@ -1671,6 +1713,8 @@ type UploadedImage struct {
 	Data        []byte
 	Filename    string
 	ContentType string
+	URL         string
+	Detail      string
 }
 
 func AssistantText(event map[string]any, currentText, historyText string) string {

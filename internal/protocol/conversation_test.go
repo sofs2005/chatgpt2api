@@ -60,6 +60,19 @@ func testPNGDataURL(t *testing.T, width, height int) string {
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
+func TestResponsesInputImageKeepsRemoteURLAndRawBase64(t *testing.T) {
+	remote := responsesInputImage("https://example.test/input.png")
+	if remote.URL != "https://example.test/input.png" || len(remote.Data) != 0 {
+		t.Fatalf("remote responsesInputImage() = %#v, want URL without data", remote)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte("raw image"))
+	raw := responsesInputImage(encoded)
+	if string(raw.Data) != "raw image" || raw.ContentType != "image/png" || raw.URL != "" {
+		t.Fatalf("raw responsesInputImage() = %#v, want decoded png data", raw)
+	}
+}
+
 func TestCountMessageTokensCountsTextContentParts(t *testing.T) {
 	messages := []map[string]any{{
 		"role": "user",

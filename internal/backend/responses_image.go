@@ -50,6 +50,8 @@ var officialImageDownloadRetryDelay = 750 * time.Millisecond
 type ResponsesInputImage struct {
 	Data        []byte
 	ContentType string
+	URL         string
+	Detail      string
 }
 
 type ResponsesImageRequest struct {
@@ -187,15 +189,23 @@ func (c *Client) streamOfficialResponsesImage(ctx context.Context, request Respo
 	}
 	attachments := make([]uploadedImageRef, 0, len(request.InputImages))
 	for index, input := range request.InputImages {
-		ref, uploadErr := c.uploadImage(ctx, input, fmt.Sprintf("image_%d.%s", index+1, uploadImageExtension(normalizeUploadImageFormat(input.ContentType))))
+		resolved, resolveErr := c.resolveResponsesInputImage(ctx, input)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		ref, uploadErr := c.uploadImage(ctx, resolved, fmt.Sprintf("image_%d.%s", index+1, uploadImageExtension(normalizeUploadImageFormat(resolved.ContentType))))
 		if uploadErr != nil {
 			return uploadErr
 		}
 		attachments = append(attachments, ref)
 	}
 	var maskRef *uploadedImageRef
-	if request.InputImageMask != nil && len(request.InputImageMask.Data) > 0 {
-		ref, uploadErr := c.uploadImage(ctx, *request.InputImageMask, "mask."+uploadImageExtension(normalizeUploadImageFormat(request.InputImageMask.ContentType)))
+	if request.InputImageMask != nil && (len(request.InputImageMask.Data) > 0 || strings.TrimSpace(request.InputImageMask.URL) != "") {
+		resolvedMask, resolveErr := c.resolveResponsesInputImage(ctx, *request.InputImageMask)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		ref, uploadErr := c.uploadImage(ctx, resolvedMask, "mask."+uploadImageExtension(normalizeUploadImageFormat(resolvedMask.ContentType)))
 		if uploadErr != nil {
 			return uploadErr
 		}
@@ -276,10 +286,9 @@ func buildResponsesImagePayload(request ResponsesImageRequest) ([]byte, error) {
 	}
 	content := []any{map[string]any{"type": "input_text", "text": prompt}}
 	for _, image := range request.InputImages {
-		if len(image.Data) == 0 {
-			continue
+		if url := imageInputURL(image); url != nil {
+			content = append(content, map[string]any{"type": "input_image", "image_url": url})
 		}
-		content = append(content, map[string]any{"type": "input_image", "image_url": imageDataURL(image)})
 	}
 	tool := map[string]any{"type": "image_generation", "action": "generate"}
 	if len(request.InputImages) > 0 {
@@ -308,8 +317,10 @@ func buildResponsesImagePayload(request ResponsesImageRequest) ([]byte, error) {
 	if request.PartialImages != nil {
 		tool["partial_images"] = *request.PartialImages
 	}
-	if request.InputImageMask != nil && len(request.InputImageMask.Data) > 0 {
-		tool["input_image_mask"] = map[string]any{"image_url": imageDataURL(*request.InputImageMask)}
+	if request.InputImageMask != nil {
+		if imageURL := imageInputURL(*request.InputImageMask); imageURL != nil {
+			tool["input_image_mask"] = map[string]any{"image_url": imageURL}
+		}
 	}
 	payload := map[string]any{
 		"model":               ResponsesImageMainModel,
@@ -486,30 +497,37 @@ func iterResponsesImageSSE(ctx context.Context, reader io.Reader, out chan<- Res
 		errCh <- iterSSEPayloads(ctx, reader, payloads)
 	}()
 	for payload := range payloads {
-		event, ok, err := parseResponsesImagePayload(payload)
+		events, err := parseResponsesImagePayloads(payload)
 		if err != nil {
 			return err
 		}
-		if !ok {
-			continue
-		}
-		select {
-		case out <- event:
-		case <-ctx.Done():
-			return ctx.Err()
+		for _, event := range events {
+			select {
+			case out <- event:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	return <-errCh
 }
 
 func parseResponsesImagePayload(payload string) (ResponsesImageEvent, bool, error) {
+	events, err := parseResponsesImagePayloads(payload)
+	if err != nil || len(events) == 0 {
+		return ResponsesImageEvent{}, false, err
+	}
+	return events[0], true, nil
+}
+
+func parseResponsesImagePayloads(payload string) ([]ResponsesImageEvent, error) {
 	payload = strings.TrimSpace(payload)
 	if payload == "" || payload == "[DONE]" {
-		return ResponsesImageEvent{}, false, nil
+		return nil, nil
 	}
 	var data map[string]any
 	if err := json.Unmarshal([]byte(payload), &data); err != nil {
-		return ResponsesImageEvent{}, false, err
+		return nil, err
 	}
 	eventType := util.Clean(data["type"])
 	event := ResponsesImageEvent{Type: eventType, Created: time.Now().Unix(), Raw: data}
@@ -519,25 +537,35 @@ func parseResponsesImagePayload(payload string) (ResponsesImageEvent, bool, erro
 		event.PartialImageIndex = util.ToInt(data["partial_image_index"], 0)
 		event.OutputFormat = util.Clean(data["output_format"])
 		event.Background = util.Clean(data["background"])
-		return event, event.PartialImage != "", nil
+		if event.PartialImage == "" {
+			return nil, nil
+		}
+		return []ResponsesImageEvent{event}, nil
 	case "response.output_item.done":
 		item := util.StringMap(data["item"])
 		if util.Clean(item["type"]) != "image_generation_call" {
-			return event, false, nil
+			return nil, nil
 		}
 		mergeResponsesImageItem(&event, item)
-		return event, event.Result != "", nil
+		if event.Result == "" {
+			return nil, nil
+		}
+		return []ResponsesImageEvent{event}, nil
 	case "response.completed":
 		response := util.StringMap(data["response"])
+		var events []ResponsesImageEvent
 		for _, raw := range anySlice(response["output"]) {
 			item, ok := raw.(map[string]any)
 			if !ok || util.Clean(item["type"]) != "image_generation_call" {
 				continue
 			}
-			mergeResponsesImageItem(&event, item)
-			return event, event.Result != "", nil
+			itemEvent := event
+			mergeResponsesImageItem(&itemEvent, item)
+			if itemEvent.Result != "" {
+				events = append(events, itemEvent)
+			}
 		}
-		return event, false, nil
+		return events, nil
 	case "error":
 		message := util.Clean(data["message"])
 		if message == "" {
@@ -546,9 +574,9 @@ func parseResponsesImagePayload(payload string) (ResponsesImageEvent, bool, erro
 		if message == "" {
 			message = "codex responses image route returned an error"
 		}
-		return event, false, fmt.Errorf("%s", message)
+		return nil, fmt.Errorf("%s", message)
 	default:
-		return event, false, nil
+		return nil, nil
 	}
 }
 
@@ -576,6 +604,24 @@ func imageDataURL(image ResponsesInputImage) string {
 		contentType = "image/png"
 	}
 	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(image.Data)
+}
+
+func imageInputURL(image ResponsesInputImage) map[string]any {
+	if url := strings.TrimSpace(image.URL); url != "" {
+		out := map[string]any{"url": url}
+		if detail := strings.TrimSpace(image.Detail); detail != "" {
+			out["detail"] = detail
+		}
+		return out
+	}
+	if len(image.Data) == 0 {
+		return nil
+	}
+	out := map[string]any{"url": imageDataURL(image)}
+	if detail := strings.TrimSpace(image.Detail); detail != "" {
+		out["detail"] = detail
+	}
+	return out
 }
 
 func max(a, b int) int {
@@ -756,6 +802,45 @@ func officialImageModelSlug(model string) string {
 	}
 }
 
+func (c *Client) resolveResponsesInputImage(ctx context.Context, input ResponsesInputImage) (ResponsesInputImage, error) {
+	if len(input.Data) > 0 {
+		return input, nil
+	}
+	if strings.TrimSpace(input.URL) == "" {
+		return ResponsesInputImage{}, fmt.Errorf("image data is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, input.URL, nil)
+	if err != nil {
+		return ResponsesInputImage{}, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return ResponsesInputImage{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return ResponsesInputImage{}, upstreamHTTPError("image_download", resp.StatusCode, data)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ResponsesInputImage{}, err
+	}
+	if len(data) == 0 {
+		return ResponsesInputImage{}, fmt.Errorf("image data is empty")
+	}
+	contentType := strings.TrimSpace(input.ContentType)
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	if strings.TrimSpace(contentType) == "" {
+		contentType = "image/png"
+	}
+	input.Data = data
+	input.ContentType = contentType
+	return input, nil
+}
+
 func (c *Client) uploadImage(ctx context.Context, input ResponsesInputImage, fileName string) (uploadedImageRef, error) {
 	if len(input.Data) == 0 {
 		return uploadedImageRef{}, fmt.Errorf("image data is required")
@@ -765,6 +850,9 @@ func (c *Client) uploadImage(ctx context.Context, input ResponsesInputImage, fil
 		return uploadedImageRef{}, fmt.Errorf("image decode failed: %w", err)
 	}
 	contentType := strings.TrimSpace(input.ContentType)
+	if contentType == "" {
+		contentType = http.DetectContentType(input.Data)
+	}
 	if contentType == "" {
 		contentType = "image/png"
 	}

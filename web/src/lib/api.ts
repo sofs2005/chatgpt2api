@@ -440,13 +440,14 @@ export type SystemUpdateResult = {
 
 export type ImageResponse = {
   created: number;
-  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string; detail?: string }>;
 };
 
 export type CreationTaskData = {
   b64_json?: string;
   url?: string;
   revised_prompt?: string;
+  detail?: string;
   text_response?: string;
   width?: number;
   height?: number;
@@ -485,6 +486,7 @@ export type FallbackReferenceImage = {
   path?: string;
   url?: string;
   b64_json?: string;
+  detail?: string;
   outputFormat?: ImageOutputFormat;
 };
 
@@ -1086,7 +1088,7 @@ export async function createChatCompletionTask(
   prompt: string,
   model: ImageModel,
   messages: CreationTaskMessage[],
-  referenceImages?: { name: string; dataUrl: string }[],
+  referenceImages?: { name: string; dataUrl: string; detail?: string }[],
 ) {
   const body: Record<string, unknown> = {
     client_task_id: clientTaskId,
@@ -1096,11 +1098,11 @@ export async function createChatCompletionTask(
   };
 
   if (referenceImages && referenceImages.length > 0) {
-    const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+    const content: Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }> = [
       { type: "text", text: prompt },
       ...referenceImages.map((img) => ({
         type: "image_url" as const,
-        image_url: { url: img.dataUrl },
+        image_url: { url: img.dataUrl, ...(img.detail ? { detail: img.detail } : {}) },
       })),
     ];
     body.messages = [

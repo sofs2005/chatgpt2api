@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"chatgpt2api/internal/util"
 )
 
 func ptrInt(value int) *int {
@@ -1524,6 +1526,62 @@ func TestBuildResponsesImagePayloadSendsCompressionOnlyForJPEG(t *testing.T) {
 	webpTool := webpTools[0].(map[string]any)
 	if _, ok := webpTool["output_compression"]; ok {
 		t.Fatalf("webp tool should not include output_compression: %#v", webpTool)
+	}
+}
+
+func TestBuildResponsesImagePayloadPreservesRemoteImageURLAndDetail(t *testing.T) {
+	payload, err := buildResponsesImagePayload(ResponsesImageRequest{
+		Prompt: "生成封面",
+		Model:  "codex-gpt-image-2",
+		InputImages: []ResponsesInputImage{{
+			URL:    "https://example.test/input.png",
+			Detail: "high",
+		}},
+		InputImageMask: &ResponsesInputImage{
+			URL:    "https://example.test/mask.png",
+			Detail: "low",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildResponsesImagePayload() error = %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	tools := body["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	input := util.AsMapSlice(body["input"])
+	if len(input) != 1 {
+		t.Fatalf("input = %#v, want one message", body["input"])
+	}
+	message := input[0]
+	parts := util.AsMapSlice(util.StringMap(message)["content"])
+	if len(parts) != 2 {
+		t.Fatalf("parts = %#v, want prompt plus one remote image", parts)
+	}
+	imagePart := util.StringMap(parts[1])
+	imageURL := util.StringMap(imagePart["image_url"])
+	if imageURL["url"] != "https://example.test/input.png" || imageURL["detail"] != "high" {
+		t.Fatalf("input image_url = %#v", imageURL)
+	}
+	maskURL := util.StringMap(util.StringMap(tool["input_image_mask"])["image_url"])
+	if maskURL["url"] != "https://example.test/mask.png" || maskURL["detail"] != "low" {
+		t.Fatalf("mask image_url = %#v", maskURL)
+	}
+}
+
+func TestParseResponsesImageCompletedPreservesAllImageItems(t *testing.T) {
+	payload := `{"type":"response.completed","response":{"output":[{"id":"ig_1","type":"image_generation_call","result":"first","revised_prompt":"one"},{"id":"ig_2","type":"image_generation_call","result":"second","revised_prompt":"two"}]}}`
+	events, err := parseResponsesImagePayloads(payload)
+	if err != nil {
+		t.Fatalf("parseResponsesImagePayloads() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %#v, want two image_generation_call events", events)
+	}
+	if events[0].Result != "first" || events[1].Result != "second" {
+		t.Fatalf("results = %#v, want both completed outputs", events)
 	}
 }
 

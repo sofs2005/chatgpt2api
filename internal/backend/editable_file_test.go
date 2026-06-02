@@ -389,3 +389,49 @@ func TestEditableArtifactsFromConversationFindsDeepAssetPointerObjects(t *testin
 		t.Fatalf("zip target = %#v", targets[1])
 	}
 }
+
+func TestDownloadEditableArtifactSkipsJSONErrorBodies(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1/attachment/file-psd/download":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"error","error_code":"file_not_found","error_type":"GetDownloadLinkError","error_message":null}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file-psd":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/person.psd"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/person.psd":
+			_, _ = w.Write([]byte("psd-bytes"))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	data, err := newTestBackendClient(server).downloadEditableArtifact(context.Background(), "conv-1", editableArtifact{
+		AttachmentID: "file-psd",
+		FileID:       "file-psd",
+		FileName:     "person.psd",
+	})
+	if err != nil {
+		t.Fatalf("downloadEditableArtifact() error = %v", err)
+	}
+	if string(data) != "psd-bytes" {
+		t.Fatalf("download data = %q, want psd-bytes", string(data))
+	}
+}
+
+func TestPickEditableTargetArtifactsUsesSandboxPathExtensions(t *testing.T) {
+	artifacts := []editableArtifact{
+		{FileName: "file-deck", FileID: "file-deck", SandboxPath: "/mnt/data/final_deck.pptx", CreateTime: 100},
+		{FileName: "file-zip", FileID: "file-zip", SandboxPath: "/mnt/data/final_deck_assets.zip", CreateTime: 101},
+	}
+
+	targets := pickEditableTargetArtifacts(artifacts, "ppt")
+	if len(targets) != 2 {
+		t.Fatalf("targets = %#v, want primary and zip", targets)
+	}
+	if targets[0].FileID != "file-deck" || targets[1].FileID != "file-zip" {
+		t.Fatalf("targets = %#v, want sandbox-path matched artifacts", targets)
+	}
+}

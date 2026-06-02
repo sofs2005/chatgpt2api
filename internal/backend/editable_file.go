@@ -797,6 +797,9 @@ func (c *Client) downloadEditableEndpoint(ctx context.Context, path string, extr
 	if downloadURL := editableDownloadURLFromBody(data); downloadURL != "" {
 		return c.downloadEditableURL(ctx, downloadURL)
 	}
+	if err := editableDownloadErrorFromBody(data); err != nil {
+		return nil, err
+	}
 	return data, nil
 }
 
@@ -856,6 +859,24 @@ func editableDownloadURLFromBody(data []byte) string {
 		return text
 	}
 	return ""
+}
+
+func editableDownloadErrorFromBody(data []byte) error {
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil || len(payload) == 0 {
+		return nil
+	}
+	status := strings.ToLower(util.Clean(payload["status"]))
+	errorCode := util.Clean(payload["error_code"])
+	errorType := util.Clean(payload["error_type"])
+	errorText := firstNonEmpty(util.Clean(payload["error_message"]), util.Clean(payload["error"]), errorCode, errorType)
+	if status != "error" && errorCode == "" && errorType == "" && errorText == "" {
+		return nil
+	}
+	if errorText == "" {
+		errorText = "upstream returned editable download error"
+	}
+	return fmt.Errorf("editable file download failed: %s", errorText)
 }
 
 func uniqueNonEmptyStrings(values ...string) []string {
@@ -1163,8 +1184,7 @@ func firstEditableSandboxPath(text string) string {
 }
 
 func editableArtifactIsZip(artifact editableArtifact) bool {
-	name := strings.ToLower(strings.TrimSpace(artifact.FileName))
-	if strings.HasSuffix(name, ".zip") {
+	if editableArtifactHasSuffix(artifact, ".zip") {
 		return true
 	}
 	mime := strings.ToLower(strings.TrimSpace(artifact.MIMEType))
@@ -1172,14 +1192,28 @@ func editableArtifactIsZip(artifact editableArtifact) bool {
 }
 
 func editableArtifactIsPrimary(kind string, artifact editableArtifact) bool {
-	name := strings.ToLower(strings.TrimSpace(artifact.FileName))
 	mime := strings.ToLower(strings.TrimSpace(artifact.MIMEType))
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "psd":
-		return strings.HasSuffix(name, ".psd") || mime == "image/vnd.adobe.photoshop" || mime == "application/vnd.adobe.photoshop"
+		return editableArtifactHasSuffix(artifact, ".psd") || mime == "image/vnd.adobe.photoshop" || mime == "application/vnd.adobe.photoshop"
 	default:
-		return strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx") || mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" || mime == "application/vnd.ms-powerpoint"
+		return editableArtifactHasSuffix(artifact, ".ppt", ".pptx") || mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" || mime == "application/vnd.ms-powerpoint"
 	}
+}
+
+func editableArtifactHasSuffix(artifact editableArtifact, suffixes ...string) bool {
+	for _, value := range []string{artifact.FileName, artifact.SandboxPath} {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		for _, suffix := range suffixes {
+			if strings.HasSuffix(value, suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func editableAssetFromMap(value map[string]any, seen map[string]struct{}) (editableAsset, bool) {

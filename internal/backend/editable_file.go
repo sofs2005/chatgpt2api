@@ -955,19 +955,24 @@ func editableArtifactsFromAttachmentContainer(value map[string]any, createTime f
 func editableArtifactFromMap(value map[string]any, seen map[string]struct{}) (editableArtifact, bool) {
 	assetPointer := firstNonEmpty(util.Clean(value["asset_pointer"]), util.Clean(value["assetPointer"]))
 	assetPointerID := editableFileIDFromAssetPointer(assetPointer)
-	sandboxPath := firstNonEmpty(util.Clean(value["sandbox_path"]), util.Clean(value["sandboxPath"]), util.Clean(value["path"]))
-	if sandboxPath == "" {
-		if path := editableSandboxPathFromValue(value); path != "" {
-			sandboxPath = path
-		}
-	}
-	name := firstNonEmpty(util.Clean(value["file_name"]), util.Clean(value["name"]), util.Clean(value["filename"]), util.Clean(value["title"]))
-	if name == "" && sandboxPath != "" {
+	sandboxPath := editableSandboxPathFromValue(value)
+	directName := firstNonEmpty(util.Clean(value["file_name"]), util.Clean(value["name"]), util.Clean(value["filename"]), util.Clean(value["title"]))
+	name := directName
+	if sandboxPath != "" && !looksLikeEditableFileURL(name) {
 		name = filepath.Base(sandboxPath)
 	}
+	attachmentID := firstNonEmpty(util.Clean(value["attachment_id"]), util.Clean(value["attachmentId"]), util.Clean(value["file_id"]), assetPointerID)
+	fileID := firstNonEmpty(util.Clean(value["file_id"]), util.Clean(value["fileId"]), util.Clean(value["library_file_id"]), util.Clean(value["libraryFileId"]), assetPointerID)
+	if directName != "" || attachmentID != "" || fileID != "" || assetPointerID != "" {
+		id := util.Clean(value["id"])
+		if !editableGenericOutputID(id) {
+			attachmentID = firstNonEmpty(attachmentID, id)
+			fileID = firstNonEmpty(fileID, id)
+		}
+	}
 	artifact := editableArtifact{
-		AttachmentID: firstNonEmpty(util.Clean(value["attachment_id"]), util.Clean(value["attachmentId"]), util.Clean(value["id"]), util.Clean(value["file_id"]), assetPointerID),
-		FileID:       firstNonEmpty(util.Clean(value["file_id"]), util.Clean(value["fileId"]), util.Clean(value["library_file_id"]), util.Clean(value["libraryFileId"]), assetPointerID, util.Clean(value["id"])),
+		AttachmentID: attachmentID,
+		FileID:       fileID,
 		FileName:     name,
 		MIMEType:     firstNonEmpty(util.Clean(value["mime_type"]), util.Clean(value["mimeType"]), util.Clean(value["content_type"]), util.Clean(value["contentType"])),
 		SandboxPath:  sandboxPath,
@@ -1002,6 +1007,15 @@ func editableFileIDFromAssetPointer(value string) string {
 		return strings.Trim(strings.TrimSpace(match[1]), "/")
 	}
 	return ""
+}
+
+func editableGenericOutputID(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "stdout", "stderr":
+		return true
+	default:
+		return false
+	}
 }
 
 func mergeEditableArtifact(existing, incoming editableArtifact) editableArtifact {
@@ -1127,7 +1141,7 @@ func editableSandboxPaths(text string) []string {
 
 func editableSandboxPathFromValue(value map[string]any) string {
 	for _, key := range []string{"sandbox_path", "sandboxPath", "path"} {
-		if path := util.Clean(value[key]); path != "" {
+		if path := editableSandboxPathCandidate(util.Clean(value[key])); path != "" {
 			return path
 		}
 	}
@@ -1155,6 +1169,20 @@ func editableSandboxPathFromValue(value map[string]any) string {
 				}
 			}
 		}
+	}
+	return ""
+}
+
+func editableSandboxPathCandidate(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if path := firstEditableSandboxPath(value); path != "" {
+		return path
+	}
+	if strings.HasPrefix(value, "/mnt/data/") && looksLikeEditableFileURL(value) {
+		return value
 	}
 	return ""
 }

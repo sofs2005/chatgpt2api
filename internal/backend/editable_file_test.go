@@ -435,3 +435,28 @@ func TestPickEditableTargetArtifactsUsesSandboxPathExtensions(t *testing.T) {
 		t.Fatalf("targets = %#v, want sandbox-path matched artifacts", targets)
 	}
 }
+
+func TestEditableArtifactsFromConversationIgnoresStdoutAsFileIdentity(t *testing.T) {
+	message := map[string]any{
+		"id":          "msg-stdout",
+		"create_time": 400.0,
+		"author":      map[string]any{"role": "tool"},
+		"content": map[string]any{"parts": []any{map[string]any{"outputs": []any{
+			map[string]any{"id": "stdout", "name": "stdout", "path": "stdout", "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "text": "created sandbox:/mnt/data/final_deck.pptx"},
+			map[string]any{"id": "stdout", "name": "stdout", "path": "stdout", "mime_type": "application/zip", "text": "created sandbox:/mnt/data/final_deck_assets.zip"},
+		}}}},
+	}
+	conversation := map[string]any{"mapping": map[string]any{"node-1": map[string]any{"message": message}}}
+
+	artifacts := editableArtifactsFromConversation(conversation, "ppt")
+	targets := pickEditableTargetArtifacts(artifacts, "ppt")
+	if len(targets) != 2 {
+		t.Fatalf("artifacts = %#v targets = %#v, want primary and zip", artifacts, targets)
+	}
+	if targets[0].FileName != "final_deck.pptx" || targets[0].FileID != "" || targets[0].AttachmentID != "" || targets[0].SandboxPath != "/mnt/data/final_deck.pptx" {
+		t.Fatalf("primary target = %#v, want sandbox file without stdout identity", targets[0])
+	}
+	if targets[1].FileName != "final_deck_assets.zip" || targets[1].FileID != "" || targets[1].AttachmentID != "" || targets[1].SandboxPath != "/mnt/data/final_deck_assets.zip" {
+		t.Fatalf("zip target = %#v, want sandbox file without stdout identity", targets[1])
+	}
+}

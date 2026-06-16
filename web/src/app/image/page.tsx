@@ -64,6 +64,7 @@ import {
   DEFAULT_IMAGE_MODEL,
   fetchCreationTasks,
   fetchProfile,
+  getImageProgressLabel,
   IMAGE_CREATION_MODEL_OPTIONS,
   IMAGE_MODEL_ROUTE_DETAILS,
   IMAGE_OUTPUT_FORMAT_OPTIONS,
@@ -71,6 +72,8 @@ import {
   isImageCreationModel,
   isImageModel,
   isImageOutputFormat,
+  isResumableTimeoutImage,
+  resumeCreationTask,
   supportsImageOutputCompression,
   supportsImageOutputControls,
   supportsStructuredImageParameters,
@@ -2239,6 +2242,8 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
           submitted.length > 0 && submitted.every((task) => task.status === "queued") ? "queued" : "generating";
         updateTurnProgress(conversationId, activeTurn.id, imageTaskProgressMessage({ ...activeTurn, status: submittedStatus }));
 
+        // 记录后端上报的最新生图步骤（progress 字段），用作进度主文案，未上报时回退到本地文案。
+        let latestProgressLabel = "";
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
           const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
@@ -2262,11 +2267,15 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
           const progressTurn = latestTurn ?? activeTurn;
           const progressCopy = imageTaskProgressMessage(progressTurn, elapsedSeconds);
           updateTurnProgress(conversationId, activeTurn.id, {
-            message: progressCopy.message,
+            message: latestProgressLabel || progressCopy.message,
             detail: imageTaskLoadingDetail(progressTurn, progressCopy.detail),
           });
           await sleep(2000);
           const taskList = await fetchCreationTasks(pollingTaskIds);
+          const runningProgress = taskList.items.find((task) => task.status === "running" && task.progress)?.progress;
+          if (runningProgress) {
+            latestProgressLabel = getImageProgressLabel(runningProgress);
+          }
           activeTaskIds = new Set(taskList.items.filter(isActiveCreationTask).map((task) => task.id));
           if (taskList.items.length > 0) {
             await applyTasks(taskList.items);
@@ -2532,6 +2541,70 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
         toast.error(formatCreationTaskError(error, "提交重试失败"));
       } finally {
         retryingImageIdsRef.current.delete(retryKey);
+      }
+    },
+    [runConversationQueue, updateConversation],
+  );
+
+  const handleResumePollImage = useCallback(
+    async (conversationId: string, turnId: string, imageIndex: number) => {
+      const targetConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
+      const targetTurn = targetConversation?.turns.find((turn) => turn.id === turnId);
+      const targetImage = targetTurn?.images[imageIndex];
+      if (!targetConversation || !targetTurn || !targetImage) {
+        toast.error("未找到对应的图片记录");
+        return;
+      }
+      const taskId = targetImage.taskId;
+      // 仅超时失败且仍保留 taskId 的图片可续轮询；后端凭该 taskId 与已存的 conversation_id 继续等待。
+      if (!taskId || !isResumableTimeoutImage(targetImage)) {
+        toast.error("该图片暂时无法继续等待");
+        return;
+      }
+      const resumeKey = `${conversationId}:${turnId}:${imageIndex}`;
+      if (retryingImageIdsRef.current.has(resumeKey)) {
+        return;
+      }
+
+      retryingImageIdsRef.current.add(resumeKey);
+      try {
+        await resumeCreationTask(taskId);
+        const now = new Date().toISOString();
+        await updateConversation(conversationId, (current) => {
+          const conversation = current ?? targetConversation;
+          return {
+            ...conversation,
+            updatedAt: now,
+            turns: conversation.turns.map((turn) => {
+              if (turn.id !== turnId) {
+                return turn;
+              }
+              // 保持原 taskId 不变，仅把该图片重置回 loading 以恢复前端轮询。
+              const images: StoredImage[] = turn.images.map((image, index) =>
+                index === imageIndex
+                  ? {
+                      ...image,
+                      taskStatus: "running" as const,
+                      status: "loading" as const,
+                      error: undefined,
+                    }
+                  : image,
+              );
+              const derived = deriveTurnStatus({ ...turn, status: "queued", images });
+              return {
+                ...turn,
+                ...derived,
+                images,
+              };
+            }),
+          };
+        });
+        void runConversationQueue(conversationId);
+        toast.success("已继续等待");
+      } catch (error) {
+        toast.error(formatCreationTaskError(error, "继续等待失败"));
+      } finally {
+        retryingImageIdsRef.current.delete(resumeKey);
       }
     },
     [runConversationQueue, updateConversation],
@@ -3367,6 +3440,7 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
               onCancelTurn={handleCancelTurn}
               onRegenerateTurn={handleRegenerateTurn}
               onRetryImage={handleRetryImage}
+              onResumePoll={handleResumePollImage}
               onImageVisibilityChange={handleImageVisibilityChange}
               visibilityMutatingImageKey={visibilityMutatingImageKey}
               formatConversationTime={formatConversationTime}

@@ -1,13 +1,13 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Check, CircleStop, Clock3, Download, Eye, Globe2, LoaderCircle, Lock, PencilLine, Plus, RotateCcw, Sparkles } from "lucide-react";
+import { Check, CircleStop, Clock3, Download, Eye, Globe2, Hourglass, LoaderCircle, Lock, PencilLine, Plus, RotateCcw, Sparkles } from "lucide-react";
 
 import { AuthenticatedImage } from "@/components/authenticated-image";
 import { Button } from "@/components/ui/button";
 import type { ImagePromptPreset } from "@/app/image/image-presets";
 import { formatImageSizeDisplay, getImageSizeRequirementLabel, isHighResolutionImageSize } from "@/app/image/image-options";
-import { IMAGE_MODEL_ROUTE_DETAILS, supportsImageOutputCompression } from "@/lib/api";
+import { IMAGE_MODEL_ROUTE_DETAILS, isResumableTimeoutImage, supportsImageOutputCompression } from "@/lib/api";
 import type { ImageVisibility } from "@/lib/api";
 import {
   fetchAuthenticatedImageBlob,
@@ -56,6 +56,7 @@ type ImageResultsProps = {
   onCancelTurn: (conversationId: string, turnId: string) => void | Promise<void>;
   onRegenerateTurn: (conversationId: string, turnId: string) => void | Promise<void>;
   onRetryImage: (conversationId: string, turnId: string, imageIndex: number) => void | Promise<void>;
+  onResumePoll: (conversationId: string, turnId: string, imageIndex: number) => void | Promise<void>;
   onImageVisibilityChange: (
     conversationId: string,
     turnId: string,
@@ -267,6 +268,7 @@ export function ImageResults({
   onCancelTurn,
   onRegenerateTurn,
   onRetryImage,
+  onResumePoll,
   onImageVisibilityChange,
   visibilityMutatingImageKey,
   formatConversationTime,
@@ -852,7 +854,20 @@ export function ImageResults({
                           <div className="flex min-h-0 flex-1 items-center justify-center whitespace-pre-line px-4 py-3 text-center text-sm leading-6 text-rose-600 sm:px-5">
                             {image.error || "生成失败"}
                           </div>
-                          <div className="flex justify-end border-t border-rose-100 bg-white/70 px-3 py-2.5">
+                          <div className="flex justify-end gap-2 border-t border-rose-100 bg-white/70 px-3 py-2.5">
+                            {isResumableTimeoutImage(image) && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 rounded-full border-emerald-200 bg-white px-3 text-xs text-emerald-600 shadow-none hover:bg-emerald-50 hover:text-emerald-700"
+                                disabled={turnBusy}
+                                onClick={() => void onResumePoll(selectedConversation.id, turn.id, index)}
+                              >
+                                <Hourglass className="size-3.5" />
+                                继续等待
+                              </Button>
+                            )}
                             <Button
                               type="button"
                               variant="outline"

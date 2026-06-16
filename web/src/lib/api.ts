@@ -271,6 +271,9 @@ export type SettingsConfig = {
   auto_remove_rate_limited_accounts?: boolean;
   text_account_schedule_mode?: AccountScheduleMode | string;
   image_account_schedule_mode?: AccountScheduleMode | string;
+  image_settle_enabled?: boolean;
+  image_check_before_hit_enabled?: boolean;
+  image_settle_secs?: number | string;
   log_levels?: string[];
   linuxdo_enabled?: boolean;
   linuxdo_client_id?: string;
@@ -475,12 +478,36 @@ export type CreationTask = {
   error?: string;
   output_type?: "text";
   visibility?: ImageVisibility;
+  conversation_id?: string;
+  progress?: string;
 };
 
 export type CreationTaskMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
 };
+
+// 后端生图步骤名（progress 字段）→ 友好中文标签，对齐上游 progress_callback。
+const IMAGE_PROGRESS_LABELS: Record<string, string> = {
+  getting_account: "确认可用账号",
+  image_stream_resolve_start: "生成中",
+  receiving_image: "接收图片中",
+};
+
+// getImageProgressLabel 将后端上报的步骤名转为可展示文案；空/未知步骤回退为「生成中」。
+export function getImageProgressLabel(progress?: string): string {
+  const key = String(progress || "").trim();
+  if (!key) {
+    return "生成中";
+  }
+  return IMAGE_PROGRESS_LABELS[key] || "生成中";
+}
+
+// isResumableTimeoutImage 判断一张失败图片是否可凭 taskId 续轮询（resume_poll）：
+// 仅当其处于 error 态、错误信息含「超时」且仍保留 taskId 时成立。
+export function isResumableTimeoutImage(image: { status?: string; error?: string; taskId?: string }): boolean {
+  return image.status === "error" && Boolean(image.taskId) && typeof image.error === "string" && image.error.includes("超时");
+}
 
 export type FallbackReferenceImage = {
   path?: string;
@@ -1239,6 +1266,15 @@ export async function cancelCreationTask(clientTaskId: string) {
   return httpRequest<CreationTask>(`/api/creation-tasks/${encodeURIComponent(clientTaskId)}/cancel`, {
     method: "POST",
     body: {},
+  });
+}
+
+// resumeCreationTask 对超时失败的生图任务发起续轮询（resume_poll），凭 taskId 让后端按
+// 已保存的 conversation_id 再等待 extraTimeoutSecs 秒（后端限定 5-120，默认 30）。
+export async function resumeCreationTask(clientTaskId: string, extraTimeoutSecs = 30) {
+  return httpRequest<CreationTask>(`/api/creation-tasks/${encodeURIComponent(clientTaskId)}/resume-poll`, {
+    method: "POST",
+    body: { extra_timeout_secs: extraTimeoutSecs },
   });
 }
 

@@ -133,6 +133,22 @@ func NewApp() (*App, error) {
 	app.tasks.SetTaskTimeoutGetter(func() time.Duration {
 		return time.Duration(app.config.ImageTaskTimeoutSeconds()) * time.Second
 	})
+	app.tasks.SetResumePollHandler(func(ctx context.Context, identity service.Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+		start := time.Now()
+		request := protocol.ConversationRequest{
+			OwnerID:   identityScope(identity),
+			OwnerName: identityDisplayName(identity),
+		}
+		data, err := engine.ResumeImagePoll(ctx, request, conversationID, extraTimeout)
+		urls := collectURLs(data)
+		app.recordGeneratedImagesForPayload(identity, urls, "", nil)
+		if err != nil {
+			app.logCall(ctx, identity, "续轮询", http.MethodPost, "/api/creation-tasks/resume-poll", util.ImageModelAuto, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, auditRequestCapture{})
+			return nil, err
+		}
+		app.logCall(ctx, identity, "续轮询", http.MethodPost, "/api/creation-tasks/resume-poll", util.ImageModelAuto, start, "success", http.StatusOK, "", urls, auditRequestCapture{})
+		return data, nil
+	})
 	accounts.StartLimitedWatcher(ctx, time.Duration(cfg.RefreshAccountIntervalMinute())*time.Minute)
 	logs.StartRetentionCleaner(ctx, cfg.LogRetentionDays, 24*time.Hour, logger)
 	_, _ = app.images.CleanupStorage(service.ImageStorageCleanupOptions{
@@ -1401,6 +1417,22 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 			images = append(images, image)
 		}
 	}
+	var masks []protocol.UploadedImage
+	for _, field := range []string{"mask", "mask[]"} {
+		for _, header := range r.MultipartForm.File[field] {
+			mask, err := readUpload(header)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(mask.Data) == 0 {
+				return nil, nil, fmt.Errorf("mask file is empty")
+			}
+			masks = append(masks, mask)
+		}
+	}
+	if len(masks) > 0 {
+		body["mask"] = masks
+	}
 	return body, images, nil
 }
 
@@ -1603,7 +1635,7 @@ func isInternalPayloadValue(value any) bool {
 		return false
 	}
 	switch value.(type) {
-	case func(context.Context, int) (func(), error), func([]map[string]any):
+	case func(context.Context, int) (func(), error), func([]map[string]any), func(string):
 		return true
 	default:
 		return false

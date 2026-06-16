@@ -1559,6 +1559,21 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 		util.WriteJSON(w, http.StatusOK, task)
 		return
 	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "creation-tasks" && parts[3] == "resume-poll" {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		body, _ := readJSONMap(r)
+		extraTimeout := resumePollExtraTimeoutFromBody(body)
+		task, err := a.tasks.ResumePoll(identity, parts[2], extraTimeout)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		util.WriteJSON(w, http.StatusOK, task)
+		return
+	}
 	if r.URL.Path == "/api/creation-tasks/image-generations" && r.Method == http.MethodPost {
 		body, _ := readJSONMap(r)
 		task, err := a.tasks.SubmitGenerationWithOptions(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), util.ToInt(body["n"], 1), body["messages"], imageTaskRequestMetadata(body), imageOutputOptionsFromBody(body), imageToolOptionsFromBody(body), util.Clean(body["visibility"]))
@@ -1594,6 +1609,17 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func resumePollExtraTimeoutFromBody(body map[string]any) time.Duration {
+	if body == nil {
+		return 0
+	}
+	secs := util.ToInt(body["extra_timeout_secs"], 0)
+	if secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func imageTaskRequestMetadata(body map[string]any) map[string]any {

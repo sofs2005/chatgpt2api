@@ -411,6 +411,10 @@ type editableArtifact struct {
 var (
 	editableSandboxPathRE  = regexp.MustCompile(`(?:sandbox:)?(/mnt/data/[^\s"'\)\]]+\.(?:pptx?|psd|zip))`)
 	editableAssetPointerRE = regexp.MustCompile(`(?:file-service|sediment)://([^\s"'\)\]\}]+)`)
+	// 对齐上游 FILE_ID_RE：只有 file- / file_ 前缀的 id 才是真正的文件标识，
+	// 用于排除 tool-xxx / msg-xxx / stdout 这类调用 id 被误当作下载标识。
+	// Go 的 RE2 不支持负向先行断言，file-service 前缀在 editableMatchFileID 中以代码排除。
+	editableFileIDRE = regexp.MustCompile(`\b(file[-_][A-Za-z0-9_-]+)\b`)
 )
 
 func collectEditableFileAssets(ctx context.Context, reader io.Reader) (string, []editableAsset, error) {
@@ -800,7 +804,22 @@ func (c *Client) downloadEditableEndpoint(ctx context.Context, path string, extr
 	if err := editableDownloadErrorFromBody(data); err != nil {
 		return nil, err
 	}
+	// 两步下载守卫：JSON 对象响应本应携带 download_url；若没有则它只是元数据，
+	// 绝不能把这段 JSON 当作文件本体返回（否则写出损坏的 pptx/psd），改为判定失败回退下一端点。
+	if editableBodyIsJSONObject(data) {
+		return nil, fmt.Errorf("editable file endpoint %s returned metadata without download url", path)
+	}
 	return data, nil
+}
+
+// editableBodyIsJSONObject 判断响应体是否为 JSON 对象（用于区分元数据响应与真实二进制文件）。
+func editableBodyIsJSONObject(data []byte) bool {
+	trimmed := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(trimmed, "{") {
+		return false
+	}
+	var payload map[string]any
+	return json.Unmarshal([]byte(trimmed), &payload) == nil
 }
 
 func (c *Client) downloadEditableURL(ctx context.Context, target string) ([]byte, error) {
@@ -965,9 +984,9 @@ func editableArtifactFromMap(value map[string]any, seen map[string]struct{}) (ed
 	fileID := firstNonEmpty(util.Clean(value["file_id"]), util.Clean(value["fileId"]), util.Clean(value["library_file_id"]), util.Clean(value["libraryFileId"]), assetPointerID)
 	if directName != "" || attachmentID != "" || fileID != "" || assetPointerID != "" {
 		id := util.Clean(value["id"])
-		if !editableGenericOutputID(id) {
-			attachmentID = firstNonEmpty(attachmentID, id)
-			fileID = firstNonEmpty(fileID, id)
+		if matched := editableMatchFileID(id); matched != "" {
+			attachmentID = firstNonEmpty(attachmentID, matched)
+			fileID = firstNonEmpty(fileID, matched)
 		}
 	}
 	artifact := editableArtifact{
@@ -1009,13 +1028,22 @@ func editableFileIDFromAssetPointer(value string) string {
 	return ""
 }
 
-func editableGenericOutputID(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "stdout", "stderr":
-		return true
-	default:
-		return false
+// editableMatchFileID 提取真正的文件标识；非 file 前缀（如 tool-xxx / msg-xxx / stdout）
+// 以及 file-service 前缀均返回空串。
+func editableMatchFileID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
 	}
+	for _, match := range editableFileIDRE.FindAllStringSubmatch(value, -1) {
+		candidate := match[1]
+		lower := strings.ToLower(candidate)
+		if strings.HasPrefix(lower, "file-service") || strings.HasPrefix(lower, "file_service") {
+			continue
+		}
+		return candidate
+	}
+	return ""
 }
 
 func mergeEditableArtifact(existing, incoming editableArtifact) editableArtifact {

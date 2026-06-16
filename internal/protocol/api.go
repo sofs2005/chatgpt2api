@@ -105,6 +105,8 @@ const ImageOutputChargePayloadKey = "image_output_charge"
 
 const xmlToolRule = "Tool output adapter: when calling tools, output ONLY this XML and no prose/markdown:\n<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters><PARAM><![CDATA[value]]></PARAM></parameters></tool_call></tool_calls>"
 
+const toolUnavailableSystemMessage = "This compatibility backend cannot execute local tools, shell commands, non-search tools, or file operations. Do not claim to have run tools or inspected external resources. If a user asks you to use a tool, say that tool execution is unavailable through this backend."
+
 func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {
 	prompt := util.Clean(body["prompt"])
 	if prompt == "" {
@@ -128,6 +130,7 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	if hasOutputCompression && SupportsImageOutputCompression(outputFormat) {
 		request.OutputCompression = &outputCompression
 	}
+	request.ReportStep = imageStepProgressCallback(body)
 	applyImageToolOptionsToRequest(&request, ImageToolOptionsFromPayload(body))
 	request = request.Normalized()
 	outputs, errCh := e.StreamImageOutputsWithPool(ctx, request)
@@ -139,6 +142,11 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 }
 
 func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, images []UploadedImage) (map[string]any, *StreamResult, error) {
+	var err error
+	images, err = compositeImageEditMasks(images, uploadedImagesFromValue(body["mask"]))
+	if err != nil {
+		return nil, nil, &ImageGenerationError{Message: err.Error(), StatusCode: 502, Type: "server_error", Code: "upstream_error"}
+	}
 	encoded := EncodeImages(images)
 	if len(encoded) == 0 {
 		return nil, nil, &ImageGenerationError{Message: "image is required", StatusCode: 502, Type: "server_error", Code: "upstream_error"}
@@ -172,6 +180,7 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 	if partialImages, ok := normalizedPositiveInt(body["partial_images"]); ok {
 		request.PartialImages = &partialImages
 	}
+	request.ReportStep = imageStepProgressCallback(body)
 	applyImageToolOptionsToRequest(&request, ImageToolOptionsFromPayload(body))
 	if SupportsImageOutputCompression(request.OutputFormat) {
 		if compression, ok := normalizedImageOutputCompression(body["output_compression"]); ok {
@@ -192,6 +201,18 @@ func imageOutputProgressCallback(body map[string]any) ImageOutputProgressCallbac
 	case ImageOutputProgressCallback:
 		return callback
 	case func([]map[string]any):
+		return callback
+	default:
+		return nil
+	}
+}
+
+// ImageStepProgressPayloadKey 是 body 中步骤进度回调的键，对齐上游 progress_callback。
+const ImageStepProgressPayloadKey = "image_step_progress"
+
+func imageStepProgressCallback(body map[string]any) func(string) {
+	switch callback := body[ImageStepProgressPayloadKey].(type) {
+	case func(string):
 		return callback
 	default:
 		return nil
@@ -298,6 +319,149 @@ func (e *Engine) handleTextAccountErrorForRetry(accessToken string, err error, e
 	}
 	e.Accounts.ApplyAccountError(accessToken, "text_stream", err)
 	return allowRetry
+}
+
+func (e *Engine) runWebSearch(ctx context.Context, query string) (backend.SearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return backend.SearchResult{}, HTTPError{Status: 400, Message: "messages or prompt is required for web search"}
+	}
+	if e != nil && e.SearchFunc != nil {
+		return e.SearchFunc(ctx, query)
+	}
+	exhaustedTokens := map[string]struct{}{}
+	var result backend.SearchResult
+	var lastErr error
+	for attempt := 0; attempt < service.MaxTokenSwitchAttempts; attempt++ {
+		retry := false
+		succeeded := false
+		err := e.withTextLease(ctx, exhaustedTokens, func(client *backend.Client, lease service.AccountLease) error {
+			var searchErr error
+			result, searchErr = client.Search(ctx, query)
+			if searchErr == nil {
+				succeeded = true
+				return nil
+			}
+			lastErr = searchErr
+			if !e.handleTextAccountErrorForRetry(lease.Token, searchErr, exhaustedTokens, true) {
+				return searchErr
+			}
+			retry = true
+			return nil
+		})
+		if err != nil {
+			if lastErr != nil {
+				return backend.SearchResult{}, lastErr
+			}
+			return backend.SearchResult{}, err
+		}
+		if succeeded {
+			return result, nil
+		}
+		if !retry {
+			break
+		}
+	}
+	if lastErr != nil {
+		return backend.SearchResult{}, lastErr
+	}
+	return backend.SearchResult{}, fmt.Errorf("no available text access token")
+}
+
+func chatCompletionAnnotations(annotations []SearchAnnotation) []map[string]any {
+	out := make([]map[string]any, 0, len(annotations))
+	for _, item := range annotations {
+		if item.Type != "url_citation" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"type": "url_citation",
+			"url_citation": map[string]any{
+				"start_index": item.StartIndex,
+				"end_index":   item.EndIndex,
+				"url":         item.URL,
+				"title":       item.Title,
+			},
+		})
+	}
+	return out
+}
+
+func responseSearchAnnotations(annotations []SearchAnnotation) []map[string]any {
+	out := make([]map[string]any, 0, len(annotations))
+	for _, item := range annotations {
+		if item.Type != "url_citation" {
+			continue
+		}
+		out = append(out, map[string]any{"type": item.Type, "start_index": item.StartIndex, "end_index": item.EndIndex, "url": item.URL, "title": item.Title})
+	}
+	return out
+}
+
+func addChatAnnotations(response map[string]any, annotations []SearchAnnotation) {
+	if len(annotations) == 0 {
+		return
+	}
+	choices, ok := response["choices"].([]map[string]any)
+	if !ok || len(choices) == 0 {
+		return
+	}
+	message, ok := choices[0]["message"].(map[string]any)
+	if !ok {
+		return
+	}
+	message["annotations"] = chatCompletionAnnotations(annotations)
+}
+
+func (e *Engine) webSearchChatResponse(ctx context.Context, model string, messages []map[string]any) (map[string]any, error) {
+	query := SearchQueryFromMessages(messages)
+	if query == "" {
+		return nil, HTTPError{Status: 400, Message: "messages or prompt is required for web search"}
+	}
+	result, err := e.runWebSearch(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	text, annotations := TextWithURLCitations(result.Answer, result.Sources)
+	response := CompletionResponse(model, text, 0, messages)
+	addChatAnnotations(response, annotations)
+	return response, nil
+}
+
+func (e *Engine) streamWebSearchChatCompletion(ctx context.Context, model string, messages []map[string]any) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		query := SearchQueryFromMessages(messages)
+		if query == "" {
+			errOut <- HTTPError{Status: 400, Message: "messages or prompt is required for web search"}
+			return
+		}
+		result, err := e.runWebSearch(ctx, query)
+		if err != nil {
+			errOut <- err
+			return
+		}
+		text, _ := TextWithURLCitations(result.Answer, result.Sources)
+		completionID := "chatcmpl-" + util.NewHex(32)
+		created := time.Now().Unix()
+		select {
+		case out <- CompletionChunk(model, map[string]any{"role": "assistant", "content": text}, nil, completionID, created):
+		case <-ctx.Done():
+			errOut <- ctx.Err()
+			return
+		}
+		select {
+		case out <- CompletionChunk(model, map[string]any{}, "stop", completionID, created):
+		case <-ctx.Done():
+			errOut <- ctx.Err()
+			return
+		}
+		errOut <- nil
+	}()
+	return out, errOut
 }
 
 func (e *Engine) streamTextDeltasWithTokenRetry(ctx context.Context, request ConversationRequest) (<-chan string, <-chan error) {
@@ -533,7 +697,11 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 			if err != nil {
 				return nil, nil, err
 			}
-			items, errCh = e.StreamTextChatCompletionWithTools(ctx, messages, model, body["tools"], body["tool_choice"])
+			if IsWebSearchChatRequest(body) && !HasUnsupportedTools(body, WebSearchToolTypes) {
+				items, errCh = e.streamWebSearchChatCompletion(ctx, model, messages)
+			} else {
+				items, errCh = e.StreamTextChatCompletionWithTools(ctx, messages, model, body["tools"], body["tool_choice"])
+			}
 		}
 		return nil, &StreamResult{Items: items, Err: errCh, Kind: "openai"}, nil
 	}
@@ -554,6 +722,13 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 	model, messages, err := TextChatParts(body)
 	if err != nil {
 		return nil, nil, err
+	}
+	if IsWebSearchChatRequest(body) && !HasUnsupportedTools(body, WebSearchToolTypes) {
+		result, err := e.webSearchChatResponse(ctx, model, messages)
+		if err != nil {
+			return nil, nil, err
+		}
+		return result, nil, nil
 	}
 	text, err := e.collectCachedTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: messages, Tools: body["tools"], ToolChoice: body["tool_choice"]})
 	if err != nil {
@@ -867,7 +1042,11 @@ func TextChatParts(body map[string]any) (string, []map[string]any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return model, NormalizeMessages(messages, ChatToolPrompt(body)), nil
+	messages = NormalizeMessages(messages, ChatToolPrompt(body))
+	if IsWebSearchChatRequest(body) && HasUnsupportedTools(body, WebSearchToolTypes) {
+		messages = append([]map[string]any{{"role": "system", "content": toolUnavailableSystemMessage}}, messages...)
+	}
+	return model, messages, nil
 }
 
 func IsImageChatRequest(body map[string]any) bool {
@@ -1201,8 +1380,101 @@ func (e *Engine) HandleResponses(ctx context.Context, body map[string]any) (map[
 	return e.HandleResponsesScoped(ctx, body, "")
 }
 
+func responseWebSearchToolTypes() map[string]bool {
+	allowed := map[string]bool{"image_generation": true}
+	for key, value := range WebSearchToolTypes {
+		allowed[key] = value
+	}
+	return allowed
+}
+
+func HasUnsupportedResponseTools(body map[string]any) bool {
+	return HasUnsupportedTools(body, responseWebSearchToolTypes())
+}
+
+func ResponseTextMessages(body map[string]any) []map[string]any {
+	messages := MessagesFromInput(body["input"], body["instructions"])
+	if HasWebSearchTool(body) && HasUnsupportedResponseTools(body) {
+		messages = append([]map[string]any{{"role": "system", "content": toolUnavailableSystemMessage}}, messages...)
+	}
+	return messages
+}
+
+func (e *Engine) StreamWebSearchResponse(ctx context.Context, model string, messages []map[string]any) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		query := SearchQueryFromMessages(messages)
+		if query == "" {
+			errOut <- HTTPError{Status: 400, Message: "input text is required for web_search"}
+			return
+		}
+		responseID := "resp_" + util.NewHex(32)
+		searchID := "ws_" + util.NewHex(32)
+		messageID := "msg_" + util.NewHex(32)
+		created := time.Now().Unix()
+		send := func(item map[string]any) bool {
+			select {
+			case out <- item:
+				return true
+			case <-ctx.Done():
+				errOut <- ctx.Err()
+				return false
+			}
+		}
+		if !send(ResponseCreated(responseID, model, created)) {
+			return
+		}
+		if !send(map[string]any{"type": "response.output_item.added", "output_index": 0, "item": WebSearchCallItem(query, searchID, "in_progress", nil)}) {
+			return
+		}
+		if !send(map[string]any{"type": "response.web_search_call.in_progress", "output_index": 0, "item_id": searchID}) {
+			return
+		}
+		if !send(map[string]any{"type": "response.web_search_call.searching", "output_index": 0, "item_id": searchID}) {
+			return
+		}
+		result, err := e.runWebSearch(ctx, query)
+		if err != nil {
+			errOut <- err
+			return
+		}
+		searchItem := WebSearchCallItem(query, searchID, "completed", result.Sources)
+		if !send(map[string]any{"type": "response.web_search_call.completed", "output_index": 0, "item_id": searchID}) {
+			return
+		}
+		if !send(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": searchItem}) {
+			return
+		}
+		text, annotations := TextWithURLCitations(result.Answer, result.Sources)
+		responseAnnotations := responseSearchAnnotations(annotations)
+		if !send(map[string]any{"type": "response.output_item.added", "output_index": 1, "item": TextOutputItemWithAnnotations("", messageID, "in_progress", responseAnnotations)}) {
+			return
+		}
+		if text != "" {
+			if !send(map[string]any{"type": "response.output_text.delta", "item_id": messageID, "output_index": 1, "content_index": 0, "delta": text}) {
+				return
+			}
+		}
+		if !send(map[string]any{"type": "response.output_text.done", "item_id": messageID, "output_index": 1, "content_index": 0, "text": text}) {
+			return
+		}
+		messageItem := TextOutputItemWithAnnotations(text, messageID, "completed", responseAnnotations)
+		if !send(map[string]any{"type": "response.output_item.done", "output_index": 1, "item": messageItem}) {
+			return
+		}
+		if !send(ResponseCompleted(responseID, model, created, []map[string]any{searchItem, messageItem})) {
+			return
+		}
+		errOut <- nil
+	}()
+	return out, errOut
+}
+
 func (e *Engine) HandleResponsesScoped(ctx context.Context, body map[string]any, scope string) (map[string]any, *StreamResult, error) {
-	if !util.ToBool(body["stream"]) && !HasResponseImageGenerationTool(body) {
+	if !util.ToBool(body["stream"]) && !HasResponseImageGenerationTool(body) && !(HasWebSearchTool(body) && !HasUnsupportedResponseTools(body)) {
 		completed, err := e.cachedTextResponse(ctx, body, scope)
 		if err != nil {
 			return nil, nil, err
@@ -1239,7 +1511,7 @@ func (e *Engine) cachedTextResponse(ctx context.Context, body map[string]any, sc
 		return nil, err
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
-	currentMessages := MessagesFromInput(body["input"], body["instructions"])
+	currentMessages := ResponseTextMessages(body)
 	baseContext := MergeResponseContext(previous, currentMessages, nil)
 	text, err := e.collectCachedTextWithTokenRetry(ctx, ConversationRequest{Model: model, Messages: baseContext.Messages})
 	if err != nil {
@@ -1263,10 +1535,16 @@ func (e *Engine) ResponseEventsScoped(ctx context.Context, body map[string]any, 
 		return nil, nil, err
 	}
 	responseModel := firstNonEmpty(util.Clean(body["model"]), "auto")
-	currentMessages := MessagesFromInput(body["input"], body["instructions"])
+	currentMessages := ResponseTextMessages(body)
 	baseContext := MergeResponseContext(previous, currentMessages, nil)
 	if !HasResponseImageGenerationTool(body) {
-		events, errCh := e.StreamTextResponseWithMessages(ctx, responseModel, baseContext.Messages)
+		var events <-chan map[string]any
+		var errCh <-chan error
+		if HasWebSearchTool(body) && !HasUnsupportedResponseTools(body) {
+			events, errCh = e.StreamWebSearchResponse(ctx, responseModel, baseContext.Messages)
+		} else {
+			events, errCh = e.StreamTextResponseWithMessages(ctx, responseModel, baseContext.Messages)
+		}
 		events = e.rememberResponseContextEventsScoped(scope, events, baseContext)
 		return events, errCh, nil
 	}
@@ -1496,10 +1774,35 @@ func ResponseCompleted(id, model string, created int64, output []map[string]any)
 }
 
 func TextOutputItem(text, itemID, status string) map[string]any {
+	return TextOutputItemWithAnnotations(text, itemID, status, nil)
+}
+
+func TextOutputItemWithAnnotations(text, itemID, status string, annotations []map[string]any) map[string]any {
 	if itemID == "" {
 		itemID = "msg_" + util.NewHex(32)
 	}
-	return map[string]any{"id": itemID, "type": "message", "status": status, "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}}}
+	annotationValue := any([]any{})
+	if len(annotations) > 0 {
+		annotationValue = annotations
+	}
+	return map[string]any{"id": itemID, "type": "message", "status": status, "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": text, "annotations": annotationValue}}}
+}
+
+func WebSearchCallItem(query, itemID, status string, sources []backend.SearchSource) map[string]any {
+	if itemID == "" {
+		itemID = "ws_" + util.NewHex(32)
+	}
+	action := map[string]any{"type": "search", "query": query, "queries": []any{query}}
+	if len(sources) > 0 {
+		items := make([]map[string]any, 0, len(sources))
+		for _, source := range NormalizedSources(sources) {
+			items = append(items, map[string]any{"type": "url", "url": source.URL})
+		}
+		if len(items) > 0 {
+			action["sources"] = items
+		}
+	}
+	return map[string]any{"id": itemID, "type": "web_search_call", "status": status, "action": action}
 }
 
 func ImageOutputItems(prompt string, data []map[string]any, itemID string) []map[string]any {

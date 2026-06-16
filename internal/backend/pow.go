@@ -45,10 +45,8 @@ func parsePOWResources(html string) ([]string, string) {
 }
 
 func buildLegacyRequirementsToken(userAgent string, scriptSources []string, dataBuild string) string {
-	seed := fmt.Sprintf("%f", rand.Float64())
 	config := buildPOWConfig(userAgent, scriptSources, dataBuild)
-	answer, _ := powGenerate(seed, "0fffff", config, 500000)
-	return "gAAAAAC" + answer
+	return "gAAAAAC" + base64.StdEncoding.EncodeToString(mustMarshal(config))
 }
 
 func buildProofToken(seed, difficulty, userAgent string, scriptSources []string, dataBuild string) (string, error) {
@@ -88,20 +86,22 @@ func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) 
 		"postMessage", "queueMicrotask", "requestAnimationFrame", "setInterval", "setTimeout", "caches",
 		"__NEXT_DATA__", "__BUILD_MANIFEST", "__NEXT_PRELOADREADY",
 	}
-	documentKeys := []string{"_reactListeningo743lnnpvdg", "location"}
+	documentKeys := []string{"__reactContainer$fzelfjyxej8", "_reactListening5dehydibo78", "location"}
 	cores := []int{8, 16, 24, 32}
+	screenResolutions := [][2]int{{1920, 1080}, {1440, 900}, {2560, 1440}, {3840, 2160}}
+	resolution := screenResolutions[rand.Intn(len(screenResolutions))]
 	now := time.Now().In(time.FixedZone("EST", -5*3600)).Format("Mon Jan 02 2006 15:04:05") + " GMT-0500 (Eastern Standard Time)"
 	return []any{
-		randomChoiceInt([]int{3000, 4000, 5000}),
+		resolution[0] + resolution[1],
 		now,
 		4294705152,
-		0,
+		1,
 		userAgent,
 		randomChoice(scriptSources),
 		dataBuild,
 		"en-US",
 		"en-US,es-US,en,es",
-		0,
+		rand.Float64(),
 		randomChoice(navigatorKeys),
 		randomChoice(documentKeys),
 		randomChoice(windowKeys),
@@ -110,6 +110,8 @@ func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) 
 		"",
 		randomChoiceInt(cores),
 		float64(time.Now().UnixNano())/1e6 - float64(time.Now().UnixNano())/1e6,
+		0, 0, 0, 0, 0, 0,
+		0, // 0 = edge/chrome, 1 = firefox
 	}
 }
 

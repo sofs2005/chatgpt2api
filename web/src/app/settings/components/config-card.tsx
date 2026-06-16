@@ -93,6 +93,7 @@ function NumberInputWithUnit({
   min,
   onChange,
   placeholder,
+  step = 1,
   unit,
   value,
 }: {
@@ -101,6 +102,7 @@ function NumberInputWithUnit({
   min?: number;
   onChange: (value: string) => void;
   placeholder: string;
+  step?: number;
   unit: string;
   value: number | string;
 }) {
@@ -111,8 +113,8 @@ function NumberInputWithUnit({
         type="number"
         min={min}
         max={max}
-        step={1}
-        inputMode="numeric"
+        step={step}
+        inputMode={Number.isInteger(step) ? "numeric" : "decimal"}
         value={String(value)}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
@@ -193,6 +195,15 @@ export function ConfigCard() {
   );
   const setImageAccountScheduleMode = useSettingsStore(
     (state) => state.setImageAccountScheduleMode,
+  );
+  const setImageSettleEnabled = useSettingsStore(
+    (state) => state.setImageSettleEnabled,
+  );
+  const setImageCheckBeforeHitEnabled = useSettingsStore(
+    (state) => state.setImageCheckBeforeHitEnabled,
+  );
+  const setImageSettleSecs = useSettingsStore(
+    (state) => state.setImageSettleSecs,
   );
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
@@ -333,6 +344,41 @@ export function ConfigCard() {
                 unit="秒"
               />
             </Field>
+          </div>
+        </section>
+
+        <section className={configSectionClassName}>
+          <SectionHeading
+            title="生图轮询确认"
+            tip="生图结果命中后是否二次确认：开启「先校验再命中」会通过会话轮询确认文件 ID 再返回；开启「沉降二次确认」会在发现结果后等待沉降时间再次轮询，确认结果稳定后才返回，可降低空图/半成品概率。"
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-settle-secs">
+                沉降等待时间
+              </ConfigFieldLabel>
+              <NumberInputWithUnit
+                id="settings-image-settle-secs"
+                min={0.5}
+                step={0.5}
+                value={config?.image_settle_secs ?? ""}
+                onChange={setImageSettleSecs}
+                placeholder="2"
+                unit="秒"
+              />
+            </Field>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <ConfigOption
+              checked={config?.image_check_before_hit_enabled !== false}
+              onCheckedChange={setImageCheckBeforeHitEnabled}
+              label="先校验再命中"
+            />
+            <ConfigOption
+              checked={config?.image_settle_enabled !== false}
+              onCheckedChange={setImageSettleEnabled}
+              label="沉降二次确认"
+            />
           </div>
         </section>
 

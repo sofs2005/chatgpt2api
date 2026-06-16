@@ -208,6 +208,74 @@ func TestStoreNormalizesImageTaskTimeoutSeconds(t *testing.T) {
 	}
 }
 
+func TestStoreImagePollSettleDefaults(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetLinuxDoEnv(t)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+
+	if !store.ImageSettleEnabled() {
+		t.Fatalf("default ImageSettleEnabled() = false, want true")
+	}
+	if !store.ImageCheckBeforeHitEnabled() {
+		t.Fatalf("default ImageCheckBeforeHitEnabled() = false, want true")
+	}
+	if store.ImageSettleSecs() != 2.0 {
+		t.Fatalf("default ImageSettleSecs() = %v, want 2.0", store.ImageSettleSecs())
+	}
+}
+
+func TestStoreNormalizesImagePollSettleSettings(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetLinuxDoEnv(t)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+
+	got, err := store.Update(map[string]any{
+		"image_settle_enabled":           false,
+		"image_check_before_hit_enabled": false,
+		"image_settle_secs":              0.1,
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertConfigValue(t, got, "image_settle_enabled", false)
+	assertConfigValue(t, got, "image_check_before_hit_enabled", false)
+	assertConfigValue(t, got, "image_settle_secs", 0.5)
+	if store.ImageSettleEnabled() {
+		t.Fatalf("ImageSettleEnabled() = true, want false")
+	}
+	if store.ImageCheckBeforeHitEnabled() {
+		t.Fatalf("ImageCheckBeforeHitEnabled() = true, want false")
+	}
+	if store.ImageSettleSecs() != 0.5 {
+		t.Fatalf("ImageSettleSecs() clamp min = %v, want 0.5", store.ImageSettleSecs())
+	}
+
+	got, err = store.Update(map[string]any{
+		"image_settle_enabled": "on",
+		"image_settle_secs":     "3.5",
+	})
+	if err != nil {
+		t.Fatalf("Update() string error = %v", err)
+	}
+	assertConfigValue(t, got, "image_settle_secs", 3.5)
+	if !store.ImageSettleEnabled() {
+		t.Fatalf("ImageSettleEnabled() parsing \"on\" = false, want true")
+	}
+	if store.ImageSettleSecs() != 3.5 {
+		t.Fatalf("ImageSettleSecs() = %v, want 3.5", store.ImageSettleSecs())
+	}
+}
+
 func TestStoreUpdatePersistsLinuxDoSettingsWithoutLeakingSecret(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)

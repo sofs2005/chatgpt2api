@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,21 @@ import (
 	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
 )
+
+// imageConversationIDCarrier 由携带上游会话 ID 的错误实现（如 protocol.ImageGenerationError），
+// 使超时失败的任务能凭 conversation_id 续轮询，而无需 service 反向依赖 protocol 包形成循环。
+type imageConversationIDCarrier interface {
+	ImageConversationID() string
+}
+
+// extractImageConversationID 从错误链中提取已知的上游会话 ID。
+func extractImageConversationID(err error) string {
+	var carrier imageConversationIDCarrier
+	if errors.As(err, &carrier) {
+		return strings.TrimSpace(carrier.ImageConversationID())
+	}
+	return ""
+}
 
 const (
 	TaskStatusQueued    = "queued"
@@ -23,12 +39,26 @@ const (
 
 	imageOutputCallbackPayloadKey      = "image_output_callback"
 	imageOutputSlotAcquirerPayloadKey  = "image_output_slot_acquirer"
+	// imageStepProgressPayloadKey 必须与 protocol.ImageStepProgressPayloadKey 保持一致。
+	imageStepProgressPayloadKey = "image_step_progress"
 	imageTaskBillingBillablePayloadKey = "billing_billable"
 	imageTaskBillingChargedAmountKey   = "billing_charged_amount"
 	imageTaskBillingChargeKey          = "billing_charge_key"
 )
 
 type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
+
+// ImageResumePollHandler 续轮询处理器：凭 conversation_id 续轮询并返回图片数据。
+// 由上层（httpapi）注入，负责调用引擎 ResumeImagePoll（自动携带浏览器指纹与 cookie）
+// 并记录调用日志；service 仅负责状态机与后台 goroutine 调度。
+type ImageResumePollHandler func(ctx context.Context, identity Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error)
+
+const (
+	// resume_poll 的额外等待时长约束，对齐上游 ResumePollRequest（5~120 秒，默认 30 秒）。
+	defaultResumePollExtraTimeout = 30 * time.Second
+	minResumePollExtraTimeout     = 5 * time.Second
+	maxResumePollExtraTimeout     = 120 * time.Second
+)
 
 type ImageOutputOptions struct {
 	Format      string
@@ -50,6 +80,7 @@ type ImageTaskService struct {
 	generation          ImageTaskHandler
 	edit                ImageTaskHandler
 	chat                ImageTaskHandler
+	resumePoll          ImageResumePollHandler
 	billing             *BillingService
 	retentionGetter     func() int
 	taskTimeoutGetter   func() time.Duration
@@ -299,6 +330,96 @@ func (s *ImageTaskService) CancelTask(identity Identity, clientTaskID string) (m
 	return result, nil
 }
 
+// SetResumePollHandler 注入续轮询处理器。
+func (s *ImageTaskService) SetResumePollHandler(handler ImageResumePollHandler) {
+	s.resumePoll = handler
+}
+
+// normalizeResumePollTimeout 将续轮询额外等待时长收敛到 [5s, 120s]，默认 30s。
+func normalizeResumePollTimeout(extraTimeout time.Duration) time.Duration {
+	if extraTimeout <= 0 {
+		return defaultResumePollExtraTimeout
+	}
+	if extraTimeout < minResumePollExtraTimeout {
+		return minResumePollExtraTimeout
+	}
+	if extraTimeout > maxResumePollExtraTimeout {
+		return maxResumePollExtraTimeout
+	}
+	return extraTimeout
+}
+
+// ResumePoll 对一个因超时失败的任务发起「继续等待」：校验状态后重置为运行态，
+// 并在后台 goroutine 中凭 conversation_id 续轮询。不重复计费——原任务失败时已结算。
+func (s *ImageTaskService) ResumePoll(identity Identity, clientTaskID string, extraTimeout time.Duration) (map[string]any, error) {
+	taskID := strings.TrimSpace(clientTaskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("client_task_id is required")
+	}
+	if s.resumePoll == nil {
+		return nil, fmt.Errorf("续轮询功能不可用")
+	}
+	extraTimeout = normalizeResumePollTimeout(extraTimeout)
+	owner := ownerID(identity)
+	key := taskKey(owner, taskID)
+	s.mu.Lock()
+	task := s.tasks[key]
+	if task == nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("creation task not found")
+	}
+	if util.Clean(task["status"]) != TaskStatusError {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("任务不处于失败状态，无法继续等待")
+	}
+	if !strings.Contains(util.Clean(task["error"]), "超时") {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("任务失败原因并非超时，无法继续等待")
+	}
+	conversationID := util.Clean(task["conversation_id"])
+	if conversationID == "" {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("任务缺少会话 ID，无法继续等待")
+	}
+	mode := util.Clean(task["mode"])
+	taskCtx, cancel := context.WithCancel(context.Background())
+	task["status"] = TaskStatusRunning
+	task["error"] = ""
+	task["updated_at"] = util.NowLocal()
+	s.cancels[key] = cancel
+	_ = s.saveLocked()
+	result := publicTask(task)
+	s.mu.Unlock()
+	go s.runResumePoll(taskCtx, key, identity, conversationID, extraTimeout, mode)
+	return result, nil
+}
+
+func (s *ImageTaskService) runResumePoll(ctx context.Context, key string, identity Identity, conversationID string, extraTimeout time.Duration, mode string) {
+	defer s.removeTaskCancel(key)
+	// 在续轮询额外等待之外预留余量，避免上层 HTTP/解析耗时把任务卡死在运行态。
+	runCtx, cancel := context.WithTimeout(ctx, extraTimeout+30*time.Second)
+	defer cancel()
+	data, err := s.resumePoll(runCtx, identity, conversationID, extraTimeout)
+	if err != nil {
+		message := err.Error()
+		if ctx.Err() != nil {
+			message = "任务已终止"
+		}
+		s.updateActiveTask(key, map[string]any{"status": TaskStatusError, "error": message, "data": []any{}})
+		return
+	}
+	if len(data) == 0 {
+		s.updateActiveTask(key, map[string]any{"status": TaskStatusError, "error": "继续等待后仍未找到图片结果", "data": []any{}})
+		return
+	}
+	cloned := cloneTaskData(data)
+	updates := map[string]any{"status": TaskStatusSuccess, "data": cloned, "error": ""}
+	if mode == "generate" || mode == "edit" {
+		updates["output_statuses"] = finalImageOutputStatuses(len(cloned), cloned, TaskStatusError)
+	}
+	s.updateActiveTask(key, updates)
+}
+
 func (s *ImageTaskService) submit(ctx context.Context, identity Identity, clientTaskID, mode string, payload map[string]any) (map[string]any, error) {
 	taskID := strings.TrimSpace(clientTaskID)
 	if taskID == "" {
@@ -389,6 +510,10 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 	} else if mode == "chat" {
 		handler = s.chat
 	}
+	// 注入步骤进度回调，对齐上游 progress_callback：每步写入 task[progress]。
+	payload[imageStepProgressPayloadKey] = func(step string) {
+		s.updateTaskProgress(key, step)
+	}
 	if mode == "generate" || mode == "edit" {
 		payload[imageOutputCallbackPayloadKey] = func(data []map[string]any) {
 			if len(data) == 0 {
@@ -453,6 +578,10 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		updates := map[string]any{"status": status, "error": message, "data": data}
 		if outputType != "" {
 			updates["output_type"] = outputType
+		}
+		// 记录失败会话 ID，使超时任务可凭 conversation_id 续轮询（resume_poll）。
+		if convID := extractImageConversationID(err); convID != "" {
+			updates["conversation_id"] = convID
 		}
 		if mode == "generate" || mode == "edit" {
 			updates["output_statuses"] = finalImageOutputStatuses(taskCount(mode, payload), data, status)
@@ -670,6 +799,30 @@ func (s *ImageTaskService) updateActiveTask(key string, updates map[string]any) 
 	}
 	for k, v := range updates {
 		task[k] = v
+	}
+	task["updated_at"] = util.NowLocal()
+	_ = s.saveLocked()
+	return true
+}
+
+// updateTaskProgress 写入当前生图步骤；image_stream_resolve_start 时记录 started_ts
+// 作为运行计时起点（对齐上游）。仅对仍在活动态的任务生效。
+func (s *ImageTaskService) updateTaskProgress(key, step string) bool {
+	step = strings.TrimSpace(step)
+	if step == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task := s.tasks[key]
+	if task == nil || !isActiveTaskStatus(util.Clean(task["status"])) {
+		return false
+	}
+	task["progress"] = step
+	if step == "image_stream_resolve_start" {
+		if _, ok := task["started_ts"]; !ok {
+			task["started_ts"] = util.NowLocal()
+		}
 	}
 	task["updated_at"] = util.NowLocal()
 	_ = s.saveLocked()
@@ -935,6 +1088,12 @@ func publicTask(task map[string]any) map[string]any {
 	}
 	if visibility := util.Clean(task["visibility"]); visibility != "" {
 		item["visibility"] = visibility
+	}
+	if progress := util.Clean(task["progress"]); progress != "" {
+		item["progress"] = progress
+	}
+	if conversationID := util.Clean(task["conversation_id"]); conversationID != "" {
+		item["conversation_id"] = conversationID
 	}
 	return item
 }

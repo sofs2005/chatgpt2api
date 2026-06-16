@@ -351,6 +351,226 @@ func TestImageTaskServicePublishesPartialImageDataWhileRunning(t *testing.T) {
 	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
 }
 
+type conversationIDError struct {
+	msg  string
+	conv string
+}
+
+func (e conversationIDError) Error() string               { return e.msg }
+func (e conversationIDError) ImageConversationID() string { return e.conv }
+
+func TestImageTaskServiceCapturesConversationIDOnTimeout(t *testing.T) {
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return nil, conversationIDError{msg: "图片生成超时，请稍后重试或降低分辨率", conv: "conv-resume-1"}
+	}
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
+
+	items := svc.ListTasks(identity, []string{"task-1"})["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("ListTasks items = %d, want 1", len(items))
+	}
+	if got := items[0]["conversation_id"]; got != "conv-resume-1" {
+		t.Fatalf("conversation_id = %#v, want conv-resume-1", got)
+	}
+}
+
+// seedTimedOutImageTask 提交一个会以「超时 + conversation_id」失败的生图任务，
+// 返回服务实例与身份，供续轮询测试使用。
+func seedTimedOutImageTask(t *testing.T, conversationID string) (*ImageTaskService, Identity) {
+	t.Helper()
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return nil, conversationIDError{msg: "图片生成超时，请稍后重试或降低分辨率", conv: conversationID}
+	}
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
+	return svc, identity
+}
+
+func TestImageTaskServiceResumePollSuccess(t *testing.T) {
+	svc, identity := seedTimedOutImageTask(t, "conv-resume-1")
+
+	var gotConversationID string
+	var gotExtraTimeout time.Duration
+	svc.SetResumePollHandler(func(ctx context.Context, identity Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+		gotConversationID = conversationID
+		gotExtraTimeout = extraTimeout
+		return []map[string]any{{"url": "https://example.test/resumed.png"}}, nil
+	})
+
+	result, err := svc.ResumePoll(identity, "task-1", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ResumePoll() error = %v", err)
+	}
+	if result["status"] != TaskStatusRunning {
+		t.Fatalf("ResumePoll() immediate status = %v, want running", result["status"])
+	}
+
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
+	if gotConversationID != "conv-resume-1" {
+		t.Fatalf("handler conversationID = %q, want conv-resume-1", gotConversationID)
+	}
+	if gotExtraTimeout != 30*time.Second {
+		t.Fatalf("handler extraTimeout = %v, want 30s", gotExtraTimeout)
+	}
+	items := svc.ListTasks(identity, []string{"task-1"})["items"].([]map[string]any)
+	data := util.AsMapSlice(items[0]["data"])
+	if len(data) != 1 || util.Clean(data[0]["url"]) != "https://example.test/resumed.png" {
+		t.Fatalf("resumed data = %#v", items[0]["data"])
+	}
+	if util.Clean(items[0]["error"]) != "" {
+		t.Fatalf("resumed task error = %q, want empty", items[0]["error"])
+	}
+}
+
+func TestImageTaskServiceResumePollFailureKeepsErrorState(t *testing.T) {
+	svc, identity := seedTimedOutImageTask(t, "conv-resume-1")
+	svc.SetResumePollHandler(func(ctx context.Context, identity Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+		return nil, errors.New("继续等待 30 秒后仍未找到图片结果")
+	})
+
+	if _, err := svc.ResumePoll(identity, "task-1", 30*time.Second); err != nil {
+		t.Fatalf("ResumePoll() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
+	items := svc.ListTasks(identity, []string{"task-1"})["items"].([]map[string]any)
+	if !strings.Contains(util.Clean(items[0]["error"]), "仍未找到图片结果") {
+		t.Fatalf("resumed failure error = %q", items[0]["error"])
+	}
+}
+
+func TestImageTaskServiceResumePollClampsExtraTimeout(t *testing.T) {
+	svc, identity := seedTimedOutImageTask(t, "conv-resume-1")
+	got := make(chan time.Duration, 1)
+	svc.SetResumePollHandler(func(ctx context.Context, identity Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+		got <- extraTimeout
+		return []map[string]any{{"url": "https://example.test/resumed.png"}}, nil
+	})
+
+	if _, err := svc.ResumePoll(identity, "task-1", 999*time.Second); err != nil {
+		t.Fatalf("ResumePoll() error = %v", err)
+	}
+	select {
+	case extra := <-got:
+		if extra != 120*time.Second {
+			t.Fatalf("clamped extraTimeout = %v, want 120s", extra)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("resume handler not invoked")
+	}
+}
+
+func TestImageTaskServiceResumePollRejectsNonError(t *testing.T) {
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
+	}
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
+	svc.SetResumePollHandler(func(ctx context.Context, identity Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+		t.Fatal("resume handler should not run for non-error task")
+		return nil, nil
+	})
+	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
+
+	if _, err := svc.ResumePoll(identity, "task-1", 30*time.Second); err == nil {
+		t.Fatal("ResumePoll() expected error for non-error task")
+	}
+}
+
+func TestImageTaskServiceResumePollRejectsNonTimeoutError(t *testing.T) {
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return nil, conversationIDError{msg: "internal failure", conv: "conv-x"}
+	}
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
+	svc.SetResumePollHandler(func(ctx context.Context, identity Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+		t.Fatal("resume handler should not run for non-timeout error")
+		return nil, nil
+	})
+	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
+
+	if _, err := svc.ResumePoll(identity, "task-1", 30*time.Second); err == nil {
+		t.Fatal("ResumePoll() expected error for non-timeout failure")
+	}
+}
+
+func TestImageTaskServiceResumePollRequiresConversationID(t *testing.T) {
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return nil, errors.New("图片生成超时，请稍后重试或降低分辨率")
+	}
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
+	svc.SetResumePollHandler(func(ctx context.Context, identity Identity, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+		t.Fatal("resume handler should not run without conversation_id")
+		return nil, nil
+	})
+	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
+
+	if _, err := svc.ResumePoll(identity, "task-1", 30*time.Second); err == nil {
+		t.Fatal("ResumePoll() expected error when conversation_id missing")
+	}
+}
+
+func TestImageTaskServiceReportsStepProgress(t *testing.T) {
+	progressReported := make(chan struct{})
+	release := make(chan struct{})
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		report, ok := payload[imageStepProgressPayloadKey].(func(string))
+		if !ok {
+			return nil, errors.New("step progress callback missing")
+		}
+		report("getting_account")
+		report("image_stream_resolve_start")
+		report("receiving_image")
+		close(progressReported)
+		<-release
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/a.png"}}}, nil
+	}
+	svc := newTestImageTaskService(t, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: AuthRoleUser}
+
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "draw", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	select {
+	case <-progressReported:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for step progress")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		items := svc.ListTasks(identity, []string{"task-1"})["items"].([]map[string]any)
+		if len(items) == 1 && items[0]["progress"] == "receiving_image" {
+			break
+		}
+		if time.Now().Add(10 * time.Millisecond).After(deadline) {
+			t.Fatalf("task progress = %#v, want receiving_image", items[0]["progress"])
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(release)
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
+}
+
 func TestImageTaskServiceLimitsUserDefaultConcurrentCreationUnits(t *testing.T) {
 	startedImages := make(chan int, 3)
 	release := make(chan struct{})

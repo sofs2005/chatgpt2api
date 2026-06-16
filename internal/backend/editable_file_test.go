@@ -460,3 +460,76 @@ func TestEditableArtifactsFromConversationIgnoresStdoutAsFileIdentity(t *testing
 		t.Fatalf("zip target = %#v, want sandbox file without stdout identity", targets[1])
 	}
 }
+
+// 上游采用两步下载：端点先返回带 download_url 的 JSON，再二次 GET 取真实字节。
+// 若 JSON 响应里没有 download_url（仅元数据），绝不能把这段 JSON 当作文件本体返回，
+// 否则会写出损坏的 pptx/psd。此时应判定该端点失败，回退到下一个端点取真实字节。
+func TestDownloadEditableArtifactRejectsJSONWithoutDownloadURL(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1/attachment/file-psd/download":
+			// 2xx JSON，但只有元数据、既无 download_url 也无明确 error 字段。
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"file_id":"file-psd","size":105,"mime_type":"image/vnd.adobe.photoshop"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file-psd":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/person.psd"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/person.psd":
+			_, _ = w.Write([]byte("psd-bytes"))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	data, err := newTestBackendClient(server).downloadEditableArtifact(context.Background(), "conv-1", editableArtifact{
+		AttachmentID: "file-psd",
+		FileID:       "file-psd",
+		FileName:     "person.psd",
+	})
+	if err != nil {
+		t.Fatalf("downloadEditableArtifact() error = %v", err)
+	}
+	if string(data) != "psd-bytes" {
+		t.Fatalf("download data = %q, want psd-bytes", string(data))
+	}
+}
+
+// 上游 FILE_ID_RE 守卫：只有形如 file-xxx / file_xxx（且非 file-service）的 id 才是真正的文件标识。
+// tool-xxx / msg-xxx 这类调用 id 不能被当作 attachment_id/file_id 去请求下载端点，
+// 否则会命中元数据响应导致写出损坏文件；这类产物应只凭 sandbox_path 走解释器下载。
+func TestEditableArtifactFromMapRejectsNonFileID(t *testing.T) {
+	value := map[string]any{
+		"id":           "tool-call-xyz",
+		"name":         "final_deck.pptx",
+		"sandbox_path": "/mnt/data/final_deck.pptx",
+	}
+
+	artifact, ok := editableArtifactFromMap(value, nil)
+	if !ok {
+		t.Fatalf("editableArtifactFromMap() ok = false, want artifact from sandbox path")
+	}
+	if artifact.FileID != "" || artifact.AttachmentID != "" {
+		t.Fatalf("artifact ids = (file=%q attach=%q), want empty for non-file id", artifact.FileID, artifact.AttachmentID)
+	}
+	if artifact.SandboxPath != "/mnt/data/final_deck.pptx" {
+		t.Fatalf("artifact sandbox = %q, want /mnt/data/final_deck.pptx", artifact.SandboxPath)
+	}
+}
+
+// 同时验证：合法的 file- 前缀 id 仍应被正常采纳为下载标识。
+func TestEditableArtifactFromMapKeepsRealFileID(t *testing.T) {
+	value := map[string]any{
+		"id":   "file-abc123",
+		"name": "deck.pptx",
+	}
+
+	artifact, ok := editableArtifactFromMap(value, nil)
+	if !ok {
+		t.Fatalf("editableArtifactFromMap() ok = false, want artifact from real file id")
+	}
+	if artifact.FileID != "file-abc123" || artifact.AttachmentID != "file-abc123" {
+		t.Fatalf("artifact ids = (file=%q attach=%q), want file-abc123", artifact.FileID, artifact.AttachmentID)
+	}
+}

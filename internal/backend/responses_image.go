@@ -1541,16 +1541,26 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 	fileIDs := filterOfficialImageIDs(event.FileIDs)
 	sedimentIDs := filterOfficialImageIDs(event.SedimentIDs)
 	text := ""
-	if conversationID != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 {
-		polled, err := c.pollOfficialImageResults(ctx, conversationID, event.pollTarget)
+	hasInitialIDs := len(fileIDs) > 0 || len(sedimentIDs) > 0
+	// skip-poll 优化：SSE 已带 id 且 settle 与 check_before_hit 均关闭时，跳过会话轮询直接解析，
+	// 省去 initial_wait + 轮询耗时（对齐上游 resolve_conversation_image_urls）。
+	skipPoll := hasInitialIDs && !c.imageCheckBeforeHitEnabled && !c.imageSettleEnabled
+	if conversationID != "" && !skipPoll {
+		polled, err := c.pollOfficialImageResults(ctx, conversationID, event.pollTarget, fileIDs, sedimentIDs)
 		if err != nil {
-			return nil, err
-		}
-		fileIDs = appendUniqueString(fileIDs, polled.FileIDs...)
-		sedimentIDs = appendUniqueString(sedimentIDs, polled.SedimentIDs...)
-		text = polled.Text
-		if messageID == "" {
-			messageID = polled.MessageID
+			// 轮询失败但 SSE 已带 id：视为部分成功，保留 SSE id 继续解析（对齐上游 partial 处理）。
+			if !hasInitialIDs {
+				return nil, err
+			}
+		} else {
+			fileIDs = appendUniqueString(fileIDs, polled.FileIDs...)
+			sedimentIDs = appendUniqueString(sedimentIDs, polled.SedimentIDs...)
+			if strings.TrimSpace(polled.Text) != "" {
+				text = polled.Text
+			}
+			if messageID == "" {
+				messageID = polled.MessageID
+			}
 		}
 	}
 	imageFileIDs := officialImageFileIDs(fileIDs, sedimentIDs)
@@ -1586,6 +1596,19 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 		})
 	}
 	return results, nil
+}
+
+// ResumeOfficialImagePoll 仅凭 conversation_id 续轮询会话文档并解析出图片结果，
+// 用于超时任务的「继续等待」（resume_poll）。它复用 resolveOfficialImageResults：
+// 以空 pollTarget 锁定会话内最新图片，并经 c.headers/c.do 自动携带本项目的浏览器指纹与 cookie。
+func (c *Client) ResumeOfficialImagePoll(ctx context.Context, conversationID, prompt string) ([]ResponsesImageEvent, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, fmt.Errorf("conversation_id is required")
+	}
+	event := ResponsesImageEvent{ConversationID: conversationID}
+	request := ResponsesImageRequest{Prompt: strings.TrimSpace(prompt)}
+	return c.resolveOfficialImageResults(ctx, request, event)
 }
 
 func (c *Client) resolveOfficialInterpreterAssetResults(ctx context.Context, request ResponsesImageRequest, assets []officialInterpreterAsset, fallbackConversationID, fallbackMessageID string) ([]ResponsesImageEvent, error) {
@@ -1642,10 +1665,75 @@ type officialConversationPollResult struct {
 	MessageID   string
 }
 
-func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID string, target officialImagePollTarget) (officialConversationPollResult, error) {
+// imagePollAction enumerates the decision for one image polling round, mirroring
+// upstream's settle / check_before_hit semantics.
+type imagePollAction int
+
+const (
+	// imagePollContinue keeps polling because no usable ids were found yet.
+	imagePollContinue imagePollAction = iota
+	// imagePollReturn accepts the current ids and finishes polling.
+	imagePollReturn
+	// imagePollSettle waits settle_secs then re-polls to double-confirm ids.
+	imagePollSettle
+)
+
+// decideImagePollAction reproduces the upstream per-round hit logic:
+//   - 没有 id 时继续轮询;
+//   - 关闭二次校验(check_before_hit)时首个 SSE/轮询命中即返回;
+//   - 命中 key 与上一轮一致即视为二次确认成功并返回;
+//   - 关闭沉降(settle)时单次确认即返回;
+//   - 否则进入沉降等待, 等待后再确认一次.
+func decideImagePollAction(hasIDs, checkBeforeHit, settleEnabled, haveLastHit, hitMatchesLast bool) imagePollAction {
+	if !hasIDs {
+		return imagePollContinue
+	}
+	if !checkBeforeHit {
+		return imagePollReturn
+	}
+	if haveLastHit && hitMatchesLast {
+		return imagePollReturn
+	}
+	if !settleEnabled {
+		return imagePollReturn
+	}
+	return imagePollSettle
+}
+
+// imageHitKey 构造与上游一致的命中键（保持 file_ids/sediment_ids 的插入顺序），
+// 用于二次确认时判断两轮命中的 id 集合是否完全一致。
+func imageHitKey(fileIDs, sedimentIDs []string) string {
+	return strings.Join(fileIDs, ",") + "|" + strings.Join(sedimentIDs, ",")
+}
+
+// pollOfficialImageResults 轮询会话文档解析图片结果，复刻上游 _poll_image_results 的
+// 沉降(settle)与「先 check 再 hit」语义：跨轮累积 file_ids/sediment_ids，命中后按配置
+// 决定立即返回 / 等待 settle 后二次确认。initialFileIDs/initialSedimentIDs 为 SSE 已给出的
+// id（若有），既参与累积也作为首个命中基准。所有请求经 c.headers/c.do 自动携带浏览器指纹与 cookie。
+func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID string, target officialImagePollTarget, initialFileIDs, initialSedimentIDs []string) (officialConversationPollResult, error) {
 	if strings.TrimSpace(conversationID) == "" {
 		return officialConversationPollResult{}, nil
 	}
+	fileIDs := appendUniqueString(nil, filterOfficialImageIDs(initialFileIDs)...)
+	sedimentIDs := appendUniqueString(nil, filterOfficialImageIDs(initialSedimentIDs)...)
+	hasInitialIDs := len(fileIDs) > 0 || len(sedimentIDs) > 0
+	haveLastHit := hasInitialIDs
+	lastHitKey := ""
+	if hasInitialIDs {
+		lastHitKey = imageHitKey(fileIDs, sedimentIDs)
+	}
+	text := ""
+	messageID := ""
+
+	// SSE 已带 id 且开启 settle：先等待一个 settle 窗口再开始确认，避免抢跑到半成品。
+	if hasInitialIDs && c.imageSettleEnabled && c.imageSettleSecs > 0 {
+		select {
+		case <-ctx.Done():
+			return officialConversationPollResult{}, ctx.Err()
+		case <-time.After(c.imageSettleSecs):
+		}
+	}
+
 	delay := 4 * time.Second
 	for {
 		select {
@@ -1656,14 +1744,49 @@ func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID st
 		result, err := c.fetchOfficialConversationImageResult(ctx, conversationID, target)
 		if err != nil {
 			if retry, ok := err.(officialConversationPollRetryError); ok {
-				delay = retry.Delay
-			} else {
-				return officialConversationPollResult{}, err
+				select {
+				case <-ctx.Done():
+					return officialConversationPollResult{}, ctx.Err()
+				case <-time.After(retry.Delay):
+				}
+				continue
 			}
+			return officialConversationPollResult{}, err
 		}
-		if len(result.FileIDs) > 0 || len(result.SedimentIDs) > 0 || strings.TrimSpace(result.Text) != "" {
-			return result, nil
+		fileIDs = appendUniqueString(fileIDs, result.FileIDs...)
+		sedimentIDs = appendUniqueString(sedimentIDs, result.SedimentIDs...)
+		if strings.TrimSpace(result.Text) != "" {
+			text = result.Text
 		}
+		if messageID == "" {
+			messageID = result.MessageID
+		}
+
+		hasIDs := len(fileIDs) > 0 || len(sedimentIDs) > 0
+		// 纯文本回复（无图片 id）：沿用既有行为直接返回，供 image_text_response 使用。
+		if !hasIDs && strings.TrimSpace(text) != "" {
+			return officialConversationPollResult{Text: text, MessageID: messageID}, nil
+		}
+
+		hitKey := imageHitKey(fileIDs, sedimentIDs)
+		action := decideImagePollAction(hasIDs, c.imageCheckBeforeHitEnabled, c.imageSettleEnabled, haveLastHit, lastHitKey == hitKey)
+		switch action {
+		case imagePollReturn:
+			return officialConversationPollResult{FileIDs: fileIDs, SedimentIDs: sedimentIDs, Text: text, MessageID: messageID}, nil
+		case imagePollSettle:
+			lastHitKey = hitKey
+			haveLastHit = true
+			if c.imageSettleSecs > 0 {
+				select {
+				case <-ctx.Done():
+					return officialConversationPollResult{}, ctx.Err()
+				case <-time.After(c.imageSettleSecs):
+				}
+			}
+			delay = 4 * time.Second
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
 			return officialConversationPollResult{}, ctx.Err()

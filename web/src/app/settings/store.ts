@@ -94,6 +94,9 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     text_account_schedule_mode: normalizeAccountScheduleMode(config.text_account_schedule_mode),
     image_account_schedule_mode: normalizeAccountScheduleMode(config.image_account_schedule_mode),
+    image_settle_enabled: config.image_settle_enabled !== false,
+    image_check_before_hit_enabled: config.image_check_before_hit_enabled !== false,
+    image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
@@ -191,6 +194,9 @@ type SettingsStore = {
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setTextAccountScheduleMode: (value: AccountScheduleMode) => void;
   setImageAccountScheduleMode: (value: AccountScheduleMode) => void;
+  setImageSettleEnabled: (value: boolean) => void;
+  setImageCheckBeforeHitEnabled: (value: boolean) => void;
+  setImageSettleSecs: (value: string) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
@@ -337,6 +343,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         text_account_schedule_mode: normalizeAccountScheduleMode(config.text_account_schedule_mode),
         image_account_schedule_mode: normalizeAccountScheduleMode(config.image_account_schedule_mode),
+        image_settle_enabled: config.image_settle_enabled !== false,
+        image_check_before_hit_enabled: config.image_check_before_hit_enabled !== false,
+        image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
         registration_enabled: Boolean(config.registration_enabled),
@@ -441,6 +450,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountScheduleMode: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_account_schedule_mode: normalizeAccountScheduleMode(value) } } : {});
+  },
+
+  setImageSettleEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_settle_enabled: value } } : {});
+  },
+
+  setImageCheckBeforeHitEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_check_before_hit_enabled: value } } : {});
+  },
+
+  setImageSettleSecs: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_settle_secs: value } } : {});
   },
 
   setLogLevel: (level, enabled) => {

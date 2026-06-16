@@ -1084,6 +1084,46 @@ func TestStreamResponsesImagePollsAsyncImageTaskForCurrentTurn(t *testing.T) {
 	}
 }
 
+func TestResumeOfficialImagePollReturnsConversationImage(t *testing.T) {
+	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
+	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html data-build="build-1"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"req-token","proofofwork":{"required":false},"turnstile":{"required":false},"arkose":{"required":false}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-resume":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mapping":{"node-1":{"message":{"author":{"role":"tool"},"metadata":{"async_task_type":"image_gen"},"content":{"content_type":"multimodal_text","parts":[{"content_type":"image_asset_pointer","asset_pointer":"file-service://file_ready"}]}}}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_ready":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"download_url":"` + server.URL + `/download/file_ready.png"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/download/file_ready.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageBytes)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestBackendClient(server)
+	events, err := client.ResumeOfficialImagePoll(context.Background(), "conv-resume", "原始提示")
+	if err != nil {
+		t.Fatalf("ResumeOfficialImagePoll() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Result != png1x1 || events[0].ConversationID != "conv-resume" {
+		t.Fatalf("events = %#v, want one resumed image for conv-resume", events)
+	}
+}
+
 func TestStreamResponsesImageRetriesConversationPollRateLimit(t *testing.T) {
 	const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII="
 	imageBytes, err := base64.StdEncoding.DecodeString(png1x1)

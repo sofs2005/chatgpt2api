@@ -61,6 +61,11 @@ const (
 	maxImageTaskTimeoutSeconds     = 3600
 )
 
+const (
+	defaultImageSettleSecs = 2.0
+	minImageSettleSecs     = 0.5
+)
+
 type Store struct {
 	mu             sync.RWMutex
 	RootDir        string
@@ -231,6 +236,18 @@ func (s *Store) TextAccountScheduleMode() string {
 
 func (s *Store) ImageAccountScheduleMode() string {
 	return normalizeAccountScheduleMode(s.settingValue("image_account_schedule_mode", "load_balance"))
+}
+
+func (s *Store) ImageSettleEnabled() bool {
+	return util.ToBool(s.settingValue("image_settle_enabled", true))
+}
+
+func (s *Store) ImageCheckBeforeHitEnabled() bool {
+	return util.ToBool(s.settingValue("image_check_before_hit_enabled", true))
+}
+
+func (s *Store) ImageSettleSecs() float64 {
+	return normalizeImageSettleSecs(s.settingValue("image_settle_secs", defaultImageSettleSecs))
 }
 
 func (s *Store) UserDefaultConcurrentLimit() int {
@@ -439,6 +456,9 @@ func (s *Store) Get() map[string]any {
 	data["image_task_timeout_seconds"] = s.ImageTaskTimeoutSeconds()
 	data["text_account_schedule_mode"] = s.TextAccountScheduleMode()
 	data["image_account_schedule_mode"] = s.ImageAccountScheduleMode()
+	data["image_settle_enabled"] = s.ImageSettleEnabled()
+	data["image_check_before_hit_enabled"] = s.ImageCheckBeforeHitEnabled()
+	data["image_settle_secs"] = s.ImageSettleSecs()
 	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
 	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
 	data["default_billing_type"] = s.DefaultBillingType()
@@ -503,6 +523,9 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 	}
 	if value, ok := next["image_account_schedule_mode"]; ok {
 		next["image_account_schedule_mode"] = normalizeAccountScheduleMode(value)
+	}
+	if value, ok := next["image_settle_secs"]; ok {
+		next["image_settle_secs"] = normalizeImageSettleSecs(value)
 	}
 	if value, ok := next["image_storage_limit_mb"]; ok {
 		next["image_storage_limit_mb"] = normalizeNonNegativeInt(value)
@@ -814,6 +837,14 @@ func normalizeImageTaskTimeoutSeconds(value any) int {
 		return maxImageTaskTimeoutSeconds
 	}
 	return seconds
+}
+
+func normalizeImageSettleSecs(value any) float64 {
+	secs := floatSetting(value, defaultImageSettleSecs)
+	if secs < minImageSettleSecs {
+		return minImageSettleSecs
+	}
+	return secs
 }
 
 func normalizeAccountScheduleMode(value any) string {

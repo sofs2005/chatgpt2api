@@ -33,6 +33,9 @@ type ImageConfig interface {
 	ImagesDir() string
 	ImageMetadataDir() string
 	BaseURL() string
+	ImageSettleEnabled() bool
+	ImageCheckBeforeHitEnabled() bool
+	ImageSettleSecs() float64
 }
 
 type Engine struct {
@@ -45,15 +48,35 @@ type Engine struct {
 
 	ListModelsFunc            func(context.Context) (map[string]any, error)
 	HandleChatCompletionsFunc func(context.Context, map[string]any) (map[string]any, *StreamResult, error)
+	SearchFunc                func(context.Context, string) (backend.SearchResult, error)
 	StreamImageOutputsFunc    func(context.Context, *backend.Client, ConversationRequest, int, int) (<-chan ImageOutput, <-chan error)
 	ImageTokenProvider        func(context.Context) (string, error)
 	ImageClientFactory        func(string) *backend.Client
+	// ResumeImagePollFunc 注入续轮询的事件来源，默认走 backend.Client.ResumeOfficialImagePoll；
+	// 测试可注入以避免真实 HTTP。
+	ResumeImagePollFunc func(ctx context.Context, token string, request ConversationRequest, conversationID string) ([]backend.ResponsesImageEvent, error)
+	// imageRetrySleep 用于生图退避等待，默认 time.Sleep；测试可注入以避免真实等待。
+	imageRetrySleep func(time.Duration)
+
+	// imageResumeTokens 记录超时生图任务的会话令牌，供「继续等待」按 conversation_id 续轮询。
+	// 仅驻留内存（不落盘），重启后失效，属可接受的尽力而为。
+	imageResumeMu     sync.Mutex
+	imageResumeTokens map[string]imageResumeEntry
 
 	responseContextMu     sync.Mutex
 	ResponseContexts      *ResponseContextStore
 	chatCompletionCacheMu sync.Mutex
 	ChatCompletionCache   *ChatCompletionCache
 }
+
+// imageResumeEntry 记录一个续轮询令牌及其写入时间，用于 TTL 过期清理。
+type imageResumeEntry struct {
+	token string
+	ts    time.Time
+}
+
+// imageResumeTokenTTL 限定续轮询令牌的内存留存时长，超时即视为失效并清理。
+const imageResumeTokenTTL = 30 * time.Minute
 
 type ImageOutputSlotAcquirer func(context.Context, int) (func(), error)
 
@@ -93,6 +116,16 @@ type ConversationRequest struct {
 	MessageAsError          bool
 	AcquireImageOutputSlot  ImageOutputSlotAcquirer
 	ChargeImageOutput       ImageOutputCharger
+	// ReportStep 上报生图步骤进度（getting_account / image_stream_resolve_start /
+	// receiving_image），对齐上游 progress_callback；可为 nil。
+	ReportStep func(step string)
+}
+
+// reportStep 安全地触发步骤进度回调。
+func (r ConversationRequest) reportStep(step string) {
+	if r.ReportStep != nil {
+		r.ReportStep(step)
+	}
 }
 
 func (r ConversationRequest) Normalized() ConversationRequest {
@@ -231,6 +264,16 @@ type ImageGenerationError struct {
 	Type       string
 	Code       string
 	Param      any
+	// ConversationID 记录失败时已知的上游会话 ID，用于超时后按会话续轮询（resume_poll）。
+	ConversationID string
+}
+
+// ImageConversationID 暴露失败会话 ID，供 service 层经接口提取而无需反向依赖 protocol 包。
+func (e *ImageGenerationError) ImageConversationID() string {
+	if e == nil {
+		return ""
+	}
+	return e.ConversationID
 }
 
 type imageRunResult struct {
@@ -251,6 +294,80 @@ func NewImageGenerationError(message string) *ImageGenerationError {
 }
 
 const maxTransientImageStreamAttempts = 3
+
+// 对齐上游 _generate_single_image 的重试预算：
+// TLS 握手错误与连接超时（curl 28）都属于网络/代理抖动，应同账号递增等待后重试，
+// 而非立即耗尽重试次数或误把账号标记为不可用。
+const (
+	maxImageTLSRetries         = 3
+	maxImageConnTimeoutRetries = 3
+)
+
+// isTLSConnectionImageError 对齐上游 is_tls_connection_error：TLS/SSL 握手层错误，
+// 通常可通过短暂等待后重试解决。
+func isTLSConnectionImageError(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	for _, token := range []string{
+		"curl: (35)",
+		"tls connect error",
+		"openssl_internal",
+		"ssl: wrong_version_number",
+		"ssl: certificate_verify_failed",
+		"connection aborted",
+		"remote disconnected",
+		"connection reset by peer",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// isConnectionTimeoutImageError 对齐上游 is_connection_timeout_error（如 curl 28）：
+// 连接/读写超时，应同账号短等待后重试，不切换账号。
+func isConnectionTimeoutImageError(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	for _, token := range []string{
+		"curl: (28)",
+		"operation timed out",
+		"connection timed out",
+		"read timed out",
+		"connect timeout",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// imageRetryBackoff 计算第 attempt 次重试的退避时长：step*attempt，封顶 limit。
+func imageRetryBackoff(step time.Duration, attempt int, limit time.Duration) time.Duration {
+	wait := step * time.Duration(attempt)
+	if wait > limit {
+		return limit
+	}
+	return wait
+}
+
+// sleepImageRetry 执行可注入的退避等待（默认 time.Sleep）。
+func (e *Engine) sleepImageRetry(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if e.imageRetrySleep != nil {
+		e.imageRetrySleep(d)
+		return
+	}
+	time.Sleep(d)
+}
 
 func isTransientImageStreamErrorMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
@@ -585,12 +702,16 @@ func noopImageOutputSlotRelease() {}
 func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutput, request ConversationRequest, index int) imageRunResult {
 	result := imageRunResult{}
 	transientAttempts := 0
+	tlsAttempts := 0
+	connTimeoutAttempts := 0
 	session, hasSession := e.activeImageConversationSession(request)
 	preferredToken := ""
 	if hasSession {
 		preferredToken = session.AccessToken
 	}
 	for {
+		pendingWait := time.Duration(0)
+		request.reportStep("getting_account")
 		lease, err := e.nextImageAccessLease(ctx, preferredToken)
 		if err != nil {
 			result.lastError = err.Error()
@@ -626,8 +747,14 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 			lastConversationID := ""
 			lastMessageID := ""
 			client := e.newImageClient(token)
+			request.reportStep("image_stream_resolve_start")
+			reportedReceiving := false
 			outputs, imageErr := e.StreamImageOutputs(ctx, client, requestForToken, index, request.N)
 			for output := range outputs {
+				if !reportedReceiving {
+					reportedReceiving = true
+					request.reportStep("receiving_image")
+				}
 				if output.ConversationID != "" {
 					lastConversationID = output.ConversationID
 				}
@@ -746,14 +873,34 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 			if !emittedForToken && IsTokenInvalidError(result.lastError) {
 				return true
 			}
+			// TLS 握手错误：同账号递增等待 min(2*n,10)s 后重试，避免网络抖动误伤账号。
+			if !emittedForToken && isTLSConnectionImageError(result.lastError) && tlsAttempts < maxImageTLSRetries {
+				tlsAttempts++
+				pendingWait = imageRetryBackoff(2*time.Second, tlsAttempts, 10*time.Second)
+				return true
+			}
+			// 连接超时（curl 28）：同账号递增等待 min(3*n,9)s 后重试，不切换账号。
+			if !emittedForToken && isConnectionTimeoutImageError(result.lastError) && connTimeoutAttempts < maxImageConnTimeoutRetries {
+				connTimeoutAttempts++
+				pendingWait = imageRetryBackoff(3*time.Second, connTimeoutAttempts, 9*time.Second)
+				return true
+			}
 			if !returnedResult && isTransientImageStreamErrorMessage(result.lastError) && transientAttempts < maxTransientImageStreamAttempts {
 				transientAttempts++
 				return true
 			}
-			result.err = NewImageGenerationError(imageStreamErrorMessage(result.lastError))
+			imgErr := NewImageGenerationError(imageStreamErrorMessage(result.lastError))
+			// 附带已知会话 ID，使超时失败的任务可凭 conversation_id 续轮询。
+			imgErr.ConversationID = lastConversationID
+			// 记住该会话的账号令牌，供「继续等待」按 conversation_id 续轮询（仅内存）。
+			e.rememberImageResumeToken(lastConversationID, token)
+			result.err = imgErr
 			return false
 		}()
 		if retry {
+			if pendingWait > 0 {
+				e.sleepImageRetry(pendingWait)
+			}
 			continue
 		}
 		return result
@@ -843,7 +990,108 @@ func (e *Engine) newImageClient(token string) *backend.Client {
 	if e.ImageClientFactory != nil {
 		return e.ImageClientFactory(token)
 	}
-	return backend.NewClient(token, e.Accounts, e.Proxy)
+	client := backend.NewClient(token, e.Accounts, e.Proxy)
+	if e.Config != nil {
+		client.SetImagePollOptions(
+			e.Config.ImageSettleEnabled(),
+			e.Config.ImageCheckBeforeHitEnabled(),
+			time.Duration(e.Config.ImageSettleSecs()*float64(time.Second)),
+		)
+	}
+	return client
+}
+
+// rememberImageResumeToken 记录会话对应的账号令牌，供超时任务续轮询；顺带清理过期条目。
+func (e *Engine) rememberImageResumeToken(conversationID, token string) {
+	conversationID = strings.TrimSpace(conversationID)
+	token = strings.TrimSpace(token)
+	if conversationID == "" || token == "" {
+		return
+	}
+	e.imageResumeMu.Lock()
+	defer e.imageResumeMu.Unlock()
+	if e.imageResumeTokens == nil {
+		e.imageResumeTokens = make(map[string]imageResumeEntry)
+	}
+	now := time.Now()
+	for id, entry := range e.imageResumeTokens {
+		if now.Sub(entry.ts) > imageResumeTokenTTL {
+			delete(e.imageResumeTokens, id)
+		}
+	}
+	e.imageResumeTokens[conversationID] = imageResumeEntry{token: token, ts: now}
+}
+
+// takeImageResumeToken 取出并消费会话令牌；取出即删除，避免重复续轮询。
+func (e *Engine) takeImageResumeToken(conversationID string) (string, bool) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return "", false
+	}
+	e.imageResumeMu.Lock()
+	defer e.imageResumeMu.Unlock()
+	entry, ok := e.imageResumeTokens[conversationID]
+	if !ok {
+		return "", false
+	}
+	delete(e.imageResumeTokens, conversationID)
+	if time.Since(entry.ts) > imageResumeTokenTTL {
+		return "", false
+	}
+	return entry.token, true
+}
+
+// ResumeImagePoll 按 conversation_id 续轮询会话内最新图片，复用原账号令牌并自动携带本项目
+// 的浏览器指纹与 cookie（经 backend.Client）。它不重复计费——原任务在失败时已结算。
+func (e *Engine) ResumeImagePoll(ctx context.Context, request ConversationRequest, conversationID string, extraTimeout time.Duration) ([]map[string]any, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, NewImageGenerationError("conversation_id is required")
+	}
+	token, ok := e.takeImageResumeToken(conversationID)
+	if !ok {
+		return nil, NewImageGenerationError("续轮询所需的账号会话已失效，请重新发起生成")
+	}
+	pollCtx := ctx
+	if extraTimeout > 0 {
+		var cancel context.CancelFunc
+		pollCtx, cancel = context.WithTimeout(ctx, extraTimeout)
+		defer cancel()
+	}
+	events, err := e.resumeImagePollEvents(pollCtx, token, request, conversationID)
+	if err != nil {
+		return nil, NewImageGenerationError(imageStreamErrorMessage(err.Error()))
+	}
+	data := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		if strings.TrimSpace(event.Result) == "" {
+			continue
+		}
+		item := map[string]any{
+			"b64_json":       event.Result,
+			"revised_prompt": firstNonEmpty(event.RevisedPrompt, request.Prompt),
+			"output_format":  event.OutputFormat,
+		}
+		created := event.Created
+		if created == 0 {
+			created = time.Now().Unix()
+		}
+		result := e.FormatImageResult([]map[string]any{item}, request.Prompt, request.ResponseFormat, request.BaseURL, request.OwnerID, request.OwnerName, created, "")
+		data = append(data, util.AsMapSlice(result["data"])...)
+	}
+	if len(data) == 0 {
+		return nil, NewImageGenerationError("继续等待后仍未找到图片结果")
+	}
+	return data, nil
+}
+
+// resumeImagePollEvents 默认走 backend.Client.ResumeOfficialImagePoll；测试可经 ResumeImagePollFunc 注入。
+func (e *Engine) resumeImagePollEvents(ctx context.Context, token string, request ConversationRequest, conversationID string) ([]backend.ResponsesImageEvent, error) {
+	if e.ResumeImagePollFunc != nil {
+		return e.ResumeImagePollFunc(ctx, token, request, conversationID)
+	}
+	client := e.newImageClient(token)
+	return client.ResumeOfficialImagePoll(ctx, conversationID, request.Prompt)
 }
 
 func (e *Engine) StreamResponsesImageOutputs(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
@@ -1715,6 +1963,94 @@ type UploadedImage struct {
 	ContentType string
 	URL         string
 	Detail      string
+}
+
+func uploadedImagesFromValue(value any) []UploadedImage {
+	switch v := value.(type) {
+	case UploadedImage:
+		return []UploadedImage{v}
+	case []UploadedImage:
+		return v
+	case []any:
+		out := make([]UploadedImage, 0, len(v))
+		for _, item := range v {
+			out = append(out, uploadedImagesFromValue(item)...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func compositeImageEditMasks(images []UploadedImage, masks []UploadedImage) ([]UploadedImage, error) {
+	if len(masks) == 0 {
+		return images, nil
+	}
+	out := make([]UploadedImage, 0, len(images))
+	for index, input := range images {
+		mask := masks[len(masks)-1]
+		if index < len(masks) {
+			mask = masks[index]
+		}
+		composited, err := compositeSingleImageMask(input, mask)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, composited)
+	}
+	return out, nil
+}
+
+func compositeSingleImageMask(input UploadedImage, mask UploadedImage) (UploadedImage, error) {
+	img, _, err := image.Decode(bytes.NewReader(input.Data))
+	if err != nil {
+		return UploadedImage{}, fmt.Errorf("invalid image edit input image: %w", err)
+	}
+	maskImg, _, err := image.Decode(bytes.NewReader(mask.Data))
+	if err != nil {
+		return UploadedImage{}, fmt.Errorf("invalid image edit mask image: %w", err)
+	}
+	bounds := img.Bounds()
+	result := image.NewNRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	for y := 0; y < bounds.Dy(); y++ {
+		for x := 0; x < bounds.Dx(); x++ {
+			src := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+			src.A = maskAlphaAt(maskImg, x, y, bounds.Dx(), bounds.Dy())
+			result.SetNRGBA(x, y, src)
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, result); err != nil {
+		return UploadedImage{}, err
+	}
+	return UploadedImage{Data: buf.Bytes(), Filename: input.Filename, ContentType: "image/png"}, nil
+}
+
+func maskAlphaAt(mask image.Image, x, y, width, height int) uint8 {
+	bounds := mask.Bounds()
+	mx := bounds.Min.X
+	my := bounds.Min.Y
+	if width > 0 {
+		mx += x * bounds.Dx() / width
+	}
+	if height > 0 {
+		my += y * bounds.Dy() / height
+	}
+	switch img := mask.(type) {
+	case *image.NRGBA:
+		return img.NRGBAAt(mx, my).A
+	case *image.RGBA:
+		return img.RGBAAt(mx, my).A
+	case *image.Alpha:
+		return img.AlphaAt(mx, my).A
+	case *image.Gray:
+		return img.GrayAt(mx, my).Y
+	}
+	r, g, b, a := mask.At(mx, my).RGBA()
+	if a != 0xffff {
+		return uint8(a >> 8)
+	}
+	return uint8(((r * 299) + (g * 587) + (b * 114)) / 1000 >> 8)
 }
 
 func AssistantText(event map[string]any, currentText, historyText string) string {

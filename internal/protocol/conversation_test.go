@@ -23,10 +23,26 @@ import (
 
 	"chatgpt2api/internal/backend"
 	"chatgpt2api/internal/service"
+	"chatgpt2api/internal/util"
 )
 
 type testProtocolImageConfig struct {
-	root string
+	root           string
+	settleEnabled  bool
+	checkBeforeHit bool
+	settleSecs     float64
+}
+
+func (c testProtocolImageConfig) ImageSettleEnabled() bool {
+	return c.settleEnabled
+}
+
+func (c testProtocolImageConfig) ImageCheckBeforeHitEnabled() bool {
+	return c.checkBeforeHit
+}
+
+func (c testProtocolImageConfig) ImageSettleSecs() float64 {
+	return c.settleSecs
 }
 
 type testProtocolProxyConfig struct{}
@@ -629,6 +645,276 @@ func TestHandleImageGenerationsReturnsArbitraryUpstreamImageText(t *testing.T) {
 	}
 	if result["output_type"] != "text" || result["message"] != upstreamText {
 		t.Fatalf("result = %#v, want arbitrary upstream text response", result)
+	}
+}
+
+func TestRunSingleImageOutputReportsProgressSteps(t *testing.T) {
+	var mu sync.Mutex
+	var steps []string
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: []map[string]any{{"b64_json": "image"}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+	req := ConversationRequest{Prompt: "draw", Model: "gpt-image-2", N: 1}
+	req.ReportStep = func(step string) {
+		mu.Lock()
+		steps = append(steps, step)
+		mu.Unlock()
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), req)
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err != nil {
+		t.Fatalf("CollectImageOutputs() error = %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), steps...)
+	mu.Unlock()
+	// 对齐上游 progress_callback 的步骤序列。
+	want := []string{"getting_account", "image_stream_resolve_start", "receiving_image"}
+	if len(got) != len(want) {
+		t.Fatalf("progress steps = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("step[%d] = %q, want %q (full=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestRunSingleImageOutputAttachesConversationIDToTimeoutError(t *testing.T) {
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		// 先发出带 conversation_id 的进度事件，再以超时错误结束，模拟生图轮询超时后可续轮询的场景。
+		out <- ImageOutput{Kind: "progress", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), ConversationID: "conv-timeout-123", UpstreamEventType: "image_generation"}
+		close(out)
+		errCh <- errors.New("context deadline exceeded")
+		close(errCh)
+		return out, errCh
+	}
+	req := ConversationRequest{Prompt: "draw", Model: "gpt-image-2", N: 1}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), req)
+	for range outputs {
+	}
+	err := <-errCh
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	var imageErr *ImageGenerationError
+	if !errors.As(err, &imageErr) {
+		t.Fatalf("error = %T %v, want *ImageGenerationError", err, err)
+	}
+	if imageErr.ConversationID != "conv-timeout-123" {
+		t.Fatalf("ImageGenerationError.ConversationID = %q, want conv-timeout-123", imageErr.ConversationID)
+	}
+	if got := imageErr.ImageConversationID(); got != "conv-timeout-123" {
+		t.Fatalf("ImageConversationID() = %q, want conv-timeout-123", got)
+	}
+}
+
+func testPNGBase64(t *testing.T) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+func TestEngineImageResumeTokenRememberAndTake(t *testing.T) {
+	engine := &Engine{}
+	engine.rememberImageResumeToken("conv-token", "tok-abc")
+
+	token, ok := engine.takeImageResumeToken("conv-token")
+	if !ok || token != "tok-abc" {
+		t.Fatalf("takeImageResumeToken() = %q, %v, want tok-abc, true", token, ok)
+	}
+	// 取出即消费：再次取出应失败，避免令牌被无限复用。
+	if _, ok := engine.takeImageResumeToken("conv-token"); ok {
+		t.Fatal("takeImageResumeToken() second call should fail after consumption")
+	}
+}
+
+func TestEngineResumeImagePollReturnsImageData(t *testing.T) {
+	engine := &Engine{Config: testProtocolImageConfig{root: t.TempDir()}}
+	engine.rememberImageResumeToken("conv-resume", "tok-1")
+
+	var gotToken, gotConversationID, gotPrompt string
+	engine.ResumeImagePollFunc = func(ctx context.Context, token string, request ConversationRequest, conversationID string) ([]backend.ResponsesImageEvent, error) {
+		gotToken = token
+		gotConversationID = conversationID
+		gotPrompt = request.Prompt
+		return []backend.ResponsesImageEvent{{Result: testPNGBase64(t), OutputFormat: "png", Created: 100}}, nil
+	}
+
+	data, err := engine.ResumeImagePoll(context.Background(), ConversationRequest{Prompt: "draw a cat", ResponseFormat: "b64_json"}, "conv-resume", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ResumeImagePoll() error = %v", err)
+	}
+	if gotToken != "tok-1" {
+		t.Fatalf("injected token = %q, want tok-1", gotToken)
+	}
+	if gotConversationID != "conv-resume" {
+		t.Fatalf("injected conversationID = %q, want conv-resume", gotConversationID)
+	}
+	if gotPrompt != "draw a cat" {
+		t.Fatalf("injected prompt = %q, want draw a cat", gotPrompt)
+	}
+	if len(data) != 1 {
+		t.Fatalf("data length = %d, want 1", len(data))
+	}
+	if util.Clean(data[0]["url"]) == "" {
+		t.Fatalf("data[0][url] empty, want saved image URL: %#v", data[0])
+	}
+	if util.Clean(data[0]["b64_json"]) == "" {
+		t.Fatalf("data[0][b64_json] empty for b64_json response format: %#v", data[0])
+	}
+	// 令牌应已被消费，避免重复续轮询。
+	if _, ok := engine.takeImageResumeToken("conv-resume"); ok {
+		t.Fatal("resume token should be consumed after ResumeImagePoll")
+	}
+}
+
+func TestEngineResumeImagePollFailsWithoutToken(t *testing.T) {
+	engine := &Engine{Config: testProtocolImageConfig{root: t.TempDir()}}
+
+	if _, err := engine.ResumeImagePoll(context.Background(), ConversationRequest{Prompt: "draw"}, "conv-missing", time.Second); err == nil {
+		t.Fatal("ResumeImagePoll() expected error when resume token missing")
+	}
+}
+
+func TestEngineResumeImagePollEmptyResultFails(t *testing.T) {
+	engine := &Engine{Config: testProtocolImageConfig{root: t.TempDir()}}
+	engine.rememberImageResumeToken("conv-empty", "tok-1")
+	engine.ResumeImagePollFunc = func(ctx context.Context, token string, request ConversationRequest, conversationID string) ([]backend.ResponsesImageEvent, error) {
+		return nil, nil
+	}
+
+	if _, err := engine.ResumeImagePoll(context.Background(), ConversationRequest{Prompt: "draw"}, "conv-empty", time.Second); err == nil {
+		t.Fatal("ResumeImagePoll() expected error when no image resolved")
+	}
+}
+
+func TestRunSingleImageOutputRetriesConnectionTimeoutWithBackoff(t *testing.T) {
+	var mu sync.Mutex
+	var sleeps []time.Duration
+	attempts := 0
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.imageRetrySleep = func(d time.Duration) {
+		mu.Lock()
+		sleeps = append(sleeps, d)
+		mu.Unlock()
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n <= 2 {
+			close(out)
+			errCh <- fmt.Errorf("curl: (28) Operation timed out after 30000 ms")
+			close(errCh)
+			return out, errCh
+		}
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: []map[string]any{{"b64_json": "image"}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Prompt: "draw", Model: "gpt-image-2", N: 1})
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err != nil {
+		t.Fatalf("CollectImageOutputs() error = %v, want success after connection-timeout retries", err)
+	}
+
+	mu.Lock()
+	got := append([]time.Duration(nil), sleeps...)
+	mu.Unlock()
+	// 对齐上游连接超时退避：第 n 次重试等待 min(3*n, 9)s -> 3s, 6s
+	want := []time.Duration{3 * time.Second, 6 * time.Second}
+	if len(got) != len(want) {
+		t.Fatalf("connection-timeout backoff sleeps = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sleep[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRunSingleImageOutputRetriesTLSHandshakeWithBackoff(t *testing.T) {
+	var mu sync.Mutex
+	var sleeps []time.Duration
+	attempts := 0
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.imageRetrySleep = func(d time.Duration) {
+		mu.Lock()
+		sleeps = append(sleeps, d)
+		mu.Unlock()
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n <= 2 {
+			close(out)
+			errCh <- fmt.Errorf("curl: (35) OpenSSL SSL_connect: SSL_ERROR_SYSCALL")
+			close(errCh)
+			return out, errCh
+		}
+		out <- ImageOutput{Kind: "result", Model: request.Model, Index: index, Total: total, Created: time.Now().Unix(), Data: []map[string]any{{"b64_json": "image"}}}
+		close(out)
+		errCh <- nil
+		close(errCh)
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Prompt: "draw", Model: "gpt-image-2", N: 1})
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err != nil {
+		t.Fatalf("CollectImageOutputs() error = %v, want success after TLS retries", err)
+	}
+
+	mu.Lock()
+	got := append([]time.Duration(nil), sleeps...)
+	mu.Unlock()
+	// 对齐上游 TLS 退避：第 n 次重试等待 min(2*n, 10)s -> 2s, 4s
+	want := []time.Duration{2 * time.Second, 4 * time.Second}
+	if len(got) != len(want) {
+		t.Fatalf("tls backoff sleeps = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sleep[%d] = %v, want %v", i, got[i], want[i])
+		}
 	}
 }
 

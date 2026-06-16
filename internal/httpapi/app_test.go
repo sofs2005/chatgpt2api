@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -3879,6 +3880,117 @@ func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
 	if _, ok := detail["duration_ms"].(float64); !ok {
 		t.Fatalf("duration_ms not numeric in audit detail = %#v", detail)
 	}
+}
+
+func TestCreationTaskResumePollRecoversTimedOutImage(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	// 生成阶段：发出带 conversation_id 的进度后以超时失败，触发引擎记住续轮询令牌。
+	app.engine.ImageTokenProvider = func(context.Context) (string, error) { return "test-token", nil }
+	app.engine.ImageClientFactory = func(string) *backend.Client { return nil }
+	app.engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request protocol.ConversationRequest, index, total int) (<-chan protocol.ImageOutput, <-chan error) {
+		out := make(chan protocol.ImageOutput, 1)
+		errCh := make(chan error, 1)
+		out <- protocol.ImageOutput{Kind: "progress", Model: request.Model, Index: index, Total: total, ConversationID: "conv-http-1", UpstreamEventType: "image_generation"}
+		close(out)
+		errCh <- fmt.Errorf("图片生成超时，请稍后重试或降低分辨率")
+		close(errCh)
+		return out, errCh
+	}
+	// 续轮询阶段：注入引擎续轮询事件源，返回一张真实可解码的图片。
+	var resumeToken, resumeConversationID string
+	app.engine.ResumeImagePollFunc = func(ctx context.Context, token string, request protocol.ConversationRequest, conversationID string) ([]backend.ResponsesImageEvent, error) {
+		resumeToken = token
+		resumeConversationID = conversationID
+		return []backend.ResponsesImageEvent{{Result: testHTTPPNGBase64(t), OutputFormat: "png", Created: 1}}, nil
+	}
+
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "frontend", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+
+	submit := httptest.NewRequest(http.MethodPost, "/api/creation-tasks/image-generations", strings.NewReader(`{"client_task_id":"resume-1","prompt":"draw a cat"}`))
+	submit.Header.Set("Authorization", "Bearer "+rawKey)
+	submitRes := httptest.NewRecorder()
+	app.Handler().ServeHTTP(submitRes, submit)
+	if submitRes.Code != http.StatusOK {
+		t.Fatalf("submit creation task status = %d body = %s", submitRes.Code, submitRes.Body.String())
+	}
+
+	// 等待生成任务以超时失败并携带 conversation_id。
+	errored := waitForHTTPTaskStatus(t, app, rawKey, "resume-1", "error")
+	if util.Clean(errored["conversation_id"]) != "conv-http-1" {
+		t.Fatalf("failed task conversation_id = %#v, want conv-http-1", errored["conversation_id"])
+	}
+	if !strings.Contains(util.Clean(errored["error"]), "超时") {
+		t.Fatalf("failed task error = %q, want timeout message", errored["error"])
+	}
+
+	// 续轮询端点：恢复对该任务的轮询。
+	resume := httptest.NewRequest(http.MethodPost, "/api/creation-tasks/resume-1/resume-poll", strings.NewReader(`{"extra_timeout_secs":30}`))
+	resume.Header.Set("Authorization", "Bearer "+rawKey)
+	resumeRes := httptest.NewRecorder()
+	app.Handler().ServeHTTP(resumeRes, resume)
+	if resumeRes.Code != http.StatusOK {
+		t.Fatalf("resume-poll status = %d body = %s", resumeRes.Code, resumeRes.Body.String())
+	}
+	var resumeBody map[string]any
+	if err := json.Unmarshal(resumeRes.Body.Bytes(), &resumeBody); err != nil {
+		t.Fatalf("resume-poll json: %v", err)
+	}
+	if resumeBody["status"] != "running" {
+		t.Fatalf("resume-poll immediate status = %#v, want running", resumeBody["status"])
+	}
+
+	// 等待续轮询完成。
+	succeeded := waitForHTTPTaskStatus(t, app, rawKey, "resume-1", "success")
+	data := util.AsMapSlice(succeeded["data"])
+	if len(data) != 1 || util.Clean(data[0]["url"]) == "" {
+		t.Fatalf("resumed task data = %#v", succeeded["data"])
+	}
+	if resumeToken != "test-token" {
+		t.Fatalf("resume handler token = %q, want test-token", resumeToken)
+	}
+	if resumeConversationID != "conv-http-1" {
+		t.Fatalf("resume handler conversationID = %q, want conv-http-1", resumeConversationID)
+	}
+}
+
+func testHTTPPNGBase64(t *testing.T) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+func waitForHTTPTaskStatus(t *testing.T, app *App, rawKey, taskID, want string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		req := httptest.NewRequest(http.MethodGet, "/api/creation-tasks?ids="+taskID, nil)
+		req.Header.Set("Authorization", "Bearer "+rawKey)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code == http.StatusOK {
+			var body map[string]any
+			if err := json.Unmarshal(res.Body.Bytes(), &body); err == nil {
+				for _, item := range util.AsMapSlice(body["items"]) {
+					if util.Clean(item["id"]) == taskID && util.Clean(item["status"]) == want {
+						return item
+					}
+				}
+			}
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach status %s", taskID, want)
+	return nil
 }
 
 func TestCreationTaskSubmitLogsRequestAndPollingAvoidsGenericAuditNoise(t *testing.T) {

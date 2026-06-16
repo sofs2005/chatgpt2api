@@ -58,6 +58,12 @@ type Client struct {
 	powSources     []string
 	powDataBuild   string
 	sessionCookies map[string]string
+
+	imageSettleEnabled         bool
+	imageCheckBeforeHitEnabled bool
+	imageSettleSecs            time.Duration
+	searchTimeout              time.Duration
+	searchPollInterval         time.Duration
 }
 
 type ChatRequirements struct {
@@ -76,6 +82,12 @@ func NewClient(accessToken string, lookup AccountLookup, proxy *service.ProxySer
 		AccessToken:       strings.TrimSpace(accessToken),
 		lookup:            lookup,
 		proxy:             proxy,
+
+		imageSettleEnabled:         true,
+		imageCheckBeforeHitEnabled: true,
+		imageSettleSecs:            2 * time.Second,
+		searchTimeout:              searchTimeoutSecs,
+		searchPollInterval:         searchPollIntervalSecs,
 	}
 	c.fp = c.buildFingerprint()
 	c.applyBrowserFingerprint()
@@ -85,6 +97,34 @@ func NewClient(accessToken string, lookup AccountLookup, proxy *service.ProxySer
 	c.initAccountCookies()
 	c.httpClient = proxy.BrowserHTTPClientWithProfile(c.fp["impersonate"], 300*time.Second)
 	return c
+}
+
+// ImagePollOptions 暴露当前生图轮询配置，供装配层校验与可观测使用。
+type ImagePollOptions struct {
+	SettleEnabled  bool
+	CheckBeforeHit bool
+	SettleSecs     time.Duration
+}
+
+// SetImagePollOptions 配置官方生图轮询的「二次确认」与「先 check 再 hit」语义。
+// settleEnabled 开启时，发现 file_ids 后等待 settleSecs 再确认同一批 id 出现两次才返回；
+// checkBeforeHit 开启时，必须经会话轮询确认 id（而非仅凭 SSE 事件）。
+func (c *Client) SetImagePollOptions(settleEnabled, checkBeforeHit bool, settleSecs time.Duration) {
+	c.imageSettleEnabled = settleEnabled
+	c.imageCheckBeforeHitEnabled = checkBeforeHit
+	if settleSecs < 0 {
+		settleSecs = 0
+	}
+	c.imageSettleSecs = settleSecs
+}
+
+// ImagePollOptions 返回当前生效的生图轮询配置。
+func (c *Client) ImagePollOptions() ImagePollOptions {
+	return ImagePollOptions{
+		SettleEnabled:  c.imageSettleEnabled,
+		CheckBeforeHit: c.imageCheckBeforeHitEnabled,
+		SettleSecs:     c.imageSettleSecs,
+	}
 }
 
 func (c *Client) ListModels(ctx context.Context) (map[string]any, error) {

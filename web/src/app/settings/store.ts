@@ -83,7 +83,6 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     user_default_concurrent_limit: Number(config.user_default_concurrent_limit || 0),
     user_default_rpm_limit: Number(config.user_default_rpm_limit || 0),
     global_concurrent_limit: Number(config.global_concurrent_limit || 0),
-    global_concurrent_limit: Number(config.global_concurrent_limit || 0),
     default_billing_type: normalizeDefaultBillingType(config.default_billing_type),
     default_standard_balance: Math.max(0, Number(config.default_standard_balance) || 0),
     default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
@@ -184,7 +183,6 @@ type SettingsStore = {
   setImageTaskTimeoutSeconds: (value: string) => void;
   setUserDefaultConcurrentLimit: (value: string) => void;
   setUserDefaultRpmLimit: (value: string) => void;
-  setGlobalConcurrentLimit: (value: string) => void;
   setGlobalConcurrentLimit: (value: string) => void;
   setDefaultBillingType: (value: BillingType) => void;
   setDefaultStandardBalance: (value: string) => void;
@@ -336,7 +334,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         user_default_concurrent_limit: Math.max(0, Number(config.user_default_concurrent_limit) || 0),
         user_default_rpm_limit: Math.max(0, Number(config.user_default_rpm_limit) || 0),
         global_concurrent_limit: Math.max(0, Number(config.global_concurrent_limit) || 0),
-        global_concurrent_limit: Math.max(0, Number(config.global_concurrent_limit) || 0),
         default_billing_type: normalizeDefaultBillingType(config.default_billing_type),
         default_standard_balance: Math.max(0, Number(config.default_standard_balance) || 0),
         default_subscription_quota: Math.max(0, Number(config.default_subscription_quota) || 0),
@@ -424,10 +421,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setUserDefaultRpmLimit: (value) => {
     set((state) => state.config ? { config: { ...state.config, user_default_rpm_limit: value } } : {});
-  },
-
-  setGlobalConcurrentLimit: (value) => {
-    set((state) => state.config ? { config: { ...state.config, global_concurrent_limit: value } } : {});
   },
 
   setGlobalConcurrentLimit: (value) => {

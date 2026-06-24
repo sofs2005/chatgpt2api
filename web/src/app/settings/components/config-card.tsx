@@ -163,9 +163,6 @@ export function ConfigCard() {
   const setUserDefaultConcurrentLimit = useSettingsStore(
     (state) => state.setUserDefaultConcurrentLimit,
   );
-  const setGlobalConcurrentLimit = useSettingsStore(
-    (state) => state.setGlobalConcurrentLimit,
-  );
   const setUserDefaultRpmLimit = useSettingsStore(
     (state) => state.setUserDefaultRpmLimit,
   );

@@ -1459,6 +1459,159 @@ func TestFillFirstTextAndImageStickyAreIndependentAndSkipBusy(t *testing.T) {
 	accounts.releaseImageReservation(firstReservation.token)
 }
 
+func TestFillFirstTextRoundRobinWhenStickyBusy(t *testing.T) {
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{textMode: "fill_first"})
+	accounts.random = rand.New(rand.NewSource(42))
+	accounts.AddAccounts([]string{"token-a", "token-b", "token-c"})
+	accounts.UpdateAccount("token-a", map[string]any{"status": "正常", "type": "Plus"})
+	accounts.UpdateAccount("token-b", map[string]any{"status": "正常", "type": "Plus"})
+	accounts.UpdateAccount("token-c", map[string]any{"status": "正常", "type": "Plus"})
+
+	// First acquire establishes sticky token
+	first, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("first AcquireTextAccessToken() error = %v", err)
+	}
+	stickyToken := first.Token
+	first.Release()
+
+	// Verify sticky is reused when idle
+	second, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("second AcquireTextAccessToken() error = %v", err)
+	}
+	if second.Token != stickyToken {
+		second.Release()
+		t.Fatalf("expected sticky reuse, got %q want %q", second.Token, stickyToken)
+	}
+	// Keep second busy so sticky is occupied
+	busyLease := second
+
+	// Third acquire should round-robin to a different account and set it as new sticky
+	third, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		busyLease.Release()
+		t.Fatalf("third AcquireTextAccessToken() error = %v", err)
+	}
+	if third.Token == stickyToken {
+		third.Release()
+		busyLease.Release()
+		t.Fatalf("round-robin should skip busy sticky token %q", stickyToken)
+	}
+	newStickyToken := third.Token
+	// Keep third busy too so both original sticky and new sticky are occupied
+	busyLease2 := third
+
+	// Fourth acquire: both sticky tokens are busy, should pick the remaining account
+	fourth, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		busyLease.Release()
+		busyLease2.Release()
+		t.Fatalf("fourth AcquireTextAccessToken() error = %v", err)
+	}
+	if fourth.Token == stickyToken || fourth.Token == newStickyToken {
+		fourth.Release()
+		busyLease.Release()
+		busyLease2.Release()
+		t.Fatalf("round-robin should pick remaining account, got %q (busy sticky=%q, busy new sticky=%q)", fourth.Token, stickyToken, newStickyToken)
+	}
+	fourth.Release()
+	busyLease2.Release()
+	busyLease.Release()
+
+	// After all released, original sticky should be preferred again (it re-enters candidates)
+	fifth, err := accounts.AcquireTextAccessToken(nil)
+	if err != nil {
+		t.Fatalf("fifth AcquireTextAccessToken() error = %v", err)
+	}
+	defer fifth.Release()
+	// The current sticky is whatever was last set during the fourth acquire's fallback.
+	// With fill_first semantics, any idle account in candidates is valid; just verify no error.
+	if fifth.Token == "" {
+		t.Fatalf("fifth acquire returned empty token")
+	}
+}
+
+func TestFillFirstImageRoundRobinWhenStickyBusy(t *testing.T) {
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{imageMode: "fill_first"})
+	accounts.random = rand.New(rand.NewSource(99))
+	accounts.AddAccounts([]string{"img-a", "img-b", "img-c"})
+	accounts.UpdateAccount("img-a", map[string]any{"status": "正常", "quota": 5, "type": "Plus"})
+	accounts.UpdateAccount("img-b", map[string]any{"status": "正常", "quota": 5, "type": "Plus"})
+	accounts.UpdateAccount("img-c", map[string]any{"status": "正常", "quota": 5, "type": "Plus"})
+
+	// First acquire establishes sticky
+	firstLease, firstRes, err := accounts.acquireImageCandidateLease(nil, nil)
+	if err != nil {
+		t.Fatalf("first acquireImageCandidateLease() error = %v", err)
+	}
+	stickyToken := firstLease.Token
+	firstLease.Release()
+	accounts.releaseImageReservation(firstRes.token)
+
+	// Occupy sticky so it becomes busy
+	busyLease, busyRes, err := accounts.acquireImageCandidateLease(nil, nil)
+	if err != nil {
+		t.Fatalf("busy acquireImageCandidateLease() error = %v", err)
+	}
+	if busyLease.Token != stickyToken {
+		busyLease.Release()
+		accounts.releaseImageReservation(busyRes.token)
+		t.Fatalf("expected sticky %q, got %q", stickyToken, busyLease.Token)
+	}
+
+	// Next acquire should round-robin to a different account and establish new sticky
+	secondLease, secondRes, err := accounts.acquireImageCandidateLease(nil, nil)
+	if err != nil {
+		busyLease.Release()
+		accounts.releaseImageReservation(busyRes.token)
+		t.Fatalf("second acquireImageCandidateLease() error = %v", err)
+	}
+	if secondLease.Token == stickyToken {
+		secondLease.Release()
+		accounts.releaseImageReservation(secondRes.token)
+		busyLease.Release()
+		accounts.releaseImageReservation(busyRes.token)
+		t.Fatalf("image round-robin should skip busy sticky %q", stickyToken)
+	}
+	newStickyToken := secondLease.Token
+	secondLease.Release()
+	accounts.releaseImageReservation(secondRes.token)
+
+	// Third acquire: new sticky is idle, so fill_first should reuse it (not rotate again)
+	thirdLease, thirdRes, err := accounts.acquireImageCandidateLease(nil, nil)
+	if err != nil {
+		busyLease.Release()
+		accounts.releaseImageReservation(busyRes.token)
+		t.Fatalf("third acquireImageCandidateLease() error = %v", err)
+	}
+	if thirdLease.Token != newStickyToken {
+		thirdLease.Release()
+		accounts.releaseImageReservation(thirdRes.token)
+		busyLease.Release()
+		accounts.releaseImageReservation(busyRes.token)
+		t.Fatalf("fill_first should stick to new sticky %q when idle, got %q", newStickyToken, thirdLease.Token)
+	}
+	thirdLease.Release()
+	accounts.releaseImageReservation(thirdRes.token)
+	busyLease.Release()
+	accounts.releaseImageReservation(busyRes.token)
+
+	// After all released, original sticky should be reusable again
+	fourthLease, fourthRes, err := accounts.acquireImageCandidateLease(nil, nil)
+	if err != nil {
+		t.Fatalf("fourth acquireImageCandidateLease() error = %v", err)
+	}
+	// With fill_first semantics, any idle account in candidates is valid; just verify no error.
+	if fourthLease.Token == "" {
+		fourthLease.Release()
+		accounts.releaseImageReservation(fourthRes.token)
+		t.Fatalf("fourth acquire returned empty token")
+	}
+	fourthLease.Release()
+	accounts.releaseImageReservation(fourthRes.token)
+}
+
 func TestAcquireTextAccessTokenSkipsRateLimitedAccounts(t *testing.T) {
 	accounts := newTestAccountService(t)
 	accounts.AddAccounts([]string{"limited-paid", "normal-free"})

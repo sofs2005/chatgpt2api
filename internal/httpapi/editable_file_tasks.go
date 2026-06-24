@@ -22,6 +22,13 @@ func (a *App) handleEditableFileGenerations(w http.ResponseWriter, r *http.Reque
 		util.WriteError(w, http.StatusInternalServerError, "editable file task service is not configured")
 		return
 	}
+	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
+	release, err := a.globalLimiter.Acquire(r.Context())
+	if err != nil {
+		util.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	defer release()
 	body, err := readJSONMap(r)
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")

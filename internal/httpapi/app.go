@@ -59,6 +59,7 @@ type App struct {
 	sub2Import    *service.Sub2APIService
 	register      *service.RegisterService
 	update        *service.UpdateService
+	globalLimiter *service.GlobalLimiter
 	cancel        context.CancelFunc
 }
 
@@ -207,6 +208,13 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
+	release, err := a.globalLimiter.Acquire(r.Context())
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/generations", "", identity, "文生图", service.ImageVisibilityPrivate, service.BillingReference{})
+		return
+	}
+	defer release()
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
@@ -246,6 +254,13 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "image file is required")
 		return
 	}
+	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
+	release, err := a.globalLimiter.Acquire(r.Context())
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/edits", "", identity, "图生图", service.ImageVisibilityPrivate, service.BillingReference{})
+		return
+	}
+	defer release()
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
@@ -278,6 +293,13 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
+	release, acquireErr := a.globalLimiter.Acquire(r.Context())
+	if acquireErr != nil {
+		util.WriteError(w, http.StatusServiceUnavailable, "request cancelled while waiting for global concurrency slot")
+		return
+	}
+	defer release()
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
@@ -360,6 +382,13 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
+	release, err := a.globalLimiter.Acquire(r.Context())
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/responses", "", identity, "Responses", service.ImageVisibilityPrivate, service.BillingReference{})
+		return
+	}
+	defer release()
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	a.attachCreationTaskLimiter(body, identity)
@@ -385,6 +414,13 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
+	release, err := a.globalLimiter.Acquire(r.Context())
+	if err != nil {
+		a.writeProtocol(w, r, nil, nil, err, "anthropic", "/v1/messages", "", identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})
+		return
+	}
+	defer release()
 	body, err := readJSONMap(r)
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")

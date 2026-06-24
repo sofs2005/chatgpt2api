@@ -51,6 +51,7 @@ var settingEnvKeys = map[string]string{
 	"login_page_image_position_y":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y",
 	"text_account_schedule_mode":        "CHATGPT2API_TEXT_ACCOUNT_SCHEDULE_MODE",
 	"image_account_schedule_mode":       "CHATGPT2API_IMAGE_ACCOUNT_SCHEDULE_MODE",
+	"global_concurrent_limit":           "CHATGPT2API_GLOBAL_CONCURRENT_LIMIT",
 }
 
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -260,6 +261,14 @@ func (s *Store) UserDefaultConcurrentLimit() int {
 
 func (s *Store) UserDefaultRPMLimit() int {
 	value := intSetting(s.settingValue("user_default_rpm_limit", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) GlobalConcurrentLimit() int {
+	value := intSetting(s.settingValue("global_concurrent_limit", 0), 0)
 	if value < 0 {
 		return 0
 	}

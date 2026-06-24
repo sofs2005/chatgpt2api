@@ -259,6 +259,7 @@ export type SettingsConfig = {
   image_task_timeout_seconds?: number | string;
   user_default_concurrent_limit?: number | string;
   user_default_rpm_limit?: number | string;
+  global_concurrent_limit?: number | string;
   default_billing_type?: BillingType;
   default_standard_balance?: number | string;
   default_subscription_quota?: number | string;

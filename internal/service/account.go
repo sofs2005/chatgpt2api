@@ -73,6 +73,8 @@ type AccountService struct {
 	freeTextCooldownOverrideRemaining int
 	stickyTextToken                   string
 	stickyImageToken                  string
+	textRoundRobinIndex               int
+	imageRoundRobinIndex              int
 	random                            *rand.Rand
 	refresher                         *SessionRefresher
 }
@@ -920,7 +922,12 @@ func (s *AccountService) selectStickyTextTokenLocked(candidates []map[string]any
 	if s.tokenInAccounts(s.stickyTextToken, candidates) {
 		return s.stickyTextToken
 	}
-	token := s.selectRandomTokenLocked(candidates)
+	if len(candidates) == 0 {
+		return ""
+	}
+	idx := s.textRoundRobinIndex % len(candidates)
+	s.textRoundRobinIndex = idx + 1
+	token := util.Clean(candidates[idx]["access_token"])
 	s.stickyTextToken = token
 	return token
 }
@@ -1830,7 +1837,12 @@ func (s *AccountService) selectStickyImageTokenLocked(candidates []map[string]an
 	if s.tokenInAccounts(s.stickyImageToken, candidates) {
 		return s.stickyImageToken
 	}
-	token := s.selectRandomTokenLocked(candidates)
+	if len(candidates) == 0 {
+		return ""
+	}
+	idx := s.imageRoundRobinIndex % len(candidates)
+	s.imageRoundRobinIndex = idx + 1
+	token := util.Clean(candidates[idx]["access_token"])
 	s.stickyImageToken = token
 	return token
 }

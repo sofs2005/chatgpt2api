@@ -163,8 +163,14 @@ export function ConfigCard() {
   const setUserDefaultConcurrentLimit = useSettingsStore(
     (state) => state.setUserDefaultConcurrentLimit,
   );
+  const setGlobalConcurrentLimit = useSettingsStore(
+    (state) => state.setGlobalConcurrentLimit,
+  );
   const setUserDefaultRpmLimit = useSettingsStore(
     (state) => state.setUserDefaultRpmLimit,
+  );
+  const setGlobalConcurrentLimit = useSettingsStore(
+    (state) => state.setGlobalConcurrentLimit,
   );
   const setDefaultBillingType = useSettingsStore(
     (state) => state.setDefaultBillingType,
@@ -412,6 +418,28 @@ export function ConfigCard() {
                 onChange={setUserDefaultRpmLimit}
                 placeholder="0"
                 unit="次/分"
+              />
+            </Field>
+          </div>
+        </section>
+
+        <section className={configSectionClassName}>
+          <SectionHeading
+            title="系统全局并发"
+            tip="整个系统同时处理的最大请求数（文本 + 图片 + 可编辑文件），超过后排队等待；0 表示不限制。"
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-global-concurrent-limit">
+                全局并发上限
+              </ConfigFieldLabel>
+              <NumberInputWithUnit
+                id="settings-global-concurrent-limit"
+                min={0}
+                value={config?.global_concurrent_limit ?? ""}
+                onChange={setGlobalConcurrentLimit}
+                placeholder="0"
+                unit="个"
               />
             </Field>
           </div>

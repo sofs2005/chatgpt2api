@@ -98,7 +98,7 @@ func NewApp() (*App, error) {
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	imageSessions := service.NewImageConversationSessionService(filepath.Join(cfg.DataDir, "image_conversation_sessions.json"), storageBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger, ImageConversationSessions: imageSessions}
-	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), globalLimiter: service.NewGlobalLimiter(cfg.GlobalConcurrentLimit()), cancel: cancel}
 	app.editableFiles = service.NewEditableFileTaskService(documentStore, cfg.DataDir, func(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (service.EditableFileRunResult, error) {
 		if app.engine == nil {
 			return service.EditableFileRunResult{}, fmt.Errorf("editable file engine is not configured")
@@ -208,7 +208,6 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
 	release, err := a.globalLimiter.Acquire(r.Context())
 	if err != nil {
 		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/generations", "", identity, "文生图", service.ImageVisibilityPrivate, service.BillingReference{})
@@ -254,7 +253,6 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "image file is required")
 		return
 	}
-	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
 	release, err := a.globalLimiter.Acquire(r.Context())
 	if err != nil {
 		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/images/edits", "", identity, "图生图", service.ImageVisibilityPrivate, service.BillingReference{})
@@ -293,7 +291,6 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
 	release, acquireErr := a.globalLimiter.Acquire(r.Context())
 	if acquireErr != nil {
 		util.WriteError(w, http.StatusServiceUnavailable, "request cancelled while waiting for global concurrency slot")
@@ -382,7 +379,6 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
 	release, err := a.globalLimiter.Acquire(r.Context())
 	if err != nil {
 		a.writeProtocol(w, r, nil, nil, err, "openai", "/v1/responses", "", identity, "Responses", service.ImageVisibilityPrivate, service.BillingReference{})
@@ -419,7 +415,6 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
 	release, acquireErr := a.globalLimiter.Acquire(r.Context())
 	if acquireErr != nil {
 		a.writeProtocol(w, r, nil, nil, acquireErr, "anthropic", "/v1/messages", "", identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})

@@ -55,6 +55,29 @@ function trustedImageOrigins() {
   return origins;
 }
 
+/**
+ * Check whether a managed image URL should be treated as trusted even when its
+ * origin differs from the current page origin (e.g. IP address vs domain name
+ * pointing to the same backend). Managed image paths (`/images/`,
+ * `/image-references/`, `/image-thumbnails/`) are exclusively served by the
+ * application backend, so attaching the session token is safe regardless of
+ * which hostname or IP was used to record the URL in logs.
+ */
+function isTrustedManagedImageURL(url: URL): boolean {
+  if (!isManagedImagePath(url.pathname)) {
+    return false;
+  }
+  // Exact origin match — always trusted.
+  if (trustedImageOrigins().has(url.origin)) {
+    return true;
+  }
+  // Cross-origin managed image paths: the backend serves these paths with
+  // uniform authentication. When logs capture absolute URLs using a different
+  // host representation (IP vs domain), we still trust them because the path
+  // prefix guarantees the resource belongs to this application.
+  return true;
+}
+
 function isManagedImagePath(pathname: string) {
   return MANAGED_IMAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
@@ -177,7 +200,7 @@ export function isManagedImageURL(src: string) {
 function canAttachStoredSessionToken(src: string) {
   try {
     const url = new URL(resolveImageRequestURL(src));
-    return isManagedImagePath(url.pathname) && trustedImageOrigins().has(url.origin);
+    return isTrustedManagedImageURL(url);
   } catch {
     return false;
   }

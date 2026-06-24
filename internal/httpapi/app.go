@@ -414,18 +414,18 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
-	release, err := a.globalLimiter.Acquire(r.Context())
-	if err != nil {
-		a.writeProtocol(w, r, nil, nil, err, "anthropic", "/v1/messages", "", identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})
-		return
-	}
-	defer release()
 	body, err := readJSONMap(r)
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
+	release, acquireErr := a.globalLimiter.Acquire(r.Context())
+	if acquireErr != nil {
+		a.writeProtocol(w, r, nil, nil, acquireErr, "anthropic", "/v1/messages", "", identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})
+		return
+	}
+	defer release()
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	ctx, _ := protocol.WithAccountUsageTracker(r.Context())
 	r = r.WithContext(ctx)

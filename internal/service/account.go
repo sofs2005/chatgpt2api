@@ -1132,6 +1132,15 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		}
 		detailsByToken[token] = detail
 		if res.err == nil {
+			// 刷新前记录旧状态，用于检测 quota 恢复事件
+			oldAccount := s.GetAccount(res.token)
+			oldQuota := 0
+			oldStatus := ""
+			if oldAccount != nil {
+				oldQuota = util.ToInt(oldAccount["quota"], 0)
+				oldStatus = util.Clean(oldAccount["status"])
+			}
+
 			updated := s.UpdateAccount(res.token, res.info)
 			if updated != nil {
 				refreshed++
@@ -1142,6 +1151,17 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 				detail["image_quota_unknown"] = updated["image_quota_unknown"]
 				detail["restore_at"] = updated["restore_at"]
 				detail["message"] = "刷新成功"
+
+				// 检测 quota 恢复：从限流/耗尽状态恢复为可用时，清除粘性标记
+				// 这样新一轮限额循环开始时不会继续粘住上一轮的账号
+				newQuota := util.ToInt(updated["quota"], 0)
+				newStatus := util.Clean(updated["status"])
+				quotaRecovered := (oldQuota <= 0 || oldStatus == "限流") && newQuota > 0 && newStatus != "限流"
+				if quotaRecovered {
+					s.mu.Lock()
+					s.clearStickyLocked(res.token, true, true)
+					s.mu.Unlock()
+				}
 			} else {
 				detail["message"] = "刷新完成，账号状态已自动处理"
 			}

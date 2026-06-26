@@ -920,7 +920,13 @@ func tokenSetFromCandidates(candidates []map[string]any) map[string]struct{} {
 
 func (s *AccountService) selectStickyTextTokenLocked(candidates []map[string]any) string {
 	if s.tokenInAccounts(s.stickyTextToken, candidates) {
-		return s.stickyTextToken
+		// 如果粘性账号的重置时间已过期，说明已进入新一轮限额循环，
+		// 解除粘性让调度器重新选择，避免永远只使用同一批账号
+		if s.isRestoreAtExpiredLocked(s.stickyTextToken) {
+			s.stickyTextToken = ""
+		} else {
+			return s.stickyTextToken
+		}
 	}
 	if len(candidates) == 0 {
 		return ""
@@ -1864,7 +1870,13 @@ func (s *AccountService) imageCandidatesLocked(excluded map[string]struct{}, all
 
 func (s *AccountService) selectStickyImageTokenLocked(candidates []map[string]any) string {
 	if s.tokenInAccounts(s.stickyImageToken, candidates) {
-		return s.stickyImageToken
+		// 如果粘性账号的重置时间已过期，说明已进入新一轮限额循环，
+		// 解除粘性让调度器重新选择，避免永远只使用同一批账号
+		if s.isRestoreAtExpiredLocked(s.stickyImageToken) {
+			s.stickyImageToken = ""
+		} else {
+			return s.stickyImageToken
+		}
 	}
 	if len(candidates) == 0 {
 		return ""
@@ -2060,6 +2072,24 @@ func (s *AccountService) clearStickyLocked(token string, text bool, image bool) 
 	if image && s.stickyImageToken == token {
 		s.stickyImageToken = ""
 	}
+}
+
+// isRestoreAtExpiredLocked checks whether the account's restore_at has passed,
+// indicating a new quota cycle has started. Must be called with s.mu held.
+func (s *AccountService) isRestoreAtExpiredLocked(token string) bool {
+	token = util.Clean(token)
+	if token == "" {
+		return false
+	}
+	idx := s.findIndexLocked(token)
+	if idx < 0 {
+		return false
+	}
+	restoreAt, ok := parseAccountRestoreAt(s.items[idx]["restore_at"])
+	if !ok {
+		return false
+	}
+	return restoreAt.Before(time.Now())
 }
 
 func normalizeAccountScheduleMode(mode string) string {

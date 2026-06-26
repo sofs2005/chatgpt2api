@@ -1286,6 +1286,7 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 			next["quota"] = quota
 			if quota == 0 {
 				next["status"] = "限流"
+				s.clearStickyLocked(resolvedToken, false, true)
 				if _, ok := next["restore_at"]; !ok {
 					next["restore_at"] = nil
 				}
@@ -1824,6 +1825,14 @@ func (s *AccountService) imageCandidatesLocked(excluded map[string]struct{}, all
 			continue
 		}
 		if allow != nil && !allow(item) {
+			continue
+		}
+		// 对于已知 quota 的图片账号，显式检查 quota 以缩小竞态窗口：
+		// MarkImageResult 先递减 quota 再设 status="限流"，在 mutex 释放后
+		// 下一次 imageCandidatesLocked 调用可能仍看到旧的 status="正常"，
+		// 但 quota 已经是 0，此处提前过滤避免选出额度耗尽的账号。
+		// image_quota_unknown=true 的账号不递减 quota，由上游反馈控制，此处不干预。
+		if !util.ToBool(item["image_quota_unknown"]) && util.ToInt(item["quota"], 0) <= 0 {
 			continue
 		}
 		if s.availableImageSlotsLocked(item) > 0 {

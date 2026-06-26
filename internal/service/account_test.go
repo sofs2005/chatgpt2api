@@ -2570,6 +2570,80 @@ func newAccountQuotaServer(t *testing.T, mePayload map[string]any, limits []map[
 	}))
 }
 
+// --- quota=0 候选过滤测试 ---
+
+// 注：文本账号无 quota 递减机制，textCandidatesLocked/textCandidatesByPaidLocked 不过滤 quota=0。
+// 旧版 JSON 账号 quota 字段缺失时 normalizeAccount 会默认设为 0，若过滤则误杀所有旧账号。
+
+func TestImageCandidatesLockedFiltersQuotaZero(t *testing.T) {
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{imageMode: "fill_first"})
+	accounts.AddAccounts([]string{"img-ok", "img-exhausted", "img-unknown"})
+	accounts.UpdateAccount("img-ok", map[string]any{"status": "正常", "quota": 2})
+	accounts.UpdateAccount("img-exhausted", map[string]any{"status": "正常", "quota": 0})
+	accounts.UpdateAccount("img-unknown", map[string]any{"status": "正常", "quota": 0, "image_quota_unknown": true, "type": "Plus"})
+
+	accounts.mu.Lock()
+	candidates := accounts.imageCandidatesLocked(nil, nil)
+	accounts.mu.Unlock()
+
+	// img-exhausted (quota=0, known quota) 应被过滤；img-unknown (image_quota_unknown=true) 应保留
+	tokens := make(map[string]bool)
+	for _, c := range candidates {
+		tokens[util.Clean(c["access_token"])] = true
+	}
+	if !tokens["img-ok"] {
+		t.Error("img-ok should be in candidates")
+	}
+	if tokens["img-exhausted"] {
+		t.Error("img-exhausted (quota=0, known) should NOT be in candidates")
+	}
+	if !tokens["img-unknown"] {
+		t.Error("img-unknown (image_quota_unknown=true) should still be in candidates")
+	}
+}
+
+func TestMarkImageResultClearsStickyOnQuotaExhaustion(t *testing.T) {
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{imageMode: "fill_first"})
+	accounts.AddAccounts([]string{"img-1"})
+	accounts.UpdateAccount("img-1", map[string]any{"status": "正常", "quota": 1, "type": "Free"})
+
+	// 模拟占用 sticky token
+	accounts.mu.Lock()
+	accounts.stickyImageToken = "img-1"
+	accounts.mu.Unlock()
+
+	// 直接使用 acquireImageCandidateLease 获取 token
+	lease, _, err := accounts.acquireImageCandidateLease(nil, nil)
+	if err != nil {
+		t.Fatalf("acquireImageCandidateLease() error = %v", err)
+	}
+	if lease.Token != "img-1" {
+		t.Fatalf("lease token = %q, want img-1", lease.Token)
+	}
+	// 只释放 busyTokens（lease.Release），reservation 由 MarkImageResult 内部释放
+	lease.Release()
+
+	// 标记成功 → quota 从 1 递减到 0 → 应清除 sticky
+	accounts.MarkImageResult("img-1", true)
+
+	accounts.mu.Lock()
+	sticky := accounts.stickyImageToken
+	accounts.mu.Unlock()
+
+	if sticky != "" {
+		t.Fatalf("sticky token = %q after quota exhaustion, want empty", sticky)
+	}
+
+	// 验证账号状态
+	account := accounts.GetAccount("img-1")
+	if account["status"] != "限流" {
+		t.Fatalf("account status = %q, want 限流", account["status"])
+	}
+	if util.ToInt(account["quota"], 0) != 0 {
+		t.Fatalf("account quota = %v, want 0", account["quota"])
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, payload any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

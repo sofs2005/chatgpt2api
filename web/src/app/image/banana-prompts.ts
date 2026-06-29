@@ -1,5 +1,9 @@
 export type BananaPromptMode = "generate" | "edit";
-export type PromptMarketSourceId = "banana-prompt-quicker" | "awesome-gpt-image-2-prompts";
+export type PromptMarketSourceId =
+  | "banana-prompt-quicker"
+  | "awesome-gpt-image-2-prompts"
+  | "awesome-gpt-image-2"
+  | "awesome-gpt-image-2-ch";
 export type PromptMarketLanguage = "zh-CN" | "en";
 
 export type PromptMarketLocalization = {
@@ -30,14 +34,35 @@ export type BananaPrompt = {
 export const BANANA_PROMPTS_SOURCE_URL = "https://github.com/glidea/banana-prompt-quicker";
 export const BANANA_PROMPTS_URL =
   "https://raw.githubusercontent.com/glidea/banana-prompt-quicker/main/prompts.json";
+// awesome-gpt-image-2-API-and-Prompts (replaces EvoLinkAI/awesome-gpt-image-2-prompts)
 export const AWESOME_GPT_IMAGE_2_PROMPTS_SOURCE_URL =
-  "https://github.com/EvoLinkAI/awesome-gpt-image-2-prompts";
+  "https://github.com/sofs2005/awesome-gpt-image-2-API-and-Prompts";
 export const AWESOME_GPT_IMAGE_2_PROMPTS_ZH_README_URL =
-  "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-prompts/main/README_zh-CN.md";
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-API-and-Prompts/main/README_zh-CN.md";
 export const AWESOME_GPT_IMAGE_2_PROMPTS_EN_README_URL =
-  "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-prompts/main/README.md";
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-API-and-Prompts/main/README.md";
 const AWESOME_GPT_IMAGE_2_PROMPTS_RAW_BASE_URL =
-  "https://raw.githubusercontent.com/EvoLinkAI/awesome-gpt-image-2-prompts/main/";
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-API-and-Prompts/main/";
+
+// awesome-gpt-image-2 (English gallery, freestylefly fork)
+export const AWESOME_GPT_IMAGE_2_SOURCE_URL =
+  "https://github.com/sofs2005/awesome-gpt-image-2";
+const AWESOME_GPT_IMAGE_2_GALLERY_PART1_URL =
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2/main/docs/gallery-part-1.md";
+const AWESOME_GPT_IMAGE_2_GALLERY_PART2_URL =
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2/main/docs/gallery-part-2.md";
+const AWESOME_GPT_IMAGE_2_RAW_BASE_URL =
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2/main/";
+
+// awesome-gpt-image-2-ch (Chinese gallery, freestylefly fork)
+export const AWESOME_GPT_IMAGE_2_CH_SOURCE_URL =
+  "https://github.com/sofs2005/awesome-gpt-image-2-ch";
+const AWESOME_GPT_IMAGE_2_CH_GALLERY_PART1_URL =
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-ch/main/docs/gallery-part-1.md";
+const AWESOME_GPT_IMAGE_2_CH_GALLERY_PART2_URL =
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-ch/main/docs/gallery-part-2.md";
+const AWESOME_GPT_IMAGE_2_CH_RAW_BASE_URL =
+  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-ch/main/";
 
 export const PROMPT_MARKET_SOURCE_OPTIONS: {
   value: PromptMarketSourceId;
@@ -49,7 +74,15 @@ export const PROMPT_MARKET_SOURCE_OPTIONS: {
   },
   {
     value: "awesome-gpt-image-2-prompts",
-    label: "awesome-gpt-image-2-prompts",
+    label: "awesome-gpt-image-2-API-and-Prompts",
+  },
+  {
+    value: "awesome-gpt-image-2",
+    label: "awesome-gpt-image-2 (EN)",
+  },
+  {
+    value: "awesome-gpt-image-2-ch",
+    label: "awesome-gpt-image-2 (中文)",
   },
 ];
 
@@ -332,11 +365,194 @@ export async function fetchAwesomeGptImage2Prompts(signal?: AbortSignal) {
   );
 }
 
-export async function fetchPromptMarketPrompts(signal?: AbortSignal) {
-  const [bananaPrompts, awesomePrompts] = await Promise.all([
-    fetchBananaPrompts(signal),
-    fetchAwesomeGptImage2Prompts(signal),
+// --- Gallery Parser for freestylefly/awesome-gpt-image-2 format ---
+const GALLERY_CASE_HEADING_PATTERN = /^### Case\s+(\d+):\s+(.+)$/;
+const GALLERY_ANCHOR_PATTERN = /^<a\s+name="case-(\d+)"><\/a>$/i;
+const GALLERY_IMAGE_PATTERN = /<img\s+[^>]*src=["']([^"']+)["'][^>]*>/i;
+const GALLERY_PROMPT_PATTERN =
+  /\*{2,}\s*(?:Prompt|提示词)\s*[:：]\s*\*{2,}\s*\r?\n\s*```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/i;
+const GALLERY_CATEGORY_PATTERN = /^## (.+)$/;
+const IGNORED_GALLERY_HEADINGS = new Set([
+  "简介",
+  "最新动态",
+  "Menu",
+  "致谢",
+  "Star History",
+  "Featured Cases",
+  "Latest Community Additions",
+  "Canghe Original Tests",
+]);
+
+function normalizeGalleryImageUrl(value: string, baseUrl: string) {
+  const imageUrl = value.trim();
+  if (!imageUrl) {
+    return "";
+  }
+  if (/^https?:\/\//i.test(imageUrl)) {
+    return imageUrl;
+  }
+  return new URL(imageUrl.replace(/^\.\//, ""), baseUrl).toString();
+}
+
+function parseGalleryPrompts(
+  markdown: string,
+  language: PromptMarketLanguage,
+  source: PromptMarketSourceId,
+  baseUrl: string,
+): BananaPrompt[] {
+  const lines = markdown.split(/\r?\n/);
+  const prompts: BananaPrompt[] = [];
+  let activeCategory = "未分类";
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+
+    // Track category from ## headings
+    if (line.startsWith("## ")) {
+      const headingMatch = line.match(GALLERY_CATEGORY_PATTERN);
+      if (headingMatch) {
+        const heading = cleanMarkdownHeading(headingMatch[1]);
+        if (heading && !IGNORED_GALLERY_HEADINGS.has(heading)) {
+          activeCategory = heading;
+        }
+      }
+      continue;
+    }
+
+    // Look for ### Case N: Title pattern
+    const caseMatch = line.match(GALLERY_CASE_HEADING_PATTERN);
+    if (!caseMatch) {
+      continue;
+    }
+
+    const caseNumber = caseMatch[1].trim();
+    const title = caseMatch[2].trim();
+
+    // Find the section end (next ### Case or ## heading)
+    let sectionEnd = lines.length;
+    for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex += 1) {
+      if (
+        lines[nextIndex].match(GALLERY_CASE_HEADING_PATTERN) ||
+        lines[nextIndex].startsWith("## ")
+      ) {
+        sectionEnd = nextIndex;
+        break;
+      }
+    }
+
+    const section = lines.slice(index, sectionEnd).join("\n");
+    const imageMatch = section.match(GALLERY_IMAGE_PATTERN);
+    const promptMatch = section.match(GALLERY_PROMPT_PATTERN);
+
+    if (!imageMatch || !promptMatch) {
+      index = sectionEnd - 1;
+      continue;
+    }
+
+    const preview = normalizeGalleryImageUrl(imageMatch[1], baseUrl);
+    const prompt = promptMatch[1].trim();
+
+    if (!title || !preview || !prompt) {
+      index = sectionEnd - 1;
+      continue;
+    }
+
+    const id = `${source}:case-${caseNumber}`;
+    prompts.push({
+      id,
+      title,
+      preview,
+      referenceImageUrls: [],
+      prompt,
+      author: "Community",
+      link: source === "awesome-gpt-image-2-ch" ? AWESOME_GPT_IMAGE_2_CH_SOURCE_URL : AWESOME_GPT_IMAGE_2_SOURCE_URL,
+      mode: "generate",
+      category: activeCategory,
+      subCategory: `Case ${caseNumber}`,
+      source,
+      sourceLabel: source === "awesome-gpt-image-2-ch" ? "awesome-gpt-image-2 (中文)" : "awesome-gpt-image-2 (EN)",
+      isNsfw: isNsfwPrompt(activeCategory, title, prompt),
+      localizations: {
+        [language]: {
+          title,
+          prompt,
+          category: activeCategory,
+          subCategory: `Case ${caseNumber}`,
+        },
+      },
+    });
+
+    index = sectionEnd - 1;
+  }
+
+  return prompts;
+}
+
+export async function fetchAwesomeGptImage2GalleryPrompts(signal?: AbortSignal) {
+  const [part1Response, part2Response] = await Promise.all([
+    fetch(AWESOME_GPT_IMAGE_2_GALLERY_PART1_URL, {
+      signal,
+      headers: { Accept: "text/markdown,text/plain" },
+    }),
+    fetch(AWESOME_GPT_IMAGE_2_GALLERY_PART2_URL, {
+      signal,
+      headers: { Accept: "text/markdown,text/plain" },
+    }),
   ]);
 
-  return [...bananaPrompts, ...awesomePrompts];
+  const prompts: BananaPrompt[] = [];
+  if (part1Response.ok) {
+    const markdown = await part1Response.text();
+    prompts.push(...parseGalleryPrompts(markdown, "en", "awesome-gpt-image-2", AWESOME_GPT_IMAGE_2_RAW_BASE_URL));
+  }
+  if (part2Response.ok) {
+    const markdown = await part2Response.text();
+    prompts.push(...parseGalleryPrompts(markdown, "en", "awesome-gpt-image-2", AWESOME_GPT_IMAGE_2_RAW_BASE_URL));
+  }
+
+  if (prompts.length === 0 && !part1Response.ok && !part2Response.ok) {
+    throw new Error(`读取 awesome-gpt-image-2 gallery 失败：${part1Response.status}/${part2Response.status}`);
+  }
+
+  return prompts;
+}
+
+export async function fetchAwesomeGptImage2ChGalleryPrompts(signal?: AbortSignal) {
+  const [part1Response, part2Response] = await Promise.all([
+    fetch(AWESOME_GPT_IMAGE_2_CH_GALLERY_PART1_URL, {
+      signal,
+      headers: { Accept: "text/markdown,text/plain" },
+    }),
+    fetch(AWESOME_GPT_IMAGE_2_CH_GALLERY_PART2_URL, {
+      signal,
+      headers: { Accept: "text/markdown,text/plain" },
+    }),
+  ]);
+
+  const prompts: BananaPrompt[] = [];
+  if (part1Response.ok) {
+    const markdown = await part1Response.text();
+    prompts.push(...parseGalleryPrompts(markdown, "zh-CN", "awesome-gpt-image-2-ch", AWESOME_GPT_IMAGE_2_CH_RAW_BASE_URL));
+  }
+  if (part2Response.ok) {
+    const markdown = await part2Response.text();
+    prompts.push(...parseGalleryPrompts(markdown, "zh-CN", "awesome-gpt-image-2-ch", AWESOME_GPT_IMAGE_2_CH_RAW_BASE_URL));
+  }
+
+  if (prompts.length === 0 && !part1Response.ok && !part2Response.ok) {
+    throw new Error(`读取 awesome-gpt-image-2-ch gallery 失败：${part1Response.status}/${part2Response.status}`);
+  }
+
+  return prompts;
+}
+
+export async function fetchPromptMarketPrompts(signal?: AbortSignal) {
+  const [bananaPrompts, awesomePrompts, galleryEnPrompts, galleryChPrompts] = await Promise.all([
+    fetchBananaPrompts(signal),
+    fetchAwesomeGptImage2Prompts(signal),
+    fetchAwesomeGptImage2GalleryPrompts(signal).catch(() => [] as BananaPrompt[]),
+    fetchAwesomeGptImage2ChGalleryPrompts(signal).catch(() => [] as BananaPrompt[]),
+  ]);
+
+  return [...bananaPrompts, ...awesomePrompts, ...galleryEnPrompts, ...galleryChPrompts];
 }

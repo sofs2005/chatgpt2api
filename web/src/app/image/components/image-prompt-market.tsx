@@ -5,7 +5,9 @@ import { ClipboardCopy, ExternalLink, LoaderCircle, RefreshCcw, Search, SlidersH
 import { toast } from "sonner";
 
 import {
+  AWESOME_GPT_IMAGE_2_CH_SOURCE_URL,
   AWESOME_GPT_IMAGE_2_PROMPTS_SOURCE_URL,
+  AWESOME_GPT_IMAGE_2_SOURCE_URL,
   BANANA_PROMPTS_SOURCE_URL,
   PROMPT_MARKET_SOURCE_OPTIONS,
   fetchPromptMarketPrompts,
@@ -541,14 +543,32 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                 >
                   glidea/banana-prompt-quicker
                 </a>
-                {" "}和{" "}
+                {" "}、{" "}
                 <a
                   href={AWESOME_GPT_IMAGE_2_PROMPTS_SOURCE_URL}
                   target="_blank"
                   rel="noreferrer"
                   className="font-medium text-[#1456f0] hover:underline"
                 >
-                  EvoLinkAI/awesome-gpt-image-2-prompts
+                  awesome-gpt-image-2-API-and-Prompts
+                </a>
+                {" "}、{" "}
+                <a
+                  href={AWESOME_GPT_IMAGE_2_SOURCE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-[#1456f0] hover:underline"
+                >
+                  awesome-gpt-image-2 (EN)
+                </a>
+                {" "}和{" "}
+                <a
+                  href={AWESOME_GPT_IMAGE_2_CH_SOURCE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-[#1456f0] hover:underline"
+                >
+                  awesome-gpt-image-2 (中文)
                 </a>
                 ，可按来源筛选并一键套用到当前生图输入框。
               </DialogDescription>

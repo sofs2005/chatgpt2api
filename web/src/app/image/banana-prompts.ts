@@ -44,25 +44,25 @@ export const AWESOME_GPT_IMAGE_2_PROMPTS_EN_README_URL =
 const AWESOME_GPT_IMAGE_2_PROMPTS_RAW_BASE_URL =
   "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-API-and-Prompts/main/";
 
-// awesome-gpt-image-2 (English gallery, freestylefly fork)
+// awesome-gpt-image-2 gallery content lives in the freestylefly upstream repo.
 export const AWESOME_GPT_IMAGE_2_SOURCE_URL =
-  "https://github.com/sofs2005/awesome-gpt-image-2";
+  "https://github.com/freestylefly/awesome-gpt-image-2";
 const AWESOME_GPT_IMAGE_2_GALLERY_PART1_URL =
-  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2/main/docs/gallery-part-1.md";
+  "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/docs/gallery-part-1.md";
 const AWESOME_GPT_IMAGE_2_GALLERY_PART2_URL =
-  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2/main/docs/gallery-part-2.md";
+  "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/docs/gallery-part-2.md";
 const AWESOME_GPT_IMAGE_2_RAW_BASE_URL =
-  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2/main/";
+  "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/";
 
-// awesome-gpt-image-2-ch (Chinese gallery, freestylefly fork)
+// The Chinese gallery view reuses the same upstream gallery data source.
 export const AWESOME_GPT_IMAGE_2_CH_SOURCE_URL =
-  "https://github.com/sofs2005/awesome-gpt-image-2-ch";
+  "https://github.com/freestylefly/awesome-gpt-image-2";
 const AWESOME_GPT_IMAGE_2_CH_GALLERY_PART1_URL =
-  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-ch/main/docs/gallery-part-1.md";
+  "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/docs/gallery-part-1.md";
 const AWESOME_GPT_IMAGE_2_CH_GALLERY_PART2_URL =
-  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-ch/main/docs/gallery-part-2.md";
+  "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/docs/gallery-part-2.md";
 const AWESOME_GPT_IMAGE_2_CH_RAW_BASE_URL =
-  "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-ch/main/";
+  "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/";
 
 export const PROMPT_MARKET_SOURCE_OPTIONS: {
   value: PromptMarketSourceId;
@@ -100,7 +100,7 @@ type BananaPromptSourceItem = {
 };
 
 const MARKDOWN_CASE_HEADING_PATTERN =
-  /^### Case\s+(\d+):\s+\[([^\]]+)]\(([^)]+)\)\s+\(by\s+\[([^\]]+)]\(([^)]+)\)\)/;
+  /^### Case\s+(\d+):\s+\[([^\]]+)](?:\(([^)]+)\))?(?:\s+\(by\s+\[([^\]]+)](?:\(([^)]+)\))?\))?/;
 const MARKDOWN_IMAGE_PATTERN = /<img\s+[^>]*src=["']([^"']+)["'][^>]*>/i;
 const MARKDOWN_PROMPT_PATTERN =
   /\*{2,}\s*(?:Prompt|提示词)\s*[:：]\s*\*{2,}\s*\n\s*```(?:\w+)?\n([\s\S]*?)\n```/i;
@@ -178,6 +178,12 @@ function normalizeMarkdownImageUrl(value: string) {
   if (!imageUrl) {
     return "";
   }
+  if (/^https?:\/\/raw\.githubusercontent\.com\/EvoLinkAI\/awesome-gpt-image-2-API-and-Prompts\//i.test(imageUrl)) {
+    return imageUrl.replace(
+      /^https?:\/\/raw\.githubusercontent\.com\/EvoLinkAI\/awesome-gpt-image-2-API-and-Prompts\//i,
+      "https://raw.githubusercontent.com/sofs2005/awesome-gpt-image-2-API-and-Prompts/",
+    );
+  }
   if (/^https?:\/\//i.test(imageUrl)) {
     return imageUrl;
   }
@@ -210,22 +216,22 @@ function normalizeAwesomePromptSection(
 
   const caseNumber = heading[1].trim();
   const title = heading[2].trim();
-  const link = heading[3].trim();
-  const author = heading[4].trim();
+  const link = (heading[3] || "").trim();
+  const author = (heading[4] || "Community").trim() || "Community";
   const preview = normalizeMarkdownImageUrl(image[1]);
   const prompt = promptBlock[1].trim();
-  if (!caseNumber || !title || !preview || !prompt || !author) {
+  if (!caseNumber || !title || !preview || !prompt) {
     return null;
   }
 
   return {
-    id: `awesome-gpt-image-2-prompts:${buildAwesomePromptMergeKey(link, preview)}`,
+    id: `awesome-gpt-image-2-prompts:${buildAwesomePromptMergeKey(link || `case-${caseNumber}`, preview)}`,
     title,
     preview,
     referenceImageUrls: [],
     prompt,
     author,
-    link,
+    link: link || undefined,
     mode: "generate",
     category,
     subCategory: `Case ${caseNumber}`,
@@ -233,7 +239,7 @@ function normalizeAwesomePromptSection(
     sourceLabel: "awesome-gpt-image-2-prompts",
     isNsfw: isNsfwPrompt(category, title, prompt),
     language,
-    mergeKey: buildAwesomePromptMergeKey(link, preview),
+    mergeKey: buildAwesomePromptMergeKey(link || `case-${caseNumber}`, preview),
     localizations: {
       [language]: {
         title,
@@ -366,9 +372,9 @@ export async function fetchAwesomeGptImage2Prompts(signal?: AbortSignal) {
 }
 
 // --- Gallery Parser for freestylefly/awesome-gpt-image-2 format ---
-const GALLERY_CASE_HEADING_PATTERN = /^### Case\s+(\d+):\s+(.+)$/;
+const GALLERY_CASE_HEADING_PATTERN = /^###\s+(?:Case|例)\s*(\d+)[:：]\s*(.+)$/;
 const GALLERY_ANCHOR_PATTERN = /^<a\s+name="case-(\d+)"><\/a>$/i;
-const GALLERY_IMAGE_PATTERN = /<img\s+[^>]*src=["']([^"']+)["'][^>]*>/i;
+const GALLERY_IMAGE_PATTERN = /(?:<img\s+[^>]*src=["']([^"']+)["'][^>]*>|!\[[^\]]*\]\(([^)]+)\))/i;
 const GALLERY_PROMPT_PATTERN =
   /\*{2,}\s*(?:Prompt|提示词)\s*[:：]\s*\*{2,}\s*\r?\n\s*```(?:\w+)?\r?\n([\s\S]*?)\r?\n```/i;
 const GALLERY_CATEGORY_PATTERN = /^## (.+)$/;
@@ -391,7 +397,7 @@ function normalizeGalleryImageUrl(value: string, baseUrl: string) {
   if (/^https?:\/\//i.test(imageUrl)) {
     return imageUrl;
   }
-  return new URL(imageUrl.replace(/^\.\//, ""), baseUrl).toString();
+  return new URL(imageUrl.replace(/^\.\//, "").replace(/^\.\.\//, ""), baseUrl).toString();
 }
 
 function parseGalleryPrompts(
@@ -449,7 +455,7 @@ function parseGalleryPrompts(
       continue;
     }
 
-    const preview = normalizeGalleryImageUrl(imageMatch[1], baseUrl);
+    const preview = normalizeGalleryImageUrl(imageMatch[1] || imageMatch[2] || "", baseUrl);
     const prompt = promptMatch[1].trim();
 
     if (!title || !preview || !prompt) {
@@ -550,8 +556,14 @@ export async function fetchPromptMarketPrompts(signal?: AbortSignal) {
   const [bananaPrompts, awesomePrompts, galleryEnPrompts, galleryChPrompts] = await Promise.all([
     fetchBananaPrompts(signal),
     fetchAwesomeGptImage2Prompts(signal),
-    fetchAwesomeGptImage2GalleryPrompts(signal).catch(() => [] as BananaPrompt[]),
-    fetchAwesomeGptImage2ChGalleryPrompts(signal).catch(() => [] as BananaPrompt[]),
+    fetchAwesomeGptImage2GalleryPrompts(signal).catch((error) => {
+      console.warn("Failed to fetch awesome-gpt-image-2 gallery:", error);
+      return [] as BananaPrompt[];
+    }),
+    fetchAwesomeGptImage2ChGalleryPrompts(signal).catch((error) => {
+      console.warn("Failed to fetch awesome-gpt-image-2-ch gallery:", error);
+      return [] as BananaPrompt[];
+    }),
   ]);
 
   return [...bananaPrompts, ...awesomePrompts, ...galleryEnPrompts, ...galleryChPrompts];

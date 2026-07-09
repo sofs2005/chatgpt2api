@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"chatgpt2api/internal/util"
 )
@@ -69,6 +70,53 @@ func SessionCookieStringMap(raw any) map[string]string {
 		return nil
 	}
 	return cookies
+}
+
+const cloudflareCookieFreshWindow = 30 * time.Minute
+
+func AccountSessionCookiesForRequest(account map[string]any, now time.Time) map[string]string {
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	if len(cookies) == 0 {
+		return nil
+	}
+	updatedAt := SessionCookieStringMap(account["session_cookie_updated_at"])
+	filtered := map[string]string{}
+	for name, value := range cookies {
+		if isCloudflareSessionCookieName(name) {
+			updated, err := time.Parse(time.RFC3339, updatedAt[name])
+			if err != nil || now.Sub(updated) > cloudflareCookieFreshWindow {
+				continue
+			}
+		}
+		filtered[name] = value
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func SessionCookieUpdatedAtForCookies(cookies map[string]string, now time.Time) map[string]string {
+	updatedAt := map[string]string{}
+	stamp := now.UTC().Format(time.RFC3339)
+	for name := range cookies {
+		if isCloudflareSessionCookieName(name) {
+			updatedAt[name] = stamp
+		}
+	}
+	if len(updatedAt) == 0 {
+		return nil
+	}
+	return updatedAt
+}
+
+func isCloudflareSessionCookieName(name string) bool {
+	return name == "cf_clearance" ||
+		name == "__cf_bm" ||
+		name == "__cflb" ||
+		name == "_cfuvid" ||
+		strings.HasPrefix(name, "cf_chl_") ||
+		strings.HasPrefix(name, "__cf")
 }
 
 func isAllowedSessionCookieName(name string) bool {

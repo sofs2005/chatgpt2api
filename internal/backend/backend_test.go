@@ -123,16 +123,23 @@ func TestClientSendsStoredAccountCookiesToUpstream(t *testing.T) {
 	}))
 	defer server.Close()
 
+	now := time.Now().UTC()
 	client := &Client{
 		BaseURL:     server.URL,
 		AccessToken: "token-1",
 		httpClient:  server.Client(),
 		lookup: testAccountLookup{
-			"token-1": {"session_cookies": map[string]string{
-				"cf_clearance": "cf-cookie",
-				"oai-sc":       "sc-cookie",
-				"_cfuvid":      "visitor-cookie",
-			}},
+			"token-1": {
+				"session_cookies": map[string]string{
+					"cf_clearance": "cf-cookie",
+					"oai-sc":       "sc-cookie",
+					"_cfuvid":      "visitor-cookie",
+				},
+				"session_cookie_updated_at": map[string]string{
+					"cf_clearance": now.Format(time.RFC3339),
+					"_cfuvid":      now.Format(time.RFC3339),
+				},
+			},
 		},
 	}
 	client.fp = client.buildFingerprint()
@@ -150,6 +157,52 @@ func TestClientSendsStoredAccountCookiesToUpstream(t *testing.T) {
 	}
 }
 
+func TestClientSkipsStaleCloudflareCookiesToUpstream(t *testing.T) {
+	var seenCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html data-build="build-1"></html>`))
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	client := &Client{
+		BaseURL:     server.URL,
+		AccessToken: "token-1",
+		httpClient:  server.Client(),
+		lookup: testAccountLookup{
+			"token-1": {
+				"session_cookies": map[string]string{
+					"cf_clearance": "stale-cf",
+					"__cf_bm":      "fresh-bm",
+					"oai-did":      "did-cookie",
+				},
+				"session_cookie_updated_at": map[string]string{
+					"cf_clearance": now.Add(-31 * time.Minute).Format(time.RFC3339),
+					"__cf_bm":      now.Add(-5 * time.Minute).Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	client.fp = client.buildFingerprint()
+	client.applyBrowserFingerprint()
+	client.userAgent = client.fp["user-agent"]
+	client.initAccountCookies()
+
+	if err := client.bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap() error = %v", err)
+	}
+	if strings.Contains(seenCookie, "cf_clearance=stale-cf") {
+		t.Fatalf("Cookie header = %q, should skip stale cf_clearance", seenCookie)
+	}
+	for _, want := range []string{"__cf_bm=fresh-bm", "oai-did=did-cookie"} {
+		if !strings.Contains(seenCookie, want) {
+			t.Fatalf("Cookie header = %q, missing %q", seenCookie, want)
+		}
+	}
+}
+
 func TestClientStoresUpstreamSetCookiesOnAccount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "__cf_bm", Value: "new-bm", Path: "/"})
@@ -159,8 +212,14 @@ func TestClientStoresUpstreamSetCookiesOnAccount(t *testing.T) {
 	}))
 	defer server.Close()
 
+	now := time.Now().UTC()
 	lookup := &recordingAccountLookup{accounts: map[string]map[string]any{
-		"token-1": {"session_cookies": map[string]string{"cf_clearance": "cf-cookie"}},
+		"token-1": {
+			"session_cookies": map[string]string{"cf_clearance": "cf-cookie"},
+			"session_cookie_updated_at": map[string]string{
+				"cf_clearance": now.Format(time.RFC3339),
+			},
+		},
 	}}
 	client := &Client{
 		BaseURL:     server.URL,
@@ -182,6 +241,13 @@ func TestClientStoresUpstreamSetCookiesOnAccount(t *testing.T) {
 	}
 	if _, ok := cookies["ignored_cookie"]; ok {
 		t.Fatalf("unexpected ignored cookie stored: %#v", cookies)
+	}
+	updatedAt, ok := lookup.accounts["token-1"]["session_cookie_updated_at"].(map[string]string)
+	if !ok {
+		t.Fatalf("session_cookie_updated_at type = %T, want map[string]string", lookup.accounts["token-1"]["session_cookie_updated_at"])
+	}
+	if _, err := time.Parse(time.RFC3339, updatedAt["__cf_bm"]); err != nil {
+		t.Fatalf("session_cookie_updated_at[__cf_bm] = %q, want RFC3339 timestamp", updatedAt["__cf_bm"])
 	}
 }
 

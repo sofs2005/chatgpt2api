@@ -366,7 +366,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
               {sessionUrl}
               <ExternalLink className="size-3.5" />
             </a>
-            ，复制页面返回的完整 JSON；同时建议导入同一浏览器里的 ChatGPT cookies（至少包含 cf_clearance、__cf_bm、oai-did），否则后端刷新仍可能被 CF 拦截。
+            ，复制页面返回的完整 JSON；同时建议导入同一浏览器里的 ChatGPT cookies（必需 oai-did；若浏览器已通过 CF 挑战，再带上 cf_clearance、__cf_bm、oai-sc 可提升后端刷新成功率，这几个没触发风控时可能不存在）。
           </div>
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
             <div className="font-medium">风险提示</div>
@@ -386,7 +386,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
           <div className="space-y-2">
             <label className="text-sm font-medium text-stone-700">ChatGPT Cookies</label>
             <Textarea
-              placeholder='粘贴 Cookie Header，或 JSON，例如 {"cf_clearance":"...","__cf_bm":"...","oai-did":"..."}'
+              placeholder='粘贴 Cookie Header，或 JSON，例如 {"oai-did":"...","cf_clearance":"...","__cf_bm":"..."}'
               value={sessionCookiesInput}
               onChange={(event) => setSessionCookiesInput(event.target.value)}
               className="min-h-32 resize-none rounded-xl border-stone-200 font-mono text-xs"

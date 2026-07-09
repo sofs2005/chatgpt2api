@@ -320,6 +320,9 @@ func (s *AccountService) AddAccountFromSession(sessionJSON string, cookieInputs 
 	}
 	if len(sessionCookies) > 0 {
 		updates["session_cookies"] = sessionCookies
+		if updatedAt := SessionCookieUpdatedAtForCookies(sessionCookies, time.Now()); len(updatedAt) > 0 {
+			updates["session_cookie_updated_at"] = updatedAt
+		}
 	}
 	if userID != "" {
 		updates["user_id"] = userID
@@ -1708,7 +1711,7 @@ func (s *AccountService) accountSessionCookies(accessToken string) map[string]st
 		return cookies
 	}
 	account := s.GetAccount(accessToken)
-	for name, value := range SessionCookieStringMap(account["session_cookies"]) {
+	for name, value := range AccountSessionCookiesForRequest(account, time.Now()) {
 		cookies[name] = value
 	}
 	return cookies
@@ -1738,7 +1741,14 @@ func (s *AccountService) rememberSessionCookies(accessToken string, current map[
 	for name, value := range current {
 		merged[name] = value
 	}
+	updatedAt := map[string]string{}
+	account := s.GetAccount(accessToken)
+	for name, value := range SessionCookieStringMap(account["session_cookie_updated_at"]) {
+		updatedAt[name] = value
+	}
 	changed := false
+	updatedAtChanged := false
+	now := time.Now()
 	for _, cookie := range resp.Cookies() {
 		allowed := SessionCookieStringMap(map[string]string{cookie.Name: firstNonEmpty(cookie.Value, "x")})
 		if len(allowed) == 0 {
@@ -1749,17 +1759,33 @@ func (s *AccountService) rememberSessionCookies(accessToken string, current map[
 				delete(merged, cookie.Name)
 				changed = true
 			}
+			if _, ok := updatedAt[cookie.Name]; ok {
+				delete(updatedAt, cookie.Name)
+				updatedAtChanged = true
+			}
 			continue
 		}
 		if merged[cookie.Name] != cookie.Value {
 			merged[cookie.Name] = cookie.Value
 			changed = true
 		}
+		if stamped := SessionCookieUpdatedAtForCookies(map[string]string{cookie.Name: cookie.Value}, now); len(stamped) > 0 {
+			for name, value := range stamped {
+				if updatedAt[name] != value {
+					updatedAt[name] = value
+					updatedAtChanged = true
+				}
+			}
+		}
 	}
-	if !changed {
+	if !changed && !updatedAtChanged {
 		return current
 	}
-	s.UpdateAccount(accessToken, map[string]any{"session_cookies": merged})
+	updates := map[string]any{"session_cookies": merged}
+	if len(updatedAt) > 0 {
+		updates["session_cookie_updated_at"] = updatedAt
+	}
+	s.UpdateAccount(accessToken, updates)
 	return merged
 }
 
@@ -2598,24 +2624,40 @@ func normalizeAccount(item map[string]any) map[string]any {
 	return normalized
 }
 
-var accountCookieCompletenessNames = []string{"cf_clearance", "__cf_bm", "oai-did", "oai-sc"}
+// 核心必需 Cookie：稳定存在的设备标识，缺失才视为不完整。
+var accountCookieRequiredNames = []string{"oai-did"}
+
+// 增强型 Cookie：过了 CF 挑战才会下发、且偏临时性（cf_clearance/__cf_bm/oai-sc）。
+// 有则更抗 CF 拦截，缺失不影响完整性判定。
+var accountCookieEnhancerNames = []string{"cf_clearance", "__cf_bm", "oai-sc"}
 
 func accountCookieCompleteness(account map[string]any) (string, []string) {
 	cookies := SessionCookieStringMap(account["session_cookies"])
-	missing := make([]string, 0, len(accountCookieCompletenessNames))
-	present := 0
-	for _, name := range accountCookieCompletenessNames {
-		if value := cookies[name]; value != "" {
-			present++
+	missing := make([]string, 0, len(accountCookieRequiredNames)+len(accountCookieEnhancerNames))
+
+	requiredPresent := 0
+	for _, name := range accountCookieRequiredNames {
+		if cookies[name] != "" {
+			requiredPresent++
 			continue
 		}
 		missing = append(missing, name)
 	}
+	enhancerPresent := 0
+	for _, name := range accountCookieEnhancerNames {
+		if cookies[name] != "" {
+			enhancerPresent++
+			continue
+		}
+		missing = append(missing, name)
+	}
+
 	switch {
-	case present == 0:
-		return "无", missing
-	case len(missing) == 0:
+	case requiredPresent == len(accountCookieRequiredNames):
+		// 核心 Cookie 齐全即视为完整，增强型 Cookie 缺失不再报"不完整"。
 		return "完整", nil
+	case requiredPresent == 0 && enhancerPresent == 0:
+		return "无", missing
 	default:
 		return "部分", missing
 	}

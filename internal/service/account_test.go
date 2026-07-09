@@ -323,7 +323,7 @@ func TestRefreshAccountsReturnsEmptyErrorsArray(t *testing.T) {
 
 func TestListAccountsIncludesCookieCompleteness(t *testing.T) {
 	accounts := newTestAccountService(t)
-	accounts.AddAccounts([]string{"token-complete", "token-partial", "token-empty"})
+	accounts.AddAccounts([]string{"token-complete", "token-core-only", "token-partial", "token-empty"})
 	accounts.UpdateAccount("token-complete", map[string]any{
 		"session_cookies": map[string]string{
 			"cf_clearance": "cf-cookie",
@@ -332,16 +332,23 @@ func TestListAccountsIncludesCookieCompleteness(t *testing.T) {
 			"oai-sc":       "sc-cookie",
 		},
 	})
+	// 仅核心 oai-did，增强型 Cookie 全缺 —— 仍应视为完整。
+	accounts.UpdateAccount("token-core-only", map[string]any{
+		"session_cookies": map[string]string{
+			"oai-did": "did-cookie",
+		},
+	})
+	// 有增强型 Cookie 但缺核心 oai-did —— 视为部分。
 	accounts.UpdateAccount("token-partial", map[string]any{
 		"session_cookies": map[string]string{
 			"cf_clearance": "cf-cookie",
-			"oai-did":      "did-cookie",
+			"__cf_bm":      "bm-cookie",
 		},
 	})
 
 	items := accounts.ListAccounts()
-	if len(items) != 3 {
-		t.Fatalf("items len = %d, want 3", len(items))
+	if len(items) != 4 {
+		t.Fatalf("items len = %d, want 4", len(items))
 	}
 	indexed := map[string]map[string]any{}
 	for _, item := range items {
@@ -359,6 +366,17 @@ func TestListAccountsIncludesCookieCompleteness(t *testing.T) {
 		t.Fatalf("complete missingCookies = %#v, want empty []string", complete["missingCookies"])
 	}
 
+	coreOnly := indexed["token-core-only"]
+	if coreOnly == nil {
+		t.Fatal("token-core-only account missing")
+	}
+	if coreOnly["cookieStatus"] != "完整" {
+		t.Fatalf("core-only cookieStatus = %#v, want 完整", coreOnly["cookieStatus"])
+	}
+	if missing, ok := coreOnly["missingCookies"].([]string); !ok || len(missing) != 0 {
+		t.Fatalf("core-only missingCookies = %#v, want empty []string", coreOnly["missingCookies"])
+	}
+
 	partial := indexed["token-partial"]
 	if partial == nil {
 		t.Fatal("token-partial account missing")
@@ -370,8 +388,8 @@ func TestListAccountsIncludesCookieCompleteness(t *testing.T) {
 	if !ok {
 		t.Fatalf("partial missingCookies type = %T, want []string", partial["missingCookies"])
 	}
-	if !reflect.DeepEqual(missing, []string{"__cf_bm", "oai-sc"}) {
-		t.Fatalf("partial missingCookies = %#v, want [__cf_bm oai-sc]", missing)
+	if !reflect.DeepEqual(missing, []string{"oai-did", "oai-sc"}) {
+		t.Fatalf("partial missingCookies = %#v, want [oai-did oai-sc]", missing)
 	}
 
 	empty := indexed["token-empty"]
@@ -385,8 +403,8 @@ func TestListAccountsIncludesCookieCompleteness(t *testing.T) {
 	if !ok {
 		t.Fatalf("empty missingCookies type = %T, want []string", empty["missingCookies"])
 	}
-	if !reflect.DeepEqual(missing, []string{"cf_clearance", "__cf_bm", "oai-did", "oai-sc"}) {
-		t.Fatalf("empty missingCookies = %#v, want all required cookies", missing)
+	if !reflect.DeepEqual(missing, []string{"oai-did", "cf_clearance", "__cf_bm", "oai-sc"}) {
+		t.Fatalf("empty missingCookies = %#v, want all key cookies", missing)
 	}
 }
 
@@ -431,9 +449,13 @@ func TestRefreshAccountsUsesStoredCookiesForQuotaRefresh(t *testing.T) {
 	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
 		return server.Client()
 	}
+	now := time.Now().UTC()
 	accounts.AddAccounts([]string{"token-1"})
 	accounts.UpdateAccount("token-1", map[string]any{
 		"session_cookies": map[string]string{"cf_clearance": "cf-cookie"},
+		"session_cookie_updated_at": map[string]string{
+			"cf_clearance": now.Format(time.RFC3339),
+		},
 	})
 
 	result := accounts.RefreshAccounts(context.Background(), []string{"token-1"})
@@ -443,6 +465,62 @@ func TestRefreshAccountsUsesStoredCookiesForQuotaRefresh(t *testing.T) {
 	cookies := SessionCookieStringMap(accounts.GetAccount("token-1")["session_cookies"])
 	if cookies["cf_clearance"] != "cf-cookie" || cookies["__cflb"] != "route-cookie" || cookies["__cf_bm"] != "fresh-bm" {
 		t.Fatalf("stored session_cookies = %#v", cookies)
+	}
+	updatedAt, ok := accounts.GetAccount("token-1")["session_cookie_updated_at"].(map[string]string)
+	if !ok {
+		t.Fatalf("session_cookie_updated_at type = %T, want map[string]string", accounts.GetAccount("token-1")["session_cookie_updated_at"])
+	}
+	for _, name := range []string{"__cflb", "__cf_bm"} {
+		if _, err := time.Parse(time.RFC3339, updatedAt[name]); err != nil {
+			t.Fatalf("session_cookie_updated_at[%s] = %q, want RFC3339 timestamp", name, updatedAt[name])
+		}
+	}
+}
+
+func TestRefreshAccountsSkipsStaleCloudflareCookies(t *testing.T) {
+	var bootstrapCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			bootstrapCookie = r.Header.Get("Cookie")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			writeJSON(t, w, map[string]any{"default_model_slug": "gpt-5"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{
+		"session_cookies": map[string]string{
+			"cf_clearance": "stale-cf",
+			"oai-did":      "did-cookie",
+		},
+		"session_cookie_updated_at": map[string]string{
+			"cf_clearance": now.Add(-31 * time.Minute).Format(time.RFC3339),
+		},
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"token-1"})
+	if result["refreshed"] != 1 || result["failed"] != 0 {
+		t.Fatalf("refresh result = %#v, want success", result)
+	}
+	if strings.Contains(bootstrapCookie, "cf_clearance=stale-cf") {
+		t.Fatalf("bootstrap Cookie header = %q, should skip stale cf_clearance", bootstrapCookie)
+	}
+	if !strings.Contains(bootstrapCookie, "oai-did=did-cookie") {
+		t.Fatalf("bootstrap Cookie header = %q, missing oai-did", bootstrapCookie)
 	}
 }
 
@@ -703,6 +781,18 @@ func TestAddAccountFromSessionStoresAndUsesBrowserCookies(t *testing.T) {
 	cookies := SessionCookieStringMap(account["session_cookies"])
 	if cookies["cf_clearance"] != "cf-cookie" || cookies["__cf_bm"] != "bm-cookie" || cookies["oai-did"] != "did-cookie" {
 		t.Fatalf("stored session_cookies = %#v", account["session_cookies"])
+	}
+	updatedAt, ok := account["session_cookie_updated_at"].(map[string]string)
+	if !ok {
+		t.Fatalf("session_cookie_updated_at type = %T, want map[string]string", account["session_cookie_updated_at"])
+	}
+	for _, name := range []string{"cf_clearance", "__cf_bm"} {
+		if _, err := time.Parse(time.RFC3339, updatedAt[name]); err != nil {
+			t.Fatalf("session_cookie_updated_at[%s] = %q, want RFC3339 timestamp", name, updatedAt[name])
+		}
+	}
+	if updatedAt["oai-did"] != "" {
+		t.Fatalf("session_cookie_updated_at should not track stable oai-did: %#v", updatedAt)
 	}
 }
 

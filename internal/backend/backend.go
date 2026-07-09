@@ -265,7 +265,7 @@ func (c *Client) initAccountCookies() {
 		return
 	}
 	account := c.lookup.GetAccount(c.AccessToken)
-	for name, value := range service.SessionCookieStringMap(account["session_cookies"]) {
+	for name, value := range service.AccountSessionCookiesForRequest(account, time.Now()) {
 		c.sessionCookies[name] = value
 	}
 }
@@ -309,7 +309,16 @@ func (c *Client) rememberAccountCookies(resp *http.Response) {
 	for name, value := range c.sessionCookies {
 		merged[name] = value
 	}
+	updatedAt := map[string]string{}
+	if c.lookup != nil {
+		account := c.lookup.GetAccount(c.AccessToken)
+		for name, value := range service.SessionCookieStringMap(account["session_cookie_updated_at"]) {
+			updatedAt[name] = value
+		}
+	}
 	changed := false
+	updatedAtChanged := false
+	now := time.Now()
 	for _, cookie := range resp.Cookies() {
 		allowed := service.SessionCookieStringMap(map[string]string{cookie.Name: firstNonEmpty(cookie.Value, "x")})
 		if len(allowed) == 0 {
@@ -320,19 +329,37 @@ func (c *Client) rememberAccountCookies(resp *http.Response) {
 				delete(merged, cookie.Name)
 				changed = true
 			}
+			if _, ok := updatedAt[cookie.Name]; ok {
+				delete(updatedAt, cookie.Name)
+				updatedAtChanged = true
+			}
 			continue
 		}
 		if merged[cookie.Name] != cookie.Value {
 			merged[cookie.Name] = cookie.Value
 			changed = true
 		}
+		if stamped := service.SessionCookieUpdatedAtForCookies(map[string]string{cookie.Name: cookie.Value}, now); len(stamped) > 0 {
+			for name, value := range stamped {
+				if updatedAt[name] != value {
+					updatedAt[name] = value
+					updatedAtChanged = true
+				}
+			}
+		}
 	}
-	if !changed {
+	if !changed && !updatedAtChanged {
 		return
 	}
-	c.sessionCookies = merged
+	if changed {
+		c.sessionCookies = merged
+	}
 	if store, ok := c.lookup.(AccountCookieStore); ok {
-		store.UpdateAccount(c.AccessToken, map[string]any{"session_cookies": merged})
+		updates := map[string]any{"session_cookies": merged}
+		if len(updatedAt) > 0 {
+			updates["session_cookie_updated_at"] = updatedAt
+		}
+		store.UpdateAccount(c.AccessToken, updates)
 	}
 }
 

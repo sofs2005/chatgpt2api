@@ -1410,7 +1410,11 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 		return "检测到封号", true
 	}
 	if IsAccountRateLimitedErrorMessage(message) {
-		s.UpdateAccount(accessToken, map[string]any{"status": "限流", "quota": 0, "image_quota_unknown": false})
+		updates := map[string]any{"status": "限流", "quota": 0, "image_quota_unknown": false}
+		if restoreAt, ok := parseRateLimitRestoreAtFromMessage(message, time.Now()); ok {
+			updates["restore_at"] = restoreAt
+		}
+		s.UpdateAccount(accessToken, updates)
 		return "检测到限流", true
 	}
 	return message, false
@@ -2479,6 +2483,7 @@ func IsAccountRateLimitedErrorMessage(message string) bool {
 	if text == "" || isBootstrapErrorMessage(text) {
 		return false
 	}
+	// 新增：文件上传上限、throttled 等账号级限流
 	if strings.Contains(text, "insufficient_quota") ||
 		strings.Contains(text, "limit reached") ||
 		strings.Contains(text, "usage limit") ||
@@ -2488,7 +2493,11 @@ func IsAccountRateLimitedErrorMessage(message string) bool {
 		strings.Contains(text, "限流") ||
 		strings.Contains(text, "额度已用尽") ||
 		strings.Contains(text, "生成上限") ||
-		strings.Contains(text, "已达上限") {
+		strings.Contains(text, "已达上限") ||
+		strings.Contains(text, "throttled") ||
+		strings.Contains(text, "文件上传上限") ||
+		strings.Contains(text, "已达到文件上传上限") ||
+		strings.Contains(text, "error_code\":\"throttled") {
 		return true
 	}
 	return false
@@ -2820,6 +2829,50 @@ func extractQuotaAndRestoreAt(limits []any) (int, any, bool) {
 		return util.ToInt(item["remaining"], 0), restore, false
 	}
 	return 0, nil, true
+}
+
+func parseRateLimitRestoreAtFromMessage(message string, now time.Time) (string, bool) {
+	text := strings.ToLower(strings.TrimSpace(message))
+	if text == "" {
+		return "", false
+	}
+	// Normalize common Chinese spacing variants, e.g. "请23小时 内重试".
+	text = strings.ReplaceAll(text, " ", "")
+	text = strings.ReplaceAll(text, "　", "")
+	units := []struct {
+		names []string
+		unit  time.Duration
+	}{
+		{[]string{"天", "day", "days"}, 24 * time.Hour},
+		{[]string{"小时", "hour", "hours", "hr", "hrs"}, time.Hour},
+		{[]string{"分钟", "minute", "minutes", "min", "mins"}, time.Minute},
+	}
+	for _, item := range units {
+		for _, name := range item.names {
+			idx := strings.Index(text, name)
+			if idx <= 0 {
+				continue
+			}
+			// Walk left over digits immediately preceding the unit.
+			start := idx - 1
+			for start >= 0 && text[start] >= '0' && text[start] <= '9' {
+				start--
+			}
+			start++
+			if start >= idx {
+				continue
+			}
+			n := 0
+			for _, r := range text[start:idx] {
+				n = n*10 + int(r-'0')
+			}
+			if n <= 0 {
+				continue
+			}
+			return now.Add(time.Duration(n) * item.unit).Format(time.RFC3339), true
+		}
+	}
+	return "", false
 }
 
 func parseAccountRestoreAt(value any) (time.Time, bool) {

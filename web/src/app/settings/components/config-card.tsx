@@ -208,6 +208,7 @@ export function ConfigCard() {
   const setImageSettleSecs = useSettingsStore(
     (state) => state.setImageSettleSecs,
   );
+  const setImageModelSlug = useSettingsStore((state) => state.setImageModelSlug);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
   const setRegistrationEnabled = useSettingsStore(
@@ -279,7 +280,7 @@ export function ConfigCard() {
         <section className={configSectionClassName}>
           <SectionHeading
             title="基础参数"
-            tip="账号刷新间隔单位分钟；图片访问地址是图片结果访问前缀；任务超时时间单位秒；图片自动清理会删除指定天数前的本地图片。"
+            tip="账号刷新间隔单位分钟；图片访问地址是图片结果访问前缀；任务超时时间单位秒；生图上游模型是官方生图链路发给上游的 model slug，留空表示 auto，由服务端自动路由到当前生图模型；图片自动清理会删除指定天数前的本地图片。"
           />
           <div className="grid gap-3 sm:grid-cols-2">
             <Field className={configFieldClassName}>
@@ -345,6 +346,18 @@ export function ConfigCard() {
                 onChange={setImageTaskTimeoutSeconds}
                 placeholder="300"
                 unit="秒"
+              />
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-image-model-slug">
+                生图上游模型
+              </ConfigFieldLabel>
+              <Input
+                id="settings-image-model-slug"
+                value={String(config?.image_model_slug || "")}
+                onChange={(event) => setImageModelSlug(event.target.value)}
+                placeholder="auto"
+                className={settingsInputClassName}
               />
             </Field>
           </div>

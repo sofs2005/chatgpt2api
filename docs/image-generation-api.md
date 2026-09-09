@@ -29,6 +29,8 @@ Authorization: Bearer <session-or-api-token>
 
 `/v1/models` 可能返回更多文本模型，但图片生成/图片编辑接口只应使用上述图片任务模型。
 
+`auto` 和 `gpt-image-2` 走官方 `f/conversation` 链路时，发给上游的 `model` 默认为 `auto`，由服务端自动路由到当前生图模型。需要固定上游模型时，可在设置页配置「生图上游模型」或设置环境变量 `CHATGPT2API_IMAGE_MODEL_SLUG`；留空即沿用 `auto`。
+
 ## 通用参数
 
 | 字段 | 类型 | 默认值 | 适用接口 | 说明 |

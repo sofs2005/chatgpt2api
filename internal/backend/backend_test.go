@@ -335,18 +335,42 @@ func TestBuildOfficialImagePromptOnlyAddsSizeHint(t *testing.T) {
 
 func TestOfficialImageModelSlug(t *testing.T) {
 	for _, tt := range []struct {
-		model string
-		want  string
+		slug string
+		want map[string]string
 	}{
-		{model: "", want: "auto"},
-		{model: "auto", want: "auto"},
-		{model: "gpt-image-2", want: "gpt-5-5"},
-		{model: "codex-gpt-image-2", want: "codex-gpt-image-2"},
-		{model: "gpt-5.5", want: "auto"},
+		{slug: "", want: map[string]string{
+			"":                  "auto",
+			"auto":              "auto",
+			"gpt-image-2":       "auto",
+			"codex-gpt-image-2": "codex-gpt-image-2",
+			"gpt-5-5":           "auto",
+		}},
+		{slug: "gpt-5-6", want: map[string]string{
+			"":                  "auto",
+			"auto":              "auto",
+			"gpt-image-2":       "gpt-5-6",
+			"codex-gpt-image-2": "codex-gpt-image-2",
+			"gpt-5-5":           "auto",
+		}},
 	} {
-		if got := officialImageModelSlug(tt.model); got != tt.want {
-			t.Fatalf("officialImageModelSlug(%q) = %q, want %q", tt.model, got, tt.want)
+		for model, want := range tt.want {
+			client := &Client{imageModelSlug: tt.slug}
+			if got := client.officialImageModelSlug(model); got != want {
+				t.Fatalf("officialImageModelSlug(%q) with slug %q = %q, want %q", model, tt.slug, got, want)
+			}
 		}
+	}
+}
+
+func TestSetImageModelSlugTrimsAndExposes(t *testing.T) {
+	client := &Client{}
+	client.SetImageModelSlug("  gpt-5-6  ")
+	if got := client.ImageModelSlug(); got != "gpt-5-6" {
+		t.Fatalf("ImageModelSlug() = %q, want %q", got, "gpt-5-6")
+	}
+	client.SetImageModelSlug("   ")
+	if got := client.ImageModelSlug(); got != "" {
+		t.Fatalf("ImageModelSlug() = %q, want empty after blank input", got)
 	}
 }
 
@@ -452,11 +476,11 @@ func TestStreamResponsesImageUsesOfficialPrepareAndConversationRoutes(t *testing
 	if results[0].Result != png1x1 {
 		t.Fatalf("result = %q, want %q", results[0].Result, png1x1)
 	}
-	if prepareBody["model"] != "gpt-5-5" {
-		t.Fatalf("prepare model = %#v, want gpt-5-5", prepareBody["model"])
+	if prepareBody["model"] != "auto" {
+		t.Fatalf("prepare model = %#v, want auto", prepareBody["model"])
 	}
-	if streamBody["model"] != "gpt-5-5" {
-		t.Fatalf("stream model = %#v, want gpt-5-5", streamBody["model"])
+	if streamBody["model"] != "auto" {
+		t.Fatalf("stream model = %#v, want auto", streamBody["model"])
 	}
 	messages := streamBody["messages"].([]any)
 	message := messages[0].(map[string]any)
@@ -1803,10 +1827,10 @@ func TestConversationPayloadKeepsSystemHintsEmpty(t *testing.T) {
 	client := &Client{}
 	payload := client.conversationPayload([]map[string]any{
 		{"role": "user", "content": "draw\n\n输出为 16:9 横屏构图"},
-	}, "gpt-5.5", "Asia/Shanghai")
+	}, "gpt-5-5", "Asia/Shanghai")
 
-	if payload["model"] != "gpt-5.5" {
-		t.Fatalf("model = %q, want gpt-5.5", payload["model"])
+	if payload["model"] != "gpt-5-5" {
+		t.Fatalf("model = %q, want gpt-5-5", payload["model"])
 	}
 	hints, ok := payload["system_hints"].([]any)
 	if !ok {

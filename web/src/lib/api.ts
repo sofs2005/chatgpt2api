@@ -4,17 +4,16 @@ import type { LoginPageImageMode } from "@/lib/login-page-image-layout";
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用" | "刷新中" | "过期待刷新";
 export const IMAGE_MODEL_OPTIONS = [
-  { value: "auto", label: "Auto" },
   { value: "gpt-image-2", label: "gpt-image-2" },
   { value: "codex-gpt-image-2", label: "codex-gpt-image-2" },
-  { value: "gpt-5-mini", label: "gpt-5-mini" },
-  { value: "gpt-5-3-mini", label: "gpt-5-3-mini" },
+  { value: "auto", label: "auto" },
   { value: "gpt-5", label: "gpt-5" },
-  { value: "gpt-5-1", label: "gpt-5-1" },
-  { value: "gpt-5-2", label: "gpt-5-2" },
-  { value: "gpt-5-3", label: "gpt-5-3" },
-  { value: "gpt-5.4", label: "gpt-5.4" },
-  { value: "gpt-5.5", label: "gpt-5.5" },
+  { value: "gpt-5-3-mini", label: "gpt-5-3-mini" },
+  { value: "gpt-5-4", label: "gpt-5-4" },
+  { value: "gpt-5-5", label: "gpt-5-5" },
+  { value: "gpt-5-5-mini", label: "gpt-5-5-mini" },
+  { value: "gpt-5-6", label: "gpt-5-6" },
+  { value: "gpt-5-6-mini", label: "gpt-5-6-mini" },
 ] as const;
 export type ImageModel = (typeof IMAGE_MODEL_OPTIONS)[number]["value"];
 export const DEFAULT_IMAGE_MODEL: ImageModel = "auto";
@@ -24,14 +23,13 @@ const IMAGE_MODEL_VALUES = new Set<string>(IMAGE_MODEL_OPTIONS.map((option) => o
 const IMAGE_TASK_MODEL_VALUES = new Set<ImageModel>(["auto", "gpt-image-2", "codex-gpt-image-2"]);
 const CHAT_MODEL_VALUES = new Set<ImageModel>([
   "auto",
-  "gpt-5-mini",
-  "gpt-5-3-mini",
   "gpt-5",
-  "gpt-5-1",
-  "gpt-5-2",
-  "gpt-5-3",
-  "gpt-5.4",
-  "gpt-5.5",
+  "gpt-5-3-mini",
+  "gpt-5-4",
+  "gpt-5-5",
+  "gpt-5-5-mini",
+  "gpt-5-6",
+  "gpt-5-6-mini",
 ]);
 export const IMAGE_TASK_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => IMAGE_TASK_MODEL_VALUES.has(option.value));
 export const IMAGE_CREATION_MODEL_OPTIONS = IMAGE_TASK_MODEL_OPTIONS;
@@ -275,6 +273,7 @@ export type SettingsConfig = {
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
   image_settle_secs?: number | string;
+  image_model_slug?: string;
   log_levels?: string[];
   linuxdo_enabled?: boolean;
   linuxdo_client_id?: string;

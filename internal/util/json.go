@@ -21,13 +21,12 @@ const (
 	ImageModelGPT       = "gpt-image-2"
 	ImageModelCodex     = "codex-gpt-image-2"
 	ImageModelGPT5      = "gpt-5"
-	ImageModelGPT51     = "gpt-5-1"
-	ImageModelGPT52     = "gpt-5-2"
-	ImageModelGPT53     = "gpt-5-3"
 	ImageModelGPT53Mini = "gpt-5-3-mini"
-	ImageModelGPT54     = "gpt-5.4"
-	ImageModelGPT55     = "gpt-5.5"
-	ImageModelGPTMini   = "gpt-5-mini"
+	ImageModelGPT54     = "gpt-5-4"
+	ImageModelGPT55     = "gpt-5-5"
+	ImageModelGPT55Mini = "gpt-5-5-mini"
+	ImageModelGPT56     = "gpt-5-6"
+	ImageModelGPT56Mini = "gpt-5-6-mini"
 )
 
 var ImageModels = map[string]struct{}{
@@ -39,14 +38,13 @@ var ModelIDs = []string{
 	ImageModelGPT,
 	ImageModelCodex,
 	ImageModelAuto,
-	ImageModelGPTMini,
-	ImageModelGPT53Mini,
 	ImageModelGPT5,
-	ImageModelGPT51,
-	ImageModelGPT52,
-	ImageModelGPT53,
+	ImageModelGPT53Mini,
 	ImageModelGPT54,
 	ImageModelGPT55,
+	ImageModelGPT55Mini,
+	ImageModelGPT56,
+	ImageModelGPT56Mini,
 }
 
 var ImageGenerationModelIDs = []string{
@@ -67,14 +65,13 @@ var ResponsesImageToolModels = map[string]struct{}{
 	ImageModelAuto:      {},
 	ImageModelGPT:       {},
 	ImageModelCodex:     {},
-	ImageModelGPTMini:   {},
-	ImageModelGPT53Mini: {},
 	ImageModelGPT5:      {},
-	ImageModelGPT51:     {},
-	ImageModelGPT52:     {},
-	ImageModelGPT53:     {},
+	ImageModelGPT53Mini: {},
 	ImageModelGPT54:     {},
 	ImageModelGPT55:     {},
+	ImageModelGPT55Mini: {},
+	ImageModelGPT56:     {},
+	ImageModelGPT56Mini: {},
 }
 
 func Clean(v any) string {

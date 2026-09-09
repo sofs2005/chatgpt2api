@@ -71,7 +71,7 @@
 - 面向图片工具调用场景的 Responses：`POST /v1/responses`。
 - Anthropic Messages 风格入口：`POST /v1/messages`。
 - 异步创作任务资源：`/api/creation-tasks`。
-- 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto` 和多个 `gpt-5*` 文本/图片场景模型选项。
+- 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto` 和多个 `gpt-5*` 文本/图片场景模型选项（`gpt-5-5`、`gpt-5-5-mini`、`gpt-5-6`、`gpt-5-6-mini` 等）。
 
 ### 账号池与导入
 
@@ -303,6 +303,7 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 | `CHATGPT2API_UPDATE_PROXY_URL` | 空 | 检查更新访问 DockerHub / Release API 的代理；为空时复用全局代理 |
 | `CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE` | `5` | 限流账号检查间隔，单位分钟 |
 | `CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS` | `300` | 图片任务超时时间，单位秒 |
+| `CHATGPT2API_IMAGE_MODEL_SLUG` | 空 | 官方生图链路发给上游的 model slug；留空表示 `auto`，由服务端自动路由到当前生图模型 |
 | `CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT` | `0` | 普通用户默认创作并发额度；图片生成/编辑按请求张数计入，聊天任务按 1 个计入；`0` 表示不限制 |
 | `CHATGPT2API_USER_DEFAULT_RPM_LIMIT` | `0` | 普通用户默认创作任务 RPM 限制，`0` 表示不限制 |
 | `CHATGPT2API_IMAGE_RETENTION_DAYS` | `30` | 服务端缓存图片保留天数 |
@@ -525,7 +526,7 @@ curl http://localhost:3000/v1/images/generations \
 | `n` | 生成数量，当前限制为 `1-4` |
 | `response_format` | 默认 `b64_json` |
 
-`gpt-image-2` 和 `auto` 走 ChatGPT 官网图片工作台的纯协议链路：当前按官网 HAR 实抓对齐到底层 `gpt-5-5` 模型，请求 `/backend-api/f/conversation` 建立 SSE，并从 `role=tool` 且 `async_task_type=image_gen` 的上游消息里提取图片结果。部分会话/续图场景里官网还会补发 `/backend-api/f/conversation/prepare` 获取 `conduit_token`，但不是每次首发生成前都显式出现。`codex-gpt-image-2` 仍保留为独立的 Codex 图片协议模型，继续走 `/backend-api/codex/responses` 路线，用于和官网图片额度区分。Free 账号不会被本地预先拦截；如果账号没有对应图片工具权限，上游可能直接返回失败。
+`gpt-image-2` 和 `auto` 走 ChatGPT 官网图片工作台的纯协议链路：请求 `/backend-api/f/conversation` 建立 SSE，并从 `role=tool` 且 `async_task_type=image_gen` 的上游消息里提取图片结果。发给上游的 `model` 默认与官网一致为 `auto`，由服务端自动路由到当前生图模型（官网升级生图模型时无需改代码）；需要固定模型时可在设置页配置「生图上游模型」或设置环境变量 `CHATGPT2API_IMAGE_MODEL_SLUG`。部分会话/续图场景里官网还会补发 `/backend-api/f/conversation/prepare` 获取 `conduit_token`，但不是每次首发生成前都显式出现。`codex-gpt-image-2` 仍保留为独立的 Codex 图片协议模型，继续走 `/backend-api/codex/responses` 路线，用于和官网图片额度区分。Free 账号不会被本地预先拦截；如果账号没有对应图片工具权限，上游可能直接返回失败。
 
 `size` 可以传 `auto`、比例值（如 `1:1`、`16:9`、`9:16`）、分辨率档位（`1080p`、`2k`、`4k`）或显式 `WIDTHxHEIGHT`。在纯协议工作台链路下，这些信息会作为上游提示词约束参与构图，不再转换为 Codex Responses 专用的工具尺寸字段。
 
@@ -581,7 +582,7 @@ curl http://localhost:3000/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <session-or-api-token>" \
   -d '{
-    "model": "gpt-5.5",
+    "model": "gpt-5-6",
     "input": "生成一张未来感城市天际线图片",
     "tools": [
       {

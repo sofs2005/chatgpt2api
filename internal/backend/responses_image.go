@@ -357,6 +357,12 @@ func normalizeResponsesImageToolModel(model string) string {
 		return util.ImageModelGPT54
 	case util.ImageModelGPT55:
 		return util.ImageModelGPT55
+	case util.ImageModelGPT55Mini:
+		return util.ImageModelGPT55Mini
+	case util.ImageModelGPT56:
+		return util.ImageModelGPT56
+	case util.ImageModelGPT56Mini:
+		return util.ImageModelGPT56Mini
 	case "gpt-5-5-thinking":
 		return "gpt-5-5-thinking"
 	default:
@@ -754,7 +760,7 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 		"action":                "next",
 		"fork_from_shared_post": false,
 		"parent_message_id":     parentMessageID,
-		"model":                 officialImageModelSlug(request.Model),
+		"model":                 c.officialImageModelSlug(request.Model),
 		"client_prepare_state":  "success",
 		"timezone_offset_min":   -480,
 		"timezone":              "Asia/Shanghai",
@@ -789,16 +795,23 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 	return util.Clean(data["conduit_token"]), nil
 }
 
-func officialImageModelSlug(model string) string {
+// DefaultImageModelSlug 是官方生图链路的默认上游 model slug。
+// 官网 /images 页面实际发送的就是 auto，由服务端路由到当前生图模型，
+// 因此跟随官方默认行为，升级上游模型时无需改动代码。
+const DefaultImageModelSlug = util.ImageModelAuto
+
+// officialImageModelSlug 返回官方生图链路发给上游的 model slug。
+// 显式选择 gpt-image-2 时使用可配置的目标 slug（默认 auto），
+// 其余情况一律回落到 auto，交服务端自动路由。
+func (c *Client) officialImageModelSlug(model string) string {
+	configured := firstNonEmpty(c.imageModelSlug, DefaultImageModelSlug)
 	switch strings.TrimSpace(model) {
 	case util.ImageModelGPT:
-		return "gpt-5-5"
+		return configured
 	case util.ImageModelCodex:
 		return util.ImageModelCodex
-	case "", util.ImageModelAuto:
-		return "auto"
 	default:
-		return "auto"
+		return util.ImageModelAuto
 	}
 }
 
@@ -989,7 +1002,7 @@ func (c *Client) startOfficialImageConversation(ctx context.Context, prompt stri
 			},
 		},
 		"parent_message_id":                    parentMessageID,
-		"model":                                officialImageModelSlug(request.Model),
+		"model":                                c.officialImageModelSlug(request.Model),
 		"client_prepare_state":                 "sent",
 		"timezone_offset_min":                  -480,
 		"timezone":                             "Asia/Shanghai",

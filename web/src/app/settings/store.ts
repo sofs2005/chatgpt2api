@@ -98,6 +98,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_settle_enabled: config.image_settle_enabled !== false,
     image_check_before_hit_enabled: config.image_check_before_hit_enabled !== false,
     image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2),
+    image_model_slug: typeof config.image_model_slug === "string" ? config.image_model_slug : "",
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
@@ -199,6 +200,7 @@ type SettingsStore = {
   setImageSettleEnabled: (value: boolean) => void;
   setImageCheckBeforeHitEnabled: (value: boolean) => void;
   setImageSettleSecs: (value: string) => void;
+  setImageModelSlug: (value: string) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
@@ -349,6 +351,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_settle_enabled: config.image_settle_enabled !== false,
         image_check_before_hit_enabled: config.image_check_before_hit_enabled !== false,
         image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2),
+        image_model_slug: String(config.image_model_slug ?? "").trim(),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
         registration_enabled: Boolean(config.registration_enabled),
@@ -469,6 +472,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageSettleSecs: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_settle_secs: value } } : {});
+  },
+
+  setImageModelSlug: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_model_slug: value } } : {});
   },
 
   setLogLevel: (level, enabled) => {

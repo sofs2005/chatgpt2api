@@ -62,6 +62,7 @@ type Client struct {
 	imageSettleEnabled         bool
 	imageCheckBeforeHitEnabled bool
 	imageSettleSecs            time.Duration
+	imageModelSlug             string
 	searchTimeout              time.Duration
 	searchPollInterval         time.Duration
 }
@@ -125,6 +126,17 @@ func (c *Client) ImagePollOptions() ImagePollOptions {
 		CheckBeforeHit: c.imageCheckBeforeHitEnabled,
 		SettleSecs:     c.imageSettleSecs,
 	}
+}
+
+// SetImageModelSlug 覆盖官方生图链路发给上游的 model slug。
+// 空字符串表示使用默认值 auto，即由服务端自动路由到当前生图模型。
+func (c *Client) SetImageModelSlug(slug string) {
+	c.imageModelSlug = strings.TrimSpace(slug)
+}
+
+// ImageModelSlug 返回当前生效的官方生图 model slug。
+func (c *Client) ImageModelSlug() string {
+	return c.imageModelSlug
 }
 
 func (c *Client) ListModels(ctx context.Context) (map[string]any, error) {

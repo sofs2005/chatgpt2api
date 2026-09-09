@@ -229,6 +229,29 @@ func TestStoreImagePollSettleDefaults(t *testing.T) {
 	}
 }
 
+func TestStoreNormalizesImageModelSlug(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetLinuxDoEnv(t)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	if got := store.ImageModelSlug(); got != "" {
+		t.Fatalf("default ImageModelSlug() = %q, want empty (falls back to auto)", got)
+	}
+
+	got, err := store.Update(map[string]any{"image_model_slug": "  gpt-5-6  "})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertConfigValue(t, got, "image_model_slug", "gpt-5-6")
+	if store.ImageModelSlug() != "gpt-5-6" {
+		t.Fatalf("ImageModelSlug() = %q, want %q", store.ImageModelSlug(), "gpt-5-6")
+	}
+}
+
 func TestStoreNormalizesImagePollSettleSettings(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)

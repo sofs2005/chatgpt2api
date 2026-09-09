@@ -51,6 +51,7 @@ var settingEnvKeys = map[string]string{
 	"login_page_image_position_y":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y",
 	"text_account_schedule_mode":        "CHATGPT2API_TEXT_ACCOUNT_SCHEDULE_MODE",
 	"image_account_schedule_mode":       "CHATGPT2API_IMAGE_ACCOUNT_SCHEDULE_MODE",
+	"image_model_slug":                  "CHATGPT2API_IMAGE_MODEL_SLUG",
 	"global_concurrent_limit":           "CHATGPT2API_GLOBAL_CONCURRENT_LIMIT",
 }
 
@@ -249,6 +250,12 @@ func (s *Store) ImageCheckBeforeHitEnabled() bool {
 
 func (s *Store) ImageSettleSecs() float64 {
 	return normalizeImageSettleSecs(s.settingValue("image_settle_secs", defaultImageSettleSecs))
+}
+
+// ImageModelSlug 返回官方生图链路的上游 model slug。
+// 空值表示沿用默认值 auto，由服务端自动路由到当前生图模型。
+func (s *Store) ImageModelSlug() string {
+	return strings.TrimSpace(util.Clean(s.settingValue("image_model_slug", "")))
 }
 
 func (s *Store) UserDefaultConcurrentLimit() int {
@@ -468,6 +475,7 @@ func (s *Store) Get() map[string]any {
 	data["image_settle_enabled"] = s.ImageSettleEnabled()
 	data["image_check_before_hit_enabled"] = s.ImageCheckBeforeHitEnabled()
 	data["image_settle_secs"] = s.ImageSettleSecs()
+	data["image_model_slug"] = s.ImageModelSlug()
 	data["user_default_concurrent_limit"] = s.UserDefaultConcurrentLimit()
 	data["user_default_rpm_limit"] = s.UserDefaultRPMLimit()
 	data["default_billing_type"] = s.DefaultBillingType()
@@ -535,6 +543,9 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 	}
 	if value, ok := next["image_settle_secs"]; ok {
 		next["image_settle_secs"] = normalizeImageSettleSecs(value)
+	}
+	if value, ok := next["image_model_slug"]; ok {
+		next["image_model_slug"] = strings.TrimSpace(util.Clean(value))
 	}
 	if value, ok := next["image_storage_limit_mb"]; ok {
 		next["image_storage_limit_mb"] = normalizeNonNegativeInt(value)

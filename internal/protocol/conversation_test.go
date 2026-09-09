@@ -31,6 +31,7 @@ type testProtocolImageConfig struct {
 	settleEnabled  bool
 	checkBeforeHit bool
 	settleSecs     float64
+	modelSlug      string
 }
 
 func (c testProtocolImageConfig) ImageSettleEnabled() bool {
@@ -43,6 +44,10 @@ func (c testProtocolImageConfig) ImageCheckBeforeHitEnabled() bool {
 
 func (c testProtocolImageConfig) ImageSettleSecs() float64 {
 	return c.settleSecs
+}
+
+func (c testProtocolImageConfig) ImageModelSlug() string {
+	return c.modelSlug
 }
 
 type testProtocolProxyConfig struct{}

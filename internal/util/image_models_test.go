@@ -10,14 +10,13 @@ func TestImageGenerationModelSetExcludesTextModels(t *testing.T) {
 	}
 
 	for _, model := range []string{
-		ImageModelGPTMini,
-		ImageModelGPT53Mini,
 		ImageModelGPT5,
-		ImageModelGPT51,
-		ImageModelGPT52,
-		ImageModelGPT53,
+		ImageModelGPT53Mini,
 		ImageModelGPT54,
 		ImageModelGPT55,
+		ImageModelGPT55Mini,
+		ImageModelGPT56,
+		ImageModelGPT56Mini,
 	} {
 		if IsImageGenerationModel(model) {
 			t.Fatalf("IsImageGenerationModel(%q) = true, want false", model)
@@ -26,13 +25,27 @@ func TestImageGenerationModelSetExcludesTextModels(t *testing.T) {
 }
 
 func TestResponsesImageToolModelsIncludeTextModels(t *testing.T) {
-	for _, model := range []string{ImageModelAuto, ImageModelGPT, ImageModelCodex, ImageModelGPT5, ImageModelGPT54, ImageModelGPT55} {
+	for _, model := range []string{
+		ImageModelAuto,
+		ImageModelGPT,
+		ImageModelCodex,
+		ImageModelGPT5,
+		ImageModelGPT53Mini,
+		ImageModelGPT54,
+		ImageModelGPT55,
+		ImageModelGPT55Mini,
+		ImageModelGPT56,
+		ImageModelGPT56Mini,
+	} {
 		if !IsResponsesImageToolModel(model) {
 			t.Fatalf("IsResponsesImageToolModel(%q) = false, want true", model)
 		}
 	}
 	if IsImageGenerationModel(ImageModelGPT55) {
 		t.Fatalf("IsImageGenerationModel(%q) = true, want false for /v1/images routes", ImageModelGPT55)
+	}
+	if IsImageGenerationModel(ImageModelGPT56) {
+		t.Fatalf("IsImageGenerationModel(%q) = true, want false for /v1/images routes", ImageModelGPT56)
 	}
 }
 
@@ -41,14 +54,13 @@ func TestModelListIncludesTextAndImageModels(t *testing.T) {
 		ImageModelGPT,
 		ImageModelCodex,
 		ImageModelAuto,
-		ImageModelGPTMini,
-		ImageModelGPT53Mini,
 		ImageModelGPT5,
-		ImageModelGPT51,
-		ImageModelGPT52,
-		ImageModelGPT53,
+		ImageModelGPT53Mini,
 		ImageModelGPT54,
 		ImageModelGPT55,
+		ImageModelGPT55Mini,
+		ImageModelGPT56,
+		ImageModelGPT56Mini,
 	}
 	gotOrder := ModelList()
 	if len(gotOrder) != len(wantOrder) {
@@ -69,12 +81,13 @@ func TestModelListIncludesTextAndImageModels(t *testing.T) {
 		ImageModelAuto,
 		ImageModelGPT,
 		ImageModelCodex,
-		ImageModelGPTMini,
-		ImageModelGPT53Mini,
 		ImageModelGPT5,
-		ImageModelGPT53,
+		ImageModelGPT53Mini,
 		ImageModelGPT54,
 		ImageModelGPT55,
+		ImageModelGPT55Mini,
+		ImageModelGPT56,
+		ImageModelGPT56Mini,
 	} {
 		if _, ok := got[model]; !ok {
 			t.Fatalf("ModelList() missing %q", model)

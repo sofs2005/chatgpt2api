@@ -36,6 +36,8 @@ type ImageConfig interface {
 	ImageSettleEnabled() bool
 	ImageCheckBeforeHitEnabled() bool
 	ImageSettleSecs() float64
+	// ImageModelSlug 返回官方生图链路的上游 model slug；空值表示沿用默认 auto。
+	ImageModelSlug() string
 }
 
 type Engine struct {
@@ -997,6 +999,7 @@ func (e *Engine) newImageClient(token string) *backend.Client {
 			e.Config.ImageCheckBeforeHitEnabled(),
 			time.Duration(e.Config.ImageSettleSecs()*float64(time.Second)),
 		)
+		client.SetImageModelSlug(e.Config.ImageModelSlug())
 	}
 	return client
 }

@@ -1410,7 +1410,7 @@ func TestNormalizeImageGenerationSizeTiers(t *testing.T) {
 
 func TestConversationRequestNormalizesResolutionTierSize(t *testing.T) {
 	request := ConversationRequest{
-		Model: "gpt-5.5",
+		Model: "gpt-5-5",
 		Size:  "2k",
 	}.Normalized()
 	if request.Size != "2048x2048" {
@@ -1454,7 +1454,7 @@ func TestResponsesInputKeepsAssistantAndGeneratedImageContext(t *testing.T) {
 
 func TestResponseImageGenerationRequestMapsTextModelToOfficialImageFlow(t *testing.T) {
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": "生成封面",
 		"tools": []any{
 			map[string]any{"type": "image_generation", "size": "16:9", "quality": "high", "output_format": "webp", "output_compression": 37},
@@ -1489,7 +1489,7 @@ func TestResponseImageGenerationRequestMapsTextModelToOfficialImageFlow(t *testi
 
 func TestResponseImageGenerationRouteStillWinsWhenOtherToolsPresent(t *testing.T) {
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": []any{map[string]any{"role": "user", "content": []any{
 			map[string]any{"type": "input_text", "text": "生成一张横版产品图"},
 		}}},
@@ -1522,7 +1522,7 @@ func TestResponseImageGenerationRouteStillWinsWhenOtherToolsPresent(t *testing.T
 
 func TestResponseImageGenerationRequestKeepsJPEGOutputCompression(t *testing.T) {
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": "生成封面",
 		"tools": []any{
 			map[string]any{"type": "image_generation", "output_format": "jpeg", "output_compression": 37},
@@ -1542,7 +1542,7 @@ func TestResponseImageGenerationRequestKeepsJPEGOutputCompression(t *testing.T) 
 
 func TestResponseImageGenerationRequestPreservesOfficialToolOptions(t *testing.T) {
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": []any{
 			map[string]any{"role": "user", "content": []any{
 				map[string]any{"type": "input_text", "text": "生成封面"},
@@ -1586,7 +1586,7 @@ func TestResponseImageGenerationRequestPreservesOfficialToolOptions(t *testing.T
 
 func TestResponseImageGenerationRequestPreservesRemoteImageURLs(t *testing.T) {
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": []any{map[string]any{"role": "user", "content": []any{
 			map[string]any{"type": "input_text", "text": "生成封面"},
 			map[string]any{"type": "input_image", "image_url": map[string]any{"url": "https://example.test/input.png", "detail": "high"}},
@@ -1615,7 +1615,7 @@ func TestResponseImageGenerationRequestPreservesRemoteImageURLs(t *testing.T) {
 func TestResponseImageGenerationRequestKeepsRawBase64AsData(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString([]byte("raw image"))
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": []any{map[string]any{"role": "user", "content": []any{
 			map[string]any{"type": "input_text", "text": "生成封面"},
 			map[string]any{"type": "input_image", "image_url": map[string]any{"url": encoded, "detail": "low"}},
@@ -1647,7 +1647,7 @@ func TestResponseImageGenerationRequestKeepsPreviousContextOutOfOfficialPrompt(t
 		},
 	}
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": "把它改成蓝色",
 		"tools": []any{
 			map[string]any{"type": "image_generation", "model": "gpt-image-2", "size": "16:9", "quality": "high"},
@@ -1678,7 +1678,7 @@ func TestResponseImageGenerationRequestKeepsPreviousContextOutOfOfficialPrompt(t
 func TestResponseImageGenerationRequestPreservesAllPreviousImages(t *testing.T) {
 	previous := ResponseContext{Images: []string{"img1", "img2", "img3", "img4", "img5"}}
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": "把它改成蓝色",
 		"tools": []any{map[string]any{"type": "image_generation", "model": "gpt-image-2"}},
 	}
@@ -1713,7 +1713,7 @@ func TestBuildResponsesImagePromptLeavesCodexPromptUntouched(t *testing.T) {
 
 func TestResponseImageGenerationRequestAcceptsCodexImageToolAlias(t *testing.T) {
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": "生成封面",
 		"tools": []any{
 			map[string]any{"type": "image_generation", "model": "codex-gpt-image-2"},
@@ -1733,7 +1733,7 @@ func TestResponseImageGenerationRequestAcceptsCodexImageToolAlias(t *testing.T) 
 
 func TestResponseImageGenerationRequestUsesToolImageModel(t *testing.T) {
 	body := map[string]any{
-		"model": "gpt-5.5",
+		"model": "gpt-5-5",
 		"input": "生成封面",
 		"tools": []any{
 			map[string]any{"type": "image_generation", "model": "gpt-image-2", "size": "2048x2048"},

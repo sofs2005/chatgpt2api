@@ -358,6 +358,8 @@ export type SystemLogFilters = {
   ip_address?: string;
   operation_type?: string;
   log_level?: string;
+  stage?: string;
+  event_kind?: string;
   view?: LogView | string;
   start_date?: string;
   end_date?: string;

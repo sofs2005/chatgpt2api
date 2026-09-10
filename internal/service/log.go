@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,8 @@ type LogQuery struct {
 	IPAddress     string
 	OperationType string
 	LogLevel      string
+	Stage         string
+	EventKind     string
 	StartDate     string
 	EndDate       string
 	StartTime     string
@@ -239,6 +242,99 @@ func normalizedLogLimit(limit int) int {
 	return limit
 }
 
+// EventKind values classify why a log record exists, so the admin UI can
+// surface failures and business events instead of routine traffic.
+const (
+	EventKindBusiness = "business"
+	EventKindAudit    = "audit"
+	EventKindUpstream = "upstream"
+	EventKindSystem   = "system"
+)
+
+// DiagnosticFields is the normalized, already-sanitized shape every diagnostic
+// log record carries. Empty fields are omitted by NormalizeDiagnosticDetail so
+// the persisted detail stays small.
+type DiagnosticFields struct {
+	EventKind     string
+	Stage         string
+	Severity      string
+	Outcome       string
+	RequestID     string
+	UpstreamHost  string
+	UpstreamPath  string
+	ErrorCause    string
+	UpstreamStage string
+}
+
+// NormalizeDiagnosticDetail merges diagnostic fields into an existing detail
+// map and sanitizes the result. All keys are fixed and lowercase so the UI can
+// label them without guessing.
+func NormalizeDiagnosticDetail(detail map[string]any, fields DiagnosticFields) map[string]any {
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	put := func(key, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		detail[key] = value
+	}
+	put("event_kind", fields.EventKind)
+	put("stage", fields.Stage)
+	put("severity", fields.Severity)
+	put("outcome", fields.Outcome)
+	put("request_id", fields.RequestID)
+	put("upstream_host", fields.UpstreamHost)
+	put("upstream_path", fields.UpstreamPath)
+	put("error_cause", fields.ErrorCause)
+	put("upstream_stage", fields.UpstreamStage)
+	if fields.Severity != "" {
+		detail["log_level"] = logLevelForSeverity(fields.Severity)
+	}
+	sanitized, ok := SanitizeLogValue(detail).(map[string]any)
+	if !ok {
+		return detail
+	}
+	return sanitized
+}
+
+func logLevelForSeverity(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "error":
+		return "error"
+	case "warning", "warn":
+		return "warning"
+	case "debug":
+		return "debug"
+	default:
+		return "info"
+	}
+}
+
+// UpstreamCauseText renders the wrapped cause of an upstream failure without
+// leaking credentials: it unwraps to the innermost error text and truncates.
+func UpstreamCauseText(err error) string {
+	if err == nil {
+		return ""
+	}
+	cause := errors.Unwrap(err)
+	for errors.Unwrap(cause) != nil {
+		cause = errors.Unwrap(cause)
+	}
+	if cause == nil {
+		return ""
+	}
+	text := util.Clean(cause.Error())
+	if text == err.Error() {
+		return ""
+	}
+	if len(text) > 512 {
+		text = text[:512] + "…"
+	}
+	return text
+}
+
 func logQueryDateBounds(query LogQuery) (string, string) {
 	startDate := strings.TrimSpace(query.StartDate)
 	endDate := strings.TrimSpace(query.EndDate)
@@ -286,6 +382,12 @@ func matchLogQuery(item map[string]any, query LogQuery) bool {
 	if level := strings.TrimSpace(query.LogLevel); level != "" && logLevel(item) != strings.ToLower(level) {
 		return false
 	}
+	if stage := strings.TrimSpace(query.Stage); stage != "" && !strings.EqualFold(strings.TrimSpace(logDetailString(item, "stage")), stage) {
+		return false
+	}
+	if kind := strings.TrimSpace(query.EventKind); kind != "" && !strings.EqualFold(strings.TrimSpace(logDetailString(item, "event_kind")), kind) {
+		return false
+	}
 	return matchLogView(item, query.View)
 }
 
@@ -312,14 +414,34 @@ func NormalizeLogView(value, fallback string) string {
 }
 
 func isMeaningfulLogItem(item map[string]any) bool {
-	if !isAuditLogItem(item) {
+	// 成功的只读审计是最大的噪声来源；其余记录（业务事件、失败、写操作）全部保留。
+	if isReadOnlyAuditLogItem(item) {
+		return logOutcome(item) == "failed"
+	}
+	return true
+}
+
+func isReadOnlyAuditMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
+	default:
+		return false
+	}
+}
+
+// isReadOnlyAuditLogItem reports a persisted record that only reflects a
+// successful read. Records written before event_kind existed fall back to the
+// method+summary heuristic.
+func isReadOnlyAuditLogItem(item map[string]any) bool {
+	if !isAuditLogItem(item) {
+		return false
+	}
+	if kind := strings.ToLower(strings.TrimSpace(logDetailString(item, "event_kind"))); kind != "" {
+		return kind == EventKindAudit && isReadOnlyAuditMethod(logDetailString(item, "method"))
 	}
 	method := strings.ToUpper(logDetailString(item, "method"))
-	if method != http.MethodGet && method != http.MethodHead {
-		return true
-	}
-	return logOutcome(item) == "failed"
+	return method == http.MethodGet || method == http.MethodHead
 }
 
 func isAuditLogItem(item map[string]any) bool {
@@ -822,7 +944,41 @@ func sanitizeLogField(key string, value any) any {
 	if s, ok := value.(string); ok && base64LogKey(key) {
 		return maskBase64(s)
 	}
+	if s, ok := value.(string); ok && urlLogKey(key) {
+		return maskURL(s)
+	}
 	return SanitizeLogValue(value)
+}
+
+// urlLogKey reports whether a field holds a URL that may carry a signed query.
+// Signed upload/download URLs double as credentials, so a URL with a query
+// string must never be persisted verbatim. Arrays are handled by
+// SanitizeLogValue and are intentionally left alone: the `urls` field stores
+// the generated-image links the admin UI renders.
+func urlLogKey(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	switch lower {
+	case "url", "download_url", "upload_url", "image_url", "signed_url", "asset_url":
+		return true
+	}
+	return false
+}
+
+// maskURL keeps scheme, host and path but drops the query and fragment, which
+// carry the upload/download signature.
+func maskURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.Contains(trimmed, "?") && !strings.Contains(trimmed, "#") {
+		return trimmed
+	}
+	parsed, err := urlpkg.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return trimmed
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String()
 }
 
 func sensitiveLogKey(key string) bool {

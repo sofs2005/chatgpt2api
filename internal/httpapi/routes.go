@@ -1578,7 +1578,7 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 		body, _ := readJSONMap(r)
 		task, err := a.tasks.SubmitGenerationWithOptions(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), util.ToInt(body["n"], 1), body["messages"], imageTaskRequestMetadata(body), imageOutputOptionsFromBody(body), imageToolOptionsFromBody(body), util.Clean(body["visibility"]))
 		if err != nil {
-			writeCreationTaskSubmitError(w, err)
+			writeCreationTaskSubmitError(w, r, a, identity, "文生图", "/api/creation-tasks/image-generations", err)
 			return
 		}
 		util.WriteJSON(w, http.StatusOK, task)
@@ -1588,7 +1588,7 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 		body, _ := readJSONMap(r)
 		task, err := a.tasks.SubmitChat(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), body["messages"], protocol.IsImageChatRequest(body), util.ToInt(body["n"], 1))
 		if err != nil {
-			writeCreationTaskSubmitError(w, err)
+			writeCreationTaskSubmitError(w, r, a, identity, "文本生成", "/api/creation-tasks/chat-completions", err)
 			return
 		}
 		util.WriteJSON(w, http.StatusOK, task)
@@ -1602,7 +1602,7 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		task, err := a.tasks.SubmitEditWithOptions(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), images, util.ToInt(body["n"], 1), body["messages"], imageTaskRequestMetadata(body), imageOutputOptionsFromBody(body), imageToolOptionsFromBody(body), util.Clean(body["visibility"]))
 		if err != nil {
-			writeCreationTaskSubmitError(w, err)
+			writeCreationTaskSubmitError(w, r, a, identity, "图生图", "/api/creation-tasks/image-edits", err)
 			return
 		}
 		util.WriteJSON(w, http.StatusOK, task)
@@ -1684,7 +1684,21 @@ func imageOutputCompressionFromBody(value any) (int, bool) {
 	return compression, true
 }
 
-func writeCreationTaskSubmitError(w http.ResponseWriter, err error) {
+func writeCreationTaskSubmitError(w http.ResponseWriter, r *http.Request, a *App, identity service.Identity, summary, endpoint string, err error) {
+	// 提交被限流/余额拒绝时不会进入业务 handler，这里补一条业务日志，
+	// 避免这些高价值失败只留下 generic audit 或完全丢失。
+	if a != nil {
+		status := http.StatusBadRequest
+		var billingErr service.BillingLimitError
+		var limitErr service.ImageTaskLimitError
+		switch {
+		case errors.As(err, &billingErr):
+			status = http.StatusTooManyRequests
+		case errors.As(err, &limitErr):
+			status = http.StatusTooManyRequests
+		}
+		a.logBusinessFailure(r, identity, summary, endpoint, util.ImageModelAuto, "submit", err.Error(), status)
+	}
 	var billingErr service.BillingLimitError
 	if errors.As(err, &billingErr) {
 		util.WriteJSON(w, http.StatusTooManyRequests, billingErr.OpenAIError())

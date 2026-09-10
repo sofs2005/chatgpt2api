@@ -217,15 +217,19 @@ func (c *Client) streamOfficialResponsesImage(ctx context.Context, request Respo
 	if err != nil {
 		return err
 	}
+	slug := c.officialImageModelSlug(request.Model)
 	resp, err := c.startOfficialImageConversation(ctx, streamPrompt, reqs, conduitToken, request, attachments, maskRef)
 	if err != nil {
+		c.reportStage("image_stream_start", false, map[string]any{"model": slug, "error": err})
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
+		c.reportStage("image_stream_start", false, map[string]any{"model": slug, "status": resp.StatusCode})
 		return upstreamHTTPError(officialStreamPath, resp.StatusCode, data)
 	}
+	c.reportStage("image_stream_start", true, map[string]any{"model": slug})
 	return iterOfficialImageSSE(ctx, c, resp.Body, request, out)
 }
 
@@ -780,18 +784,23 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 	if conversationID := strings.TrimSpace(request.ConversationID); conversationID != "" {
 		payload["conversation_id"] = conversationID
 	}
+	slug := c.officialImageModelSlug(request.Model)
 	resp, err := c.postJSON(ctx, officialPreparePath, payload, c.officialHeaders(officialPreparePath, reqs, "", "*/*"), false)
 	if err != nil {
+		c.reportStage("image_prepare", false, map[string]any{"model": slug, "error": err})
 		return "", err
 	}
 	defer resp.Body.Close()
 	if err := ensureOK(resp, officialPreparePath); err != nil {
+		c.reportStage("image_prepare", false, map[string]any{"model": slug, "status": resp.StatusCode})
 		return "", err
 	}
 	var data map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		c.reportStage("image_prepare", false, map[string]any{"model": slug, "error": err})
 		return "", err
 	}
+	c.reportStage("image_prepare", true, map[string]any{"model": slug})
 	return util.Clean(data["conduit_token"]), nil
 }
 
@@ -801,12 +810,13 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 const DefaultImageModelSlug = util.ImageModelAuto
 
 // officialImageModelSlug 返回官方生图链路发给上游的 model slug。
-// 显式选择 gpt-image-2 时使用可配置的目标 slug（默认 auto），
-// 其余情况一律回落到 auto，交服务端自动路由。
+// auto 与 gpt-image-2 都走同一条官方 f/conversation 链路，因此都使用可配置的
+// 目标 slug（image_model_slug），配置为空才回落到 auto 由服务端路由。
+// Codex 模型走独立链路，保持原样返回。
 func (c *Client) officialImageModelSlug(model string) string {
 	configured := firstNonEmpty(c.imageModelSlug, DefaultImageModelSlug)
-	switch strings.TrimSpace(model) {
-	case util.ImageModelGPT:
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "", util.ImageModelAuto, util.ImageModelGPT:
 		return configured
 	case util.ImageModelCodex:
 		return util.ImageModelCodex
@@ -909,13 +919,22 @@ func (c *Client) uploadImage(ctx context.Context, input ResponsesInputImage, fil
 	}
 	uploadResp, err := c.do(req)
 	if err != nil {
+		c.reportStage("image_upload", false, map[string]any{
+			"host":  safeURLHost(uploadURL),
+			"error": err,
+		})
 		return uploadedImageRef{}, upstreamTransportError("image_upload", err)
 	}
 	defer uploadResp.Body.Close()
 	if uploadResp.StatusCode < 200 || uploadResp.StatusCode >= 300 {
 		data, _ := io.ReadAll(uploadResp.Body)
+		c.reportStage("image_upload", false, map[string]any{
+			"host":   safeURLHost(uploadURL),
+			"status": uploadResp.StatusCode,
+		})
 		return uploadedImageRef{}, upstreamHTTPError("image_upload", uploadResp.StatusCode, data)
 	}
+	c.reportStage("image_upload", true, map[string]any{"host": safeURLHost(uploadURL)})
 	time.Sleep(500 * time.Millisecond)
 	finalizePath := "/backend-api/files/" + fileID + "/uploaded"
 	finalizeReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+finalizePath, strings.NewReader("{}"))
@@ -2243,14 +2262,33 @@ func (c *Client) downloadOfficialImage(ctx context.Context, url string) ([]byte,
 	}
 	resp, err := c.do(req)
 	if err != nil {
+		c.reportStage("image_download", false, map[string]any{
+			"host":  safeURLHost(target),
+			"error": err,
+		})
 		return nil, upstreamTransportError("image_download", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
+		c.reportStage("image_download", false, map[string]any{
+			"host":   safeURLHost(target),
+			"status": resp.StatusCode,
+		})
 		return nil, upstreamHTTPError("image_download", resp.StatusCode, data)
 	}
+	c.reportStage("image_download", true, map[string]any{"host": safeURLHost(target)})
 	return io.ReadAll(resp.Body)
+}
+
+// safeURLHost 只返回 URL 的 host，供诊断日志使用。
+// 生图链路会拿到带签名 query 的外部上传/下载 URL，完整 URL 属于凭据，禁止写入日志。
+func safeURLHost(raw string) string {
+	parsed, err := urlpkg.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Host
 }
 
 func (c *Client) isChatGPTBackendURL(parsed *urlpkg.URL) bool {

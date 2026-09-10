@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,6 +66,7 @@ type Client struct {
 	imageModelSlug             string
 	searchTimeout              time.Duration
 	searchPollInterval         time.Duration
+	diagnostic                 func(stage string, attrs map[string]any)
 }
 
 type ChatRequirements struct {
@@ -137,6 +139,28 @@ func (c *Client) SetImageModelSlug(slug string) {
 // ImageModelSlug 返回当前生效的官方生图 model slug。
 func (c *Client) ImageModelSlug() string {
 	return c.imageModelSlug
+}
+
+// SetDiagnosticLogger 注册上游阶段诊断回调；nil 表示关闭诊断。
+// 回调只应收到脱敏后的结构化字段，绝不包含 token、cookie、prompt、
+// 请求体、base64 或带签名 query 的完整 URL。
+func (c *Client) SetDiagnosticLogger(fn func(stage string, attrs map[string]any)) {
+	c.diagnostic = fn
+}
+
+// reportStage 向诊断回调上报一个上游阶段结果。
+// attrs 可为空；ok 为 false 表示阶段失败，调用方应同时给出 error 字段。
+func (c *Client) reportStage(stage string, ok bool, attrs map[string]any) {
+	if c == nil || c.diagnostic == nil {
+		return
+	}
+	payload := map[string]any{}
+	for key, value := range attrs {
+		payload[key] = value
+	}
+	payload["stage"] = stage
+	payload["ok"] = ok
+	c.diagnostic(stage, payload)
 }
 
 func (c *Client) ListModels(ctx context.Context) (map[string]any, error) {
@@ -521,11 +545,13 @@ func (c *Client) bootstrap(ctx context.Context) error {
 	}
 	resp, err := c.do(req)
 	if err != nil {
+		c.reportStage("bootstrap", false, map[string]any{"error": err})
 		return upstreamTransportError("bootstrap", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.reportStage("bootstrap", false, map[string]any{"status": resp.StatusCode})
 		return upstreamHTTPError("bootstrap", resp.StatusCode, data)
 	}
 	c.powSources, c.powDataBuild = parsePOWResources(string(data))
@@ -1022,12 +1048,58 @@ func ensureOK(resp *http.Response, context string) error {
 	return upstreamHTTPError(context, resp.StatusCode, data)
 }
 
+// UpstreamError 描述一次上游调用失败。
+// Error() 只返回对外稳定的摘要文本，原始 transport error 通过 Unwrap() 保留，
+// 便于日志与诊断拿到真实原因，同时不影响既有对外错误文案与测试断言。
+type UpstreamError struct {
+	// Context 标记失败阶段，例如 bootstrap、prepare、image_download。
+	Context string
+	// Message 是对外展示的摘要文本。
+	Message string
+	// Status 是上游 HTTP 状态码，transport 失败时为 0。
+	Status int
+	// Cause 是原始错误，可为空。
+	Cause error
+}
+
+func (e *UpstreamError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func (e *UpstreamError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// UpstreamStage 返回失败阶段，供诊断日志与错误链查询使用。
+func (e *UpstreamError) UpstreamStage() string {
+	if e == nil {
+		return ""
+	}
+	return e.Context
+}
+
+// UpstreamStageOf 从错误链中取出 UpstreamError 的阶段标记。
+func UpstreamStageOf(err error) string {
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) {
+		return upstream.Context
+	}
+	return ""
+}
+
 func upstreamHTTPError(context string, status int, body []byte) error {
 	detail := summarizeUpstreamErrorBody(body)
-	if detail == "" {
-		return fmt.Errorf("%s failed: status=%d", context, status)
+	message := fmt.Sprintf("%s failed: status=%d", context, status)
+	if detail != "" {
+		message = fmt.Sprintf("%s failed: status=%d, %s", context, status, detail)
 	}
-	return fmt.Errorf("%s failed: status=%d, %s", context, status, detail)
+	return &UpstreamError{Context: context, Message: message, Status: status}
 }
 
 func upstreamTransportError(context string, err error) error {
@@ -1035,9 +1107,17 @@ func upstreamTransportError(context string, err error) error {
 		return nil
 	}
 	if detail, ok := util.SummarizeUpstreamConnectionError(err.Error()); ok {
-		return fmt.Errorf("%s failed: %s", context, detail)
+		return &UpstreamError{
+			Context: context,
+			Message: fmt.Sprintf("%s failed: %s", context, detail),
+			Cause:   err,
+		}
 	}
-	return fmt.Errorf("%s failed: %w", context, err)
+	return &UpstreamError{
+		Context: context,
+		Message: fmt.Sprintf("%s failed: %v", context, err),
+		Cause:   err,
+	}
 }
 
 func summarizeUpstreamErrorBody(body []byte) string {

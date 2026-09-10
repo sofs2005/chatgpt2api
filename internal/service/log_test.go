@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -156,6 +158,104 @@ func TestSanitizeLogValueMasksSessionCredentials(t *testing.T) {
 	text := item["session_json"].(string) + item["accessToken"].(string) + item["sessionToken"].(string)
 	if strings.Contains(text, accessToken) || strings.Contains(text, sessionToken) {
 		t.Fatalf("sanitized log value leaked credentials: %#v", sanitized)
+	}
+}
+
+func TestNormalizeDiagnosticDetailRedactsSignedURLs(t *testing.T) {
+	signed := "https://files.oaiusercontent.com/download/abc?sig=SECRET_SIGNATURE&token=topsecret"
+	detail := NormalizeDiagnosticDetail(map[string]any{
+		"download_url":  signed,
+		"authorization": "Bearer sk-secret-token",
+	}, DiagnosticFields{
+		EventKind:     EventKindUpstream,
+		Stage:         "image_download",
+		Severity:      "error",
+		Outcome:       "failed",
+		UpstreamHost:  "files.oaiusercontent.com",
+		UpstreamPath:  "/download/abc",
+		ErrorCause:    "tls: handshake failure",
+		UpstreamStage: "image_download",
+	})
+
+	if detail["download_url"] != "https://files.oaiusercontent.com/download/abc" {
+		t.Fatalf("download_url = %#v, want query stripped", detail["download_url"])
+	}
+	if detail["event_kind"] != EventKindUpstream || detail["stage"] != "image_download" || detail["upstream_stage"] != "image_download" {
+		t.Fatalf("diagnostic fields = %#v", detail)
+	}
+	if detail["outcome"] != "failed" || detail["log_level"] != "error" || detail["error_cause"] != "tls: handshake failure" {
+		t.Fatalf("diagnostic outcome fields = %#v", detail)
+	}
+	serialized := fmt.Sprintf("%#v", detail)
+	for _, secret := range []string{"SECRET_SIGNATURE", "topsecret", "sk-secret-token"} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("sanitized detail leaked %q: %s", secret, serialized)
+		}
+	}
+}
+
+func TestUpstreamCauseTextUnwrapsInnermostCause(t *testing.T) {
+	cause := errors.New("read tcp 10.0.0.1: connection reset by peer")
+	err := fmt.Errorf("image_download failed: %w", cause)
+	if got := UpstreamCauseText(err); got != cause.Error() {
+		t.Fatalf("UpstreamCauseText() = %q, want %q", got, cause.Error())
+	}
+	// 摘要与 cause 相同时不应重复写入日志。
+	if got := UpstreamCauseText(cause); got != "" {
+		t.Fatalf("UpstreamCauseText(single) = %q, want empty", got)
+	}
+	if got := UpstreamCauseText(nil); got != "" {
+		t.Fatalf("UpstreamCauseText(nil) = %q, want empty", got)
+	}
+}
+
+func TestMeaningfulViewExcludesSuccessfulReadOnlyAudit(t *testing.T) {
+	readOnlyAudit := map[string]any{"summary": "GET /api/logs", "detail": map[string]any{"method": "GET", "path": "/api/logs", "status": 200, "event_kind": EventKindAudit}}
+	if isMeaningfulLogItem(readOnlyAudit) {
+		t.Fatalf("successful read-only audit should be filtered out of meaningful view")
+	}
+	failedRead := map[string]any{"summary": "GET /api/logs", "detail": map[string]any{"method": "GET", "path": "/api/logs", "status": 500, "event_kind": EventKindAudit, "outcome": "failed"}}
+	if !isMeaningfulLogItem(failedRead) {
+		t.Fatalf("failed read-only audit should stay in meaningful view")
+	}
+	business := map[string]any{"summary": "文生图调用失败", "detail": map[string]any{"method": "POST", "path": "/v1/images/generations", "status": 502, "event_kind": EventKindBusiness}}
+	if !isMeaningfulLogItem(business) {
+		t.Fatalf("business events should stay in meaningful view")
+	}
+}
+
+func TestLogServiceSearchFiltersByStageAndEventKind(t *testing.T) {
+	logs := NewLogService(newTestStorageBackend(t))
+	if err := logs.Add("文生图调用失败", map[string]any{
+		"method":     "POST",
+		"path":       "/v1/images/generations",
+		"status":     502,
+		"event_kind": EventKindUpstream,
+		"stage":      "image_download",
+	}); err != nil {
+		t.Fatalf("Add(image failure) error = %v", err)
+	}
+	if err := logs.Add("文生图调用完成", map[string]any{
+		"method":     "POST",
+		"path":       "/v1/images/generations",
+		"status":     200,
+		"event_kind": EventKindBusiness,
+		"stage":      "image_prepare",
+	}); err != nil {
+		t.Fatalf("Add(image success) error = %v", err)
+	}
+
+	if items := logs.Search(LogQuery{Stage: "image_download", View: LogViewAll}); len(items) != 1 {
+		t.Fatalf("Search(stage=image_download) = %d items, want 1", len(items))
+	}
+	if items := logs.Search(LogQuery{EventKind: EventKindUpstream, View: LogViewAll}); len(items) != 1 {
+		t.Fatalf("Search(event_kind=upstream) = %d items, want 1", len(items))
+	}
+	if items := logs.Search(LogQuery{Stage: "IMAGE_DOWNLOAD", View: LogViewAll}); len(items) != 1 {
+		t.Fatalf("stage filter should be case-insensitive, got %d items", len(items))
+	}
+	if items := logs.Search(LogQuery{Stage: "bootstrap", View: LogViewAll}); len(items) != 0 {
+		t.Fatalf("Search(stage=bootstrap) = %d items, want 0", len(items))
 	}
 }
 

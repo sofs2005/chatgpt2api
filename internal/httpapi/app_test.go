@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -3832,7 +3833,7 @@ func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/settings?section=logging", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", adminAuthHeader(t, app))
 	req.Header.Set("User-Agent", "chatgpt2api-test")
 	req.RemoteAddr = "203.0.113.10:12345"
@@ -3842,7 +3843,7 @@ func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
 		t.Fatalf("settings status = %d body = %s", res.Code, res.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/logs?username=admin&method=GET&status=200&summary=%2Fapi%2Fsettings&view=all", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/logs?username=admin&method=POST&status=200&summary=%2Fapi%2Fsettings&view=all", nil)
 	req.Header.Set("Authorization", adminAuthHeader(t, app))
 	res = httptest.NewRecorder()
 	app.Handler().ServeHTTP(res, req)
@@ -3865,10 +3866,10 @@ func TestAPIAuditLogCapturesRequestMetadata(t *testing.T) {
 		t.Fatalf("log item should not expose type: %#v", item)
 	}
 	detail, _ := item["detail"].(map[string]any)
-	if detail["method"] != http.MethodGet || detail["status"] != float64(http.StatusOK) || detail["log_level"] != "info" {
+	if detail["method"] != http.MethodPost || detail["status"] != float64(http.StatusOK) || detail["log_level"] != "info" {
 		t.Fatalf("unexpected audit detail = %#v", detail)
 	}
-	if detail["operation_type"] != "查询" || detail["subject_id"] != testAdminUsername || detail["user_agent"] != "chatgpt2api-test" {
+	if detail["operation_type"] != "提交" || detail["subject_id"] != testAdminUsername || detail["user_agent"] != "chatgpt2api-test" {
 		t.Fatalf("missing audit identity/request fields = %#v", detail)
 	}
 	if detail["username"] != "管理员" || detail["session_name"] != "登录会话" || detail["auth_kind"] != service.AuthKindSession {
@@ -4269,6 +4270,87 @@ func assertCreationConcurrentLimit(t *testing.T, payload map[string]any, want in
 
 func findLogByDetail(items []map[string]any, key, value string) map[string]any {
 	return findLogByDetails(items, map[string]any{key: value})
+}
+
+func TestSuccessfulReadOnlyRequestSkipsAuditPersistence(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?view=all", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("logs status = %d body = %s", res.Code, res.Body.String())
+	}
+	var logs map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("logs json: %v", err)
+	}
+	// 只读请求自身不再产生审计记录，避免日志页刷新一次就多一堆无用记录。
+	if item := findHTTPAuditLogByPath(logItems(logs), "/api/logs"); item != nil {
+		t.Fatalf("successful GET should not persist an audit log: %#v", item)
+	}
+}
+
+func TestFailedReadOnlyRequestPersistsAuditLog(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/missing", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d", res.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/logs?view=all", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	var logs map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("logs json: %v", err)
+	}
+	if item := findHTTPAuditLogByPath(logItems(logs), "/api/missing"); item == nil {
+		t.Fatalf("failed GET should still persist an audit log: %#v", logItems(logs))
+	}
+}
+
+func TestBusinessLogRecordsUpstreamStageAndCause(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	// 失败路径：上游 transport 错误必须保留阶段与原始 cause，否则无法定位失败点。
+	app.logCall(context.Background(), service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"},
+		"文生图", http.MethodPost, "/v1/images/generations", util.ImageModelAuto, time.Now(), "failed",
+		http.StatusBadGateway, "upstream connection failed before TLS handshake completed",
+		nil, auditRequestCapture{}, &backend.UpstreamError{
+			Context: "image_download",
+			Message: "upstream connection failed before TLS handshake completed",
+			Cause:   errors.New("read tcp 10.0.0.1:443: connection reset by peer"),
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?view=all", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	var logs map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("logs json: %v", err)
+	}
+	item := findLogByDetails(logItems(logs), map[string]any{"path": "/v1/images/generations", "stage": "image_download"})
+	if item == nil {
+		t.Fatalf("missing business log with upstream stage: %#v", logItems(logs))
+	}
+	detail, _ := item["detail"].(map[string]any)
+	if detail["error_cause"] != "read tcp 10.0.0.1:443: connection reset by peer" {
+		t.Fatalf("error_cause = %#v", detail["error_cause"])
+	}
+	if detail["event_kind"] != service.EventKindUpstream {
+		t.Fatalf("event_kind = %#v, want upstream", detail["event_kind"])
+	}
 }
 
 func findHTTPAuditLogByPath(items []map[string]any, path string) map[string]any {

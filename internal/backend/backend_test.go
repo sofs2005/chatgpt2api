@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,6 +81,89 @@ func TestUpstreamTransportErrorSummarizesSurfHandshakeFailure(t *testing.T) {
 	if got != want {
 		t.Fatalf("upstreamTransportError() = %q, want %q", got, want)
 	}
+}
+
+// 归一化文案会丢掉阶段与原始 cause，导致生图失败无法定位；这里锁定两者都被保留。
+func TestUpstreamTransportErrorKeepsStageAndCause(t *testing.T) {
+	cause := errString(`Get "https://chatgpt.com/": surf: HTTP/2 request failed: uTLS.HandshakeContext() error: EOF`)
+	err := upstreamTransportError("image_download", cause)
+	if got := UpstreamStageOf(err); got != "image_download" {
+		t.Fatalf("UpstreamStageOf() = %q, want %q", got, "image_download")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("errors.Is(err, cause) = false, want true")
+	}
+
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("errors.As(*UpstreamError) = false, want true")
+	}
+	if upstream.Status != 0 {
+		t.Fatalf("transport Status = %d, want 0", upstream.Status)
+	}
+}
+
+func TestUpstreamHTTPErrorKeepsStageAndStatus(t *testing.T) {
+	err := upstreamHTTPError("image_prepare", 429, []byte(`{"error":"rate limited"}`))
+	if got := UpstreamStageOf(err); got != "image_prepare" {
+		t.Fatalf("UpstreamStageOf() = %q, want %q", got, "image_prepare")
+	}
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("errors.As(*UpstreamError) = false, want true")
+	}
+	if upstream.Status != 429 {
+		t.Fatalf("Status = %d, want 429", upstream.Status)
+	}
+	if !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("error = %q, want upstream detail preserved", err.Error())
+	}
+}
+
+// 生图失败时诊断必须指出阶段与域名，但不能带上签名 query、token 或 prompt。
+func TestImageStageDiagnosticsAreRedacted(t *testing.T) {
+	seen := map[string]map[string]any{}
+	client := &Client{}
+	client.SetDiagnosticLogger(func(stage string, attrs map[string]any) {
+		seen[stage] = attrs
+	})
+
+	signed := "https://files.oaiusercontent.com/download/abc?sig=SECRET_SIGNATURE&token=topsecret"
+	client.reportStage("image_download", false, map[string]any{
+		"host":  safeURLHost(signed),
+		"error": errString("tls: handshake failure with token=abc123"),
+	})
+	client.reportStage("image_prepare", true, map[string]any{"model": "auto"})
+
+	download, ok := seen["image_download"]
+	if !ok {
+		t.Fatalf("missing image_download stage: %#v", seen)
+	}
+	if got := download["host"]; got != "files.oaiusercontent.com" {
+		t.Fatalf("host = %#v, want hostname only", got)
+	}
+	if download["ok"] != false {
+		t.Fatalf("ok = %#v, want false for failed stage", download["ok"])
+	}
+	prepare, ok := seen["image_prepare"]
+	if !ok {
+		t.Fatalf("missing image_prepare stage: %#v", seen)
+	}
+	if prepare["ok"] != true {
+		t.Fatalf("ok = %#v, want true for successful stage", prepare["ok"])
+	}
+	for stage, attrs := range seen {
+		blob := fmt.Sprintf("%v", attrs)
+		for _, secret := range []string{"SECRET_SIGNATURE", "topsecret"} {
+			if strings.Contains(blob, secret) {
+				t.Fatalf("stage %q leaked credential material: %s", stage, blob)
+			}
+		}
+	}
+
+	// 未注册回调时不应 panic。
+	bare := &Client{}
+	bare.reportStage("bootstrap", false, map[string]any{"error": "boom"})
 }
 
 func TestBuildFingerprintUsesAccountFingerprint(t *testing.T) {
@@ -346,8 +430,8 @@ func TestOfficialImageModelSlug(t *testing.T) {
 			"gpt-5-5":           "auto",
 		}},
 		{slug: "gpt-5-6", want: map[string]string{
-			"":                  "auto",
-			"auto":              "auto",
+			"":                  "gpt-5-6",
+			"auto":              "gpt-5-6",
 			"gpt-image-2":       "gpt-5-6",
 			"codex-gpt-image-2": "codex-gpt-image-2",
 			"gpt-5-5":           "auto",

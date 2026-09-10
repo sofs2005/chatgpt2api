@@ -25,6 +25,8 @@ const (
 type requestIdentityContextKey struct{}
 type auditRequestContextKey struct{}
 type businessLogContextKey struct{}
+type requestStartContextKey struct{}
+type requestIDContextKey struct{}
 
 type auditRequestCapture struct {
 	args      any
@@ -95,9 +97,13 @@ func (a *App) serveObservedHTTP(w http.ResponseWriter, r *http.Request, routes [
 	}
 
 	requestCapture := captureAuditRequest(r)
-	*r = *r.WithContext(withAuditRequestCapture(r.Context(), requestCapture))
-	recorder := &auditResponseWriter{ResponseWriter: w}
 	start := time.Now()
+	// 关联 ID 让异步生图任务的业务日志能回溯到发起它的 HTTP 请求。
+	ctx := context.WithValue(r.Context(), requestStartContextKey{}, start)
+	ctx = context.WithValue(ctx, requestIDContextKey{}, "req_"+util.NewHex(10))
+	ctx = context.WithValue(ctx, auditRequestContextKey{}, requestCapture)
+	*r = *r.WithContext(ctx)
+	recorder := &auditResponseWriter{ResponseWriter: w}
 	a.serveHTTP(recorder, r, routes)
 	duration := time.Since(start)
 	status := recorder.statusCode()
@@ -143,6 +149,7 @@ func (a *App) writeAuditLog(r *http.Request, recorder *auditResponseWriter, stat
 		"user_agent":     r.UserAgent(),
 		"operation_type": operationTypeForMethod(r.Method),
 		"log_level":      logLevelForStatus(status),
+		"event_kind":     service.EventKindAudit,
 	}
 	addAuditRequestDetail(detail, requestCapture)
 	if responseBody := normalizeAuditPayload(recorder.body.Bytes()); responseBody != nil {
@@ -162,6 +169,49 @@ func (a *App) writeAuditLog(r *http.Request, recorder *auditResponseWriter, stat
 	}
 }
 
+// logBusinessFailure writes a business event for a request that failed before
+// any business handler could record it. The generic audit middleware is no
+// longer a reliable backstop for these, so failures never go unrecorded.
+func (a *App) logBusinessFailure(r *http.Request, identity service.Identity, summary, endpoint, model, stage, errText string, status int) {
+	if a == nil || r == nil {
+		return
+	}
+	started := requestStartTime(r.Context(), time.Now())
+	detail := service.NormalizeDiagnosticDetail(map[string]any{
+		"method":      r.Method,
+		"path":        endpoint,
+		"endpoint":    endpoint,
+		"module":      inferAuditModule(endpoint),
+		"model":       model,
+		"status":      status,
+		"outcome":     "failed",
+		"error":       errText,
+		"ip_address":  clientIP(r),
+		"user_agent":  r.UserAgent(),
+		"started_at":  started.Format("2006-01-02 15:04:05"),
+		"duration_ms": time.Since(started).Milliseconds(),
+	}, service.DiagnosticFields{
+		EventKind: service.EventKindBusiness,
+		Stage:     stage,
+		Severity:  logLevelForStatus(status),
+		Outcome:   "failed",
+	})
+	addIdentityLogDetail(detail, identity)
+	if name := identityDisplayName(identity); name != "" {
+		detail["username"] = name
+	}
+	if a.logger != nil {
+		a.logger.Warning("business request rejected", "summary", summary, "endpoint", endpoint, "model", model, "stage", stage, "status", status, "error", errText)
+	}
+	if a.logs == nil {
+		return
+	}
+	markRequestBusinessLogged(r)
+	if err := a.logs.Add(summary+"失败", detail); err != nil && a.logger != nil {
+		a.logger.Error("create business log failed", "error", err, "endpoint", endpoint)
+	}
+}
+
 func withRequestIdentity(ctx context.Context, identity service.Identity) context.Context {
 	return context.WithValue(ctx, requestIdentityContextKey{}, identity)
 }
@@ -171,8 +221,20 @@ func requestIdentity(ctx context.Context) (service.Identity, bool) {
 	return identity, ok
 }
 
-func withAuditRequestCapture(ctx context.Context, capture auditRequestCapture) context.Context {
-	return context.WithValue(ctx, auditRequestContextKey{}, capture)
+func requestIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDContextKey{}).(string)
+	return id
+}
+
+// requestStartTime returns the moment the observed request entered the router.
+// Handlers use it so duration_ms measures the whole request instead of only the
+// tail that runs after the upstream call returns.
+func requestStartTime(ctx context.Context, fallback time.Time) time.Time {
+	start, ok := ctx.Value(requestStartContextKey{}).(time.Time)
+	if !ok || start.IsZero() {
+		return fallback
+	}
+	return start
 }
 
 func requestAuditCapture(ctx context.Context) auditRequestCapture {
@@ -214,28 +276,18 @@ func shouldWriteAuditLog(r *http.Request, status int) bool {
 	if status >= http.StatusBadRequest {
 		return true
 	}
-	return !isNoisySuccessfulAuditRequest(r)
+	// Successful reads are polled by the admin UI several times a minute and used
+	// to drown out real events, so only writes and explicit business calls persist.
+	return !isReadOnlyAuditMethod(r.Method)
 }
 
-func isNoisySuccessfulAuditRequest(r *http.Request) bool {
-	if r == nil || r.URL == nil {
+func isReadOnlyAuditMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
 		return false
 	}
-	path := r.URL.Path
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		switch {
-		case path == "/api/logs",
-			path == "/api/logs/governance",
-			path == "/api/images/storage-governance",
-			path == "/api/creation-tasks",
-			path == "/api/app-meta",
-			path == "/api/admin/permissions",
-			path == "/auth/session":
-			return true
-		}
-	}
-	return false
 }
 
 func captureAuditRequest(r *http.Request) auditRequestCapture {
@@ -391,6 +443,8 @@ func parseLogQuery(r *http.Request) (service.LogQuery, error) {
 		IPAddress:     strings.TrimSpace(values.Get("ip_address")),
 		OperationType: strings.TrimSpace(values.Get("operation_type")),
 		LogLevel:      strings.TrimSpace(values.Get("log_level")),
+		Stage:         strings.TrimSpace(values.Get("stage")),
+		EventKind:     strings.TrimSpace(values.Get("event_kind")),
 		StartDate:     strings.TrimSpace(values.Get("start_date")),
 		EndDate:       strings.TrimSpace(values.Get("end_date")),
 		StartTime:     strings.TrimSpace(values.Get("start_time")),

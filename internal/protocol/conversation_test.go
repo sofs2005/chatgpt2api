@@ -588,6 +588,36 @@ func TestImageStreamErrorMessage(t *testing.T) {
 	}
 }
 
+func TestNewUpstreamImageErrorKeepsStageAndCause(t *testing.T) {
+	cause := errors.New("read tcp 10.0.0.1:443: connection reset by peer")
+	inner := &backend.UpstreamError{
+		Context: "image_download",
+		Message: "upstream connection failed before TLS handshake completed; check proxy reachability to chatgpt.com or change proxy",
+		Cause:   cause,
+	}
+	wrapped := newUpstreamImageError(inner)
+
+	// 对外文案保持稳定，不含内部细节。
+	if wrapped.Error() != inner.Message {
+		t.Fatalf("Error() = %q, want %q", wrapped.Error(), inner.Message)
+	}
+	payload := wrapped.OpenAIError()
+	errorBody, _ := payload["error"].(map[string]any)
+	if errorBody["message"] != inner.Message {
+		t.Fatalf("OpenAIError() message = %#v, want stable summary", errorBody["message"])
+	}
+	if strings.Contains(fmt.Sprintf("%v", payload), "10.0.0.1") {
+		t.Fatalf("OpenAIError() leaked internal cause: %#v", payload)
+	}
+	// 内部可还原阶段与原始 cause。
+	if wrapped.Stage != "image_download" || wrapped.UpstreamStage() != "image_download" {
+		t.Fatalf("Stage = %q / UpstreamStage() = %q, want image_download", wrapped.Stage, wrapped.UpstreamStage())
+	}
+	if !errors.Is(wrapped, cause) {
+		t.Fatalf("errors.Is(wrapped, cause) = false, want true")
+	}
+}
+
 func TestHandleImageGenerationsReturnsUpstreamTextResponse(t *testing.T) {
 	engine := &Engine{
 		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },

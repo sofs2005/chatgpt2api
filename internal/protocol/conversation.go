@@ -268,6 +268,11 @@ type ImageGenerationError struct {
 	Param      any
 	// ConversationID 记录失败时已知的上游会话 ID，用于超时后按会话续轮询（resume_poll）。
 	ConversationID string
+	// Stage 记录失败所处的上游阶段（bootstrap、prepare、image_download 等）。
+	Stage string
+	// Cause 保留 backend 返回的原始错误链，仅供日志与诊断使用。
+	// OpenAIError() 与 Error() 仍只输出对外的 Message，不会泄露内部原因。
+	Cause error
 }
 
 // ImageConversationID 暴露失败会话 ID，供 service 层经接口提取而无需反向依赖 protocol 包。
@@ -287,12 +292,41 @@ type imageRunResult struct {
 
 func (e *ImageGenerationError) Error() string { return e.Message }
 
+// Unwrap 暴露原始上游错误，让调用方能通过 errors.As/errors.Is 还原真实失败原因，
+// 同时保持对外文案不变。
+func (e *ImageGenerationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// UpstreamStage 返回失败时的上游阶段，便于日志定位。
+func (e *ImageGenerationError) UpstreamStage() string {
+	if e == nil {
+		return ""
+	}
+	return e.Stage
+}
+
 func (e *ImageGenerationError) OpenAIError() map[string]any {
 	return map[string]any{"error": map[string]any{"message": e.Message, "type": e.Type, "param": e.Param, "code": e.Code}}
 }
 
 func NewImageGenerationError(message string) *ImageGenerationError {
 	return &ImageGenerationError{Message: message, StatusCode: 502, Type: "server_error", Code: "upstream_error"}
+}
+
+// newUpstreamImageError 把 backend 返回的原始错误包装成对外文案稳定的生图错误，
+// 同时保留原始 cause 与失败阶段：对外仍只看到归一化摘要，日志侧能还原真实原因。
+func newUpstreamImageError(err error) *ImageGenerationError {
+	if err == nil {
+		return NewImageGenerationError("upstream image request failed without error detail")
+	}
+	wrapped := NewImageGenerationError(imageStreamErrorMessage(err.Error()))
+	wrapped.Cause = err
+	wrapped.Stage = backend.UpstreamStageOf(err)
+	return wrapped
 }
 
 const maxTransientImageStreamAttempts = 3
@@ -891,7 +925,7 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 				transientAttempts++
 				return true
 			}
-			imgErr := NewImageGenerationError(imageStreamErrorMessage(result.lastError))
+			imgErr := newUpstreamImageError(err)
 			// 附带已知会话 ID，使超时失败的任务可凭 conversation_id 续轮询。
 			imgErr.ConversationID = lastConversationID
 			// 记住该会话的账号令牌，供「继续等待」按 conversation_id 续轮询（仅内存）。
@@ -1000,6 +1034,24 @@ func (e *Engine) newImageClient(token string) *backend.Client {
 			time.Duration(e.Config.ImageSettleSecs()*float64(time.Second)),
 		)
 		client.SetImageModelSlug(e.Config.ImageModelSlug())
+	}
+	// 生图是唯一会连外部上传/下载域名且阶段较多的链路，失败时只靠归一化文案无法定位，
+	// 因此把上游阶段写入运行时日志；诊断字段由 backend 侧脱敏，这里只做电平映射。
+	if logger := e.Logger; logger != nil {
+		client.SetDiagnosticLogger(func(stage string, attrs map[string]any) {
+			fields := make([]any, 0, len(attrs)*2+1)
+			fields = append(fields, "route", "official_image")
+			// 阶段失败默认 warning；仅成功阶段降级为 debug，避免刷屏。
+			ok, _ := attrs["ok"].(bool)
+			for key, value := range attrs {
+				fields = append(fields, key, value)
+			}
+			if ok {
+				logger.Debug("upstream image stage", fields...)
+				return
+			}
+			logger.Warning("upstream image stage failed", fields...)
+		})
 	}
 	return client
 }

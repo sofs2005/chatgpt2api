@@ -32,7 +32,49 @@ export const detailLabels: Record<string, string> = {
   removed: "删除",
   upstream_account_name: "上游账号",
   upstream_account_names: "上游账号列表",
+  event_kind: "事件类型",
+  stage: "失败阶段",
+  upstream_stage: "上游阶段",
+  request_id: "关联 ID",
+  upstream_host: "上游域名",
+  upstream_path: "上游路径",
+  error_cause: "原始错误",
+  severity: "严重级别",
 };
+
+export const eventKindLabels: Record<string, string> = {
+  business: "业务调用",
+  audit: "管理审计",
+  upstream: "上游失败",
+  system: "系统事件",
+};
+
+export function eventKindText(value: unknown) {
+  const key = typeof value === "string" ? value.trim() : "";
+  if (!key) return "";
+  return eventKindLabels[key] || key;
+}
+
+// 诊断字段单独成区展示：失败时真正有用的信息在这里，而不是埋在折叠的 payload 里。
+export const diagnosticDetailKeys = [
+  "error",
+  "stage",
+  "upstream_stage",
+  "error_cause",
+  "upstream_host",
+  "upstream_path",
+  "request_id",
+  "event_kind",
+  "severity",
+] as const;
+
+export function hasDiagnosticDetail(detail: Record<string, unknown> | undefined | null) {
+  if (!detail) return false;
+  return diagnosticDetailKeys.some((key) => {
+    const value = detail[key];
+    return typeof value === "string" ? value.trim().length > 0 : value !== undefined && value !== null;
+  });
+}
 
 export const summaryDetailKeys = new Set([
   "method",

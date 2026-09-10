@@ -18,7 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { fetchSettingsConfig, fetchSystemLogs, type LogView, type SystemLog, type SystemLogFilters } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
-import { detailLabels, detailSectionDefinitions, getUpstreamAccountText, summaryDetailKeys } from "./log-detail";
+import { detailLabels, detailSectionDefinitions, diagnosticDetailKeys, eventKindText, getUpstreamAccountText, hasDiagnosticDetail, summaryDetailKeys } from "./log-detail";
 
 const methodOptions = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const statusOptions = ["200", "201", "400", "401", "403", "404", "422", "429", "500", "502"];
@@ -27,6 +27,26 @@ const logViewOptions: Array<{ value: LogView; label: string }> = [
   { value: "meaningful", label: "有意义日志" },
   { value: "business", label: "仅业务日志" },
   { value: "all", label: "全部日志" },
+];
+const eventKindOptions: Array<{ value: string; label: string }> = [
+  { value: "all", label: "全部类型" },
+  { value: "business", label: "业务调用" },
+  { value: "upstream", label: "上游失败" },
+  { value: "audit", label: "管理审计" },
+  { value: "system", label: "系统事件" },
+];
+const stageOptions: Array<{ value: string; label: string }> = [
+  { value: "all", label: "全部阶段" },
+  { value: "bootstrap", label: "bootstrap" },
+  { value: "chat_requirements", label: "chat_requirements" },
+  { value: "image_prepare", label: "image_prepare" },
+  { value: "image_stream_start", label: "image_stream_start" },
+  { value: "image_upload", label: "image_upload" },
+  { value: "image_download", label: "image_download" },
+  { value: "resume_poll", label: "resume_poll" },
+  { value: "submit", label: "submit" },
+  { value: "validate", label: "validate" },
+  { value: "global_limiter", label: "global_limiter" },
 ];
 
 function normalizeLogView(value: unknown): LogView {
@@ -46,6 +66,8 @@ function createEmptyFilters(view: LogView): SystemLogFilters {
     ip_address: "",
     operation_type: "",
     log_level: "all",
+    stage: "all",
+    event_kind: "all",
     view,
     start_date: "",
     end_date: "",
@@ -123,9 +145,20 @@ function statusBadgeVariant(item: SystemLog | null) {
   return "secondary";
 }
 
+function stageText(item: SystemLog | null) {
+  return detailText(item, "stage") || detailText(item, "upstream_stage") || "";
+}
+
 function levelBadgeVariant(level: string) {
   if (level === "error") return "danger";
   if (level === "warning") return "warning";
+  return "secondary";
+}
+
+function eventKindBadgeVariant(kind: string) {
+  if (kind === "upstream") return "danger";
+  if (kind === "business") return "default";
+  if (kind === "system") return "warning";
   return "secondary";
 }
 
@@ -164,6 +197,10 @@ function formatDetailValue(key: string, value: unknown) {
     if (value === "session") return "登录会话";
     if (value === "api_key") return "API 令牌";
   }
+  if (key === "event_kind") {
+    const kind = eventKindText(value);
+    if (kind) return kind;
+  }
   if (typeof value === "boolean") return value ? "是" : "否";
   return String(value);
 }
@@ -191,8 +228,24 @@ function getDetailGroupEntries(item: SystemLog | null, keys: readonly string[]) 
 
 function getExtraDetailEntries(item: SystemLog | null) {
   const detail = item?.detail || {};
-  const skipped = new Set([...summaryDetailKeys, ...groupedDetailKeys, ...payloadDetailKeys, "urls", "error"]);
+  const skipped = new Set([
+    ...summaryDetailKeys,
+    ...groupedDetailKeys,
+    ...payloadDetailKeys,
+    ...diagnosticDetailKeys,
+    "urls",
+  ]);
   return Object.entries(detail).filter(([key, value]) => !skipped.has(key) && isDisplayableDetailValue(value));
+}
+
+// 诊断区单独渲染：失败阶段、原始 cause 和上游域名是排查时唯一真正需要的字段，
+// 之前它们被整体排除在「补充信息」之外，导致看不到有用信息。
+function getDiagnosticEntries(item: SystemLog | null) {
+  const detail = item?.detail || {};
+  return diagnosticDetailKeys
+    .filter((key) => key !== "error")
+    .map((key) => [key, detail[key]] as const)
+    .filter(([, value]) => isDisplayableDetailValue(value));
 }
 
 function getDetailFieldSections(item: SystemLog | null) {
@@ -223,6 +276,8 @@ function normalizeFilters(filters: SystemLogFilters): SystemLogFilters {
     ip_address: filters.ip_address?.trim() || "",
     operation_type: filters.operation_type?.trim() || "",
     log_level: filters.log_level || "all",
+    stage: filters.stage || "all",
+    event_kind: filters.event_kind || "all",
     view: normalizeLogView(filters.view),
     start_date: filters.start_date || "",
     end_date: filters.end_date || "",
@@ -368,6 +423,18 @@ function LogsContent() {
                 {logLevelOptions.map((level) => <SelectItem key={level} value={level}>{level}</SelectItem>)}
               </SelectContent>
             </Select>
+            <Select value={filters.event_kind || "all"} onValueChange={(value) => updateFilter("event_kind", value)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {eventKindOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={filters.stage || "all"} onValueChange={(value) => updateFilter("stage", value)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {stageOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
             <div className="md:col-span-2 xl:col-span-2">
               <DateRangeFilter
                 startDate={filters.start_date || ""}
@@ -412,6 +479,7 @@ function LogsContent() {
                   <TableHead>状态</TableHead>
                   <TableHead>耗时</TableHead>
                   <TableHead>摘要</TableHead>
+                  <TableHead>诊断</TableHead>
                   <TableHead className="w-28">详情</TableHead>
                 </TableRow>
               </TableHeader>
@@ -438,6 +506,20 @@ function LogsContent() {
                       </TableCell>
                       <TableCell>{formatDuration(item)}</TableCell>
                       <TableCell className="max-w-[300px] truncate text-muted-foreground">{item.summary || "-"}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-1">
+                          {(() => {
+                            const kind = detailText(item, "event_kind");
+                            if (!kind) return <span className="text-muted-foreground">—</span>;
+                            return <Badge variant={eventKindBadgeVariant(kind)} className="rounded-md">{eventKindText(kind)}</Badge>;
+                          })()}
+                          {(() => {
+                            const stage = stageText(item);
+                            if (!stage) return null;
+                            return <span className="font-mono text-xs text-muted-foreground">{stage}</span>;
+                          })()}
+                        </div>
+                      </TableCell>
                       <TableCell>
                         <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => openDetail(item)}>
                           查看详情
@@ -542,6 +624,20 @@ function LogsContent() {
                   <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs leading-6 text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-200">
                     {detailLog.detail.error}
                   </pre>
+                </section>
+              ) : null}
+
+              {hasDiagnosticDetail(detailLog?.detail) ? (
+                <section className="space-y-3">
+                  <div className="text-sm font-semibold text-foreground">错误 / 上游诊断</div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {getDiagnosticEntries(detailLog).map(([key, value]) => (
+                      <div key={key} className="rounded-xl border border-border bg-background p-3">
+                        <div className="text-xs font-semibold text-muted-foreground">{detailLabel(key)}</div>
+                        <div className="mt-1 break-words text-sm font-medium text-foreground">{formatDetailValue(key, value)}</div>
+                      </div>
+                    ))}
+                  </div>
                 </section>
               ) : null}
 

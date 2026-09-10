@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt2api/internal/backend"
 	"chatgpt2api/internal/config"
 	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
@@ -144,7 +145,7 @@ func NewApp() (*App, error) {
 		urls := collectURLs(data)
 		app.recordGeneratedImagesForPayload(identity, urls, "", nil)
 		if err != nil {
-			app.logCall(ctx, identity, "续轮询", http.MethodPost, "/api/creation-tasks/resume-poll", util.ImageModelAuto, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, auditRequestCapture{})
+			app.logCall(ctx, identity, "续轮询", http.MethodPost, "/api/creation-tasks/resume-poll", util.ImageModelAuto, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, auditRequestCapture{}, err)
 			return nil, err
 		}
 		app.logCall(ctx, identity, "续轮询", http.MethodPost, "/api/creation-tasks/resume-poll", util.ImageModelAuto, start, "success", http.StatusOK, "", urls, auditRequestCapture{})
@@ -221,6 +222,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	a.attachCreationTaskLimiter(body, identity)
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
+		a.logBusinessFailure(r, identity, "文生图", "/v1/images/generations", util.ImageModelAuto, "validate", err.Error(), http.StatusBadRequest)
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -246,10 +248,12 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n := util.ToInt(body["n"], 1); n < 1 || n > 4 {
+		a.logBusinessFailure(r, identity, "图生图", "/v1/images/edits", util.ImageModelAuto, "validate", "n must be between 1 and 4", http.StatusBadRequest)
 		util.WriteError(w, http.StatusBadRequest, "n must be between 1 and 4")
 		return
 	}
 	if len(images) == 0 {
+		a.logBusinessFailure(r, identity, "图生图", "/v1/images/edits", util.ImageModelAuto, "validate", "image file is required", http.StatusBadRequest)
 		util.WriteError(w, http.StatusBadRequest, "image file is required")
 		return
 	}
@@ -267,6 +271,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	body["images"] = images
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
+		a.logBusinessFailure(r, identity, "图生图", "/v1/images/edits", util.ImageModelAuto, "validate", err.Error(), http.StatusBadRequest)
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -293,6 +298,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	release, acquireErr := a.globalLimiter.Acquire(r.Context())
 	if acquireErr != nil {
+		a.logBusinessFailure(r, identity, "文本生成", "/v1/chat/completions", util.ImageModelAuto, "global_limiter", acquireErr.Error(), http.StatusServiceUnavailable)
 		util.WriteError(w, http.StatusServiceUnavailable, "request cancelled while waiting for global concurrency slot")
 		return
 	}
@@ -359,7 +365,7 @@ func (a *App) handleDebugSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		status := protocolErrorHTTPStatus(err)
-		a.logCall(ctx, identity, "Search 调试", http.MethodPost, "/api/debug/search", model, start, "failed", status, err.Error(), nil, requestCapture)
+		a.logCall(ctx, identity, "Search 调试", http.MethodPost, "/api/debug/search", model, start, "failed", status, err.Error(), nil, requestCapture, err)
 		markRequestBusinessLogged(r)
 		util.WriteJSON(w, status, map[string]any{"payload": payload, "result": result, "error": err.Error()})
 		return
@@ -429,10 +435,12 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, billingRef service.BillingReference, imagePayloads ...map[string]any) {
-	start := time.Now()
+	// Start from the moment the request entered the router; the upstream call has
+	// already finished by now, so time.Now() would only measure the tail.
+	start := requestStartTime(r.Context(), time.Now())
 	requestCapture := requestAuditCapture(r.Context())
 	if err != nil {
-		a.logCall(r.Context(), identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture)
+		a.logCall(r.Context(), identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture, err)
 		markRequestBusinessLogged(r)
 		a.writeProtocolError(w, err)
 		return
@@ -461,7 +469,7 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		}
 		if err := <-stream.Err; err != nil {
 			a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
-			a.logCall(r.Context(), identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
+			a.logCall(r.Context(), identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture, err)
 			markRequestBusinessLogged(r)
 			fmt.Fprintf(w, "event: error\n")
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(map[string]any{"type": "error", "error": map[string]any{"type": fmt.Sprintf("%T", err), "message": err.Error()}}))
@@ -486,7 +494,7 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 	}
 	if err := <-stream.Err; err != nil {
 		a.recordProtocolGeneratedImages(identity, urls, visibility, imagePayloads...)
-		a.logCall(r.Context(), identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
+		a.logCall(r.Context(), identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture, err)
 		markRequestBusinessLogged(r)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
@@ -1512,7 +1520,7 @@ func openAIErrorForStream(err error) map[string]any {
 	return map[string]any{"error": map[string]any{"message": err.Error(), "type": fmt.Sprintf("%T", err)}}
 }
 
-func (a *App) logCall(ctx context.Context, identity service.Identity, summary, method, endpoint, model string, started time.Time, outcome string, status int, errText string, urls []string, requestCapture auditRequestCapture) {
+func (a *App) logCall(ctx context.Context, identity service.Identity, summary, method, endpoint, model string, started time.Time, outcome string, status int, errText string, urls []string, requestCapture auditRequestCapture, errs ...error) {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if status <= 0 {
 		status = http.StatusOK
@@ -1534,6 +1542,10 @@ func (a *App) logCall(ctx context.Context, identity service.Identity, summary, m
 		"outcome":        outcome,
 		"operation_type": operationTypeForMethod(method),
 		"log_level":      logLevelForStatus(status),
+		"event_kind":     service.EventKindBusiness,
+	}
+	if requestID := requestIDFromContext(ctx); requestID != "" {
+		detail["request_id"] = requestID
 	}
 	addIdentityLogDetail(detail, identity)
 	if name := identityDisplayName(identity); name != "" {
@@ -1565,6 +1577,20 @@ func (a *App) logCall(ctx context.Context, identity service.Identity, summary, m
 	if len(urls) > 0 {
 		detail["urls"] = dedupe(urls)
 	}
+	// 失败时带上上游阶段与原始 cause，否则统一文案无法定位哪一步失败。
+	if outcome == "failed" {
+		for _, err := range errs {
+			diagnostic := service.DiagnosticFields{Outcome: "failed", Severity: logLevelForStatus(status)}
+			if err != nil {
+				diagnostic.Stage = backend.UpstreamStageOf(err)
+				diagnostic.UpstreamStage = diagnostic.Stage
+				diagnostic.ErrorCause = service.UpstreamCauseText(err)
+				diagnostic.EventKind = service.EventKindUpstream
+			}
+			detail = service.NormalizeDiagnosticDetail(detail, diagnostic)
+			break
+		}
+	}
 	addAuditRequestDetail(detail, requestCapture)
 	suffix := "调用完成"
 	runtimeMessage := "api call completed"
@@ -1576,6 +1602,12 @@ func (a *App) logCall(ctx context.Context, identity service.Identity, summary, m
 		attrs := []any{"summary", summary, "method", method, "endpoint", endpoint, "model", model, "status", status, "outcome", outcome, "duration_ms", detail["duration_ms"]}
 		if errText != "" {
 			attrs = append(attrs, "error", errText)
+		}
+		if stage := util.Clean(detail["stage"]); stage != "" {
+			attrs = append(attrs, "stage", stage)
+		}
+		if cause := util.Clean(detail["error_cause"]); cause != "" {
+			attrs = append(attrs, "cause", cause)
 		}
 		if status >= http.StatusInternalServerError {
 			a.logger.Error(runtimeMessage, attrs...)
@@ -1975,12 +2007,12 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	urls := collectURLs(result)
 	a.recordGeneratedImagesForPayload(identity, urls, util.Clean(payload["visibility"]), payload)
 	if err != nil {
-		a.logCall(ctx, identity, summary, http.MethodPost, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture)
+		a.logCall(ctx, identity, summary, http.MethodPost, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls, requestCapture, err)
 		return result, err
 	}
 	if len(util.AsMapSlice(result["data"])) == 0 {
 		message := firstNonEmpty(util.Clean(result["message"]), "image task returned no image data")
-		a.logCall(ctx, identity, summary, http.MethodPost, endpoint, model, start, "failed", http.StatusBadGateway, message, urls, requestCapture)
+		a.logCall(ctx, identity, summary, http.MethodPost, endpoint, model, start, "failed", http.StatusBadGateway, message, urls, requestCapture, &backend.UpstreamError{Context: "image_result", Message: message})
 		return result, nil
 	}
 	a.logCall(ctx, identity, summary, http.MethodPost, endpoint, model, start, "success", http.StatusOK, "", urls, requestCapture)
@@ -2009,13 +2041,13 @@ func (a *App) runLoggedChatTask(ctx context.Context, identity service.Identity, 
 		err = errors.New("chat task streaming is not supported")
 	}
 	if err != nil {
-		a.logCall(ctx, identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture)
+		a.logCall(ctx, identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil, requestCapture, err)
 		return result, err
 	}
 	text := chatCompletionResultText(result)
 	if text == "" {
 		err = errors.New("模型没有返回文本内容")
-		a.logCall(ctx, identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", http.StatusBadGateway, err.Error(), nil, requestCapture)
+		a.logCall(ctx, identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "failed", http.StatusBadGateway, err.Error(), nil, requestCapture, err)
 		return result, err
 	}
 	a.logCall(ctx, identity, "文本生成", http.MethodPost, "/api/creation-tasks/chat-completions", model, start, "success", http.StatusOK, "", nil, requestCapture)

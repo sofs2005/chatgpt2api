@@ -410,6 +410,10 @@ func isTransientImageStreamErrorMessage(message string) bool {
 	if lower == "" {
 		return false
 	}
+	// 代理端口拒绝连接属于配置错误，重试不会自愈，因此不算瞬时故障。
+	if util.ClassifyUpstreamConnectionError(lower) == util.UpstreamConnectionProxyUnreachable {
+		return false
+	}
 	if strings.Contains(lower, strings.ToLower(util.UpstreamConnectionFailureMessage)) {
 		return true
 	}

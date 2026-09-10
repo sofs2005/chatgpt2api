@@ -953,6 +953,48 @@ func TestRunSingleImageOutputRetriesTLSHandshakeWithBackoff(t *testing.T) {
 	}
 }
 
+// 代理端口拒绝连接是配置错误，不是网络抖动：必须立即失败，不能白白重试 3 次。
+func TestRunSingleImageOutputDoesNotRetryProxyUnreachable(t *testing.T) {
+	var mu sync.Mutex
+	var sleeps []time.Duration
+	attempts := 0
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "test-token", nil },
+		ImageClientFactory: func(string) *backend.Client { return nil },
+	}
+	engine.imageRetrySleep = func(d time.Duration) {
+		mu.Lock()
+		sleeps = append(sleeps, d)
+		mu.Unlock()
+	}
+	engine.StreamImageOutputsFunc = func(ctx context.Context, client *backend.Client, request ConversationRequest, index, total int) (<-chan ImageOutput, <-chan error) {
+		out := make(chan ImageOutput, 1)
+		errCh := make(chan error, 1)
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		close(out)
+		errCh <- fmt.Errorf("bootstrap failed: socks connect tcp 10.6.6.90:1070->chatgpt.com:443: dial tcp 10.6.6.90:1070: connect: connection refused; " +
+			"surf: HTTP/2 request failed: socks connect tcp 10.6.6.90:1070->chatgpt.com:443: connect: connection refused")
+		close(errCh)
+		return out, errCh
+	}
+
+	outputs, errCh := engine.StreamImageOutputsWithPool(context.Background(), ConversationRequest{Prompt: "draw", Model: "gpt-image-2", N: 1})
+	if _, err := engine.CollectImageOutputs(outputs, errCh); err == nil {
+		t.Fatal("CollectImageOutputs() expected failure for unreachable proxy")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 {
+		t.Fatalf("upstream attempts = %d, want 1 (no retry for connection refused)", attempts)
+	}
+	if len(sleeps) != 0 {
+		t.Fatalf("backoff sleeps = %v, want none for connection refused", sleeps)
+	}
+}
+
 func TestImageConversationFallbackReferenceUsedOnlyForNewUpstreamSession(t *testing.T) {
 	fallback := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("fallback"))
 	sessions := service.NewImageConversationSessionService(filepath.Join(t.TempDir(), "sessions.json"))

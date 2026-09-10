@@ -685,12 +685,68 @@ func normalizeDefaultLogView(value any) string {
 	}
 }
 
+// normalizeUpdateRepo 把用户配置的仓库地址统一成 owner/repo。
+// 环境变量常被写成完整的 GitHub URL（与 README/发布页一致），而它会被 Get()
+// 原样回显、再被设置页原样回传，因此这里必须能消化 URL 形式，
+// 否则任何一次保存都会在 validateUpdateRepo 上失败。
 func normalizeUpdateRepo(value any) string {
 	repo := strings.Trim(strings.TrimSpace(fmt.Sprint(value)), "/")
 	if repo == "" {
 		return "ZyphrZero/chatgpt2api"
 	}
-	return repo
+	return repoFromGitHubURL(repo)
+}
+
+// repoFromGitHubURL 从常见 GitHub 地址形式中提取 owner/repo；
+// 已经是 owner/repo 的输入原样返回。
+func repoFromGitHubURL(value string) string {
+	candidate := strings.TrimSpace(value)
+	if candidate == "" {
+		return ""
+	}
+	lower := strings.ToLower(candidate)
+	host := ""
+	path := ""
+	switch {
+	case strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "https://"):
+		parsed, err := url.Parse(candidate)
+		if err != nil || parsed.Host == "" {
+			return candidate
+		}
+		host = strings.ToLower(parsed.Hostname())
+		path = parsed.Path
+	case strings.HasPrefix(lower, "git@"):
+		// git@github.com:owner/repo.git
+		at := strings.Index(candidate, "@")
+		colon := strings.Index(candidate, ":")
+		if colon <= at {
+			return candidate
+		}
+		host = strings.ToLower(candidate[at+1 : colon])
+		path = candidate[colon+1:]
+	case strings.HasPrefix(lower, "ssh://"):
+		parsed, err := url.Parse(candidate)
+		if err != nil || parsed.Host == "" {
+			return candidate
+		}
+		host = strings.ToLower(parsed.Hostname())
+		path = parsed.Path
+	default:
+		return candidate
+	}
+	if host != "github.com" && host != "www.github.com" {
+		return candidate
+	}
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) < 2 {
+		return candidate
+	}
+	owner := strings.TrimSpace(segments[0])
+	name := strings.TrimSuffix(strings.TrimSpace(segments[1]), ".git")
+	if owner == "" || name == "" {
+		return candidate
+	}
+	return owner + "/" + name
 }
 
 func validateUpdateRepo(value string) error {

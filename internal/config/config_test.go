@@ -285,7 +285,7 @@ func TestStoreNormalizesImagePollSettleSettings(t *testing.T) {
 
 	got, err = store.Update(map[string]any{
 		"image_settle_enabled": "on",
-		"image_settle_secs":     "3.5",
+		"image_settle_secs":    "3.5",
 	})
 	if err != nil {
 		t.Fatalf("Update() string error = %v", err)
@@ -839,6 +839,66 @@ func TestStoreUpdateRejectsInvalidUpdateRepo(t *testing.T) {
 	}
 	if _, err := store.Update(map[string]any{"update_repo": "invalid"}); err == nil {
 		t.Fatal("Update() accepted invalid update_repo")
+	}
+}
+
+// GitHub URL 形式的环境变量会被 Get() 回显、再被设置页原样回传，
+// 因此必须能规范化成 owner/repo，否则任何一次保存都会被校验拦下。
+func TestNormalizeUpdateRepoAcceptsGitHubURLForms(t *testing.T) {
+	cases := map[string]string{
+		"ZyphrZero/chatgpt2api":                          "ZyphrZero/chatgpt2api",
+		"/ZyphrZero/chatgpt2api/":                        "ZyphrZero/chatgpt2api",
+		"https://github.com/ZyphrZero/chatgpt2api":       "ZyphrZero/chatgpt2api",
+		"https://github.com/ZyphrZero/chatgpt2api/":      "ZyphrZero/chatgpt2api",
+		"https://github.com/ZyphrZero/chatgpt2api.git":   "ZyphrZero/chatgpt2api",
+		"http://www.github.com/ZyphrZero/chatgpt2api":    "ZyphrZero/chatgpt2api",
+		"https://github.com/ZyphrZero/chatgpt2api/tree/": "ZyphrZero/chatgpt2api",
+		"git@github.com:ZyphrZero/chatgpt2api.git":       "ZyphrZero/chatgpt2api",
+		"ssh://git@github.com/ZyphrZero/chatgpt2api.git": "ZyphrZero/chatgpt2api",
+	}
+	for input, want := range cases {
+		if got := normalizeUpdateRepo(input); got != want {
+			t.Fatalf("normalizeUpdateRepo(%q) = %q, want %q", input, got, want)
+		}
+		if err := validateUpdateRepo(normalizeUpdateRepo(input)); err != nil {
+			t.Fatalf("normalizeUpdateRepo(%q) produced invalid repo: %v", input, err)
+		}
+	}
+	// 非 GitHub 主机与非法输入保持原样，交给 validateUpdateRepo 拒绝。
+	if got := normalizeUpdateRepo("https://gitlab.com/owner/repo"); got == "owner/repo" {
+		t.Fatalf("normalizeUpdateRepo() rewrote a non-GitHub URL to %q", got)
+	}
+	if err := validateUpdateRepo(normalizeUpdateRepo("invalid")); err == nil {
+		t.Fatal("validateUpdateRepo() accepted invalid input")
+	}
+}
+
+// 只改代理等无关设置时，环境变量里的 update_repo 不应阻断保存。
+func TestStoreUpdateAcceptsEchoedGitHubURLUpdateRepo(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	t.Setenv("CHATGPT2API_UPDATE_REPO", "https://github.com/ZyphrZero/chatgpt2api")
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	// 设置页会把 Get() 回显的值原样回传。
+	got, err := store.Update(map[string]any{
+		"proxy":       "socks5://10.6.6.90:1070",
+		"update_repo": store.Get()["update_repo"],
+	})
+	if err != nil {
+		t.Fatalf("Update(proxy + echoed update_repo) error = %v", err)
+	}
+	if got["update_repo"] != "ZyphrZero/chatgpt2api" {
+		t.Fatalf("Update() update_repo = %#v, want normalized owner/repo", got["update_repo"])
+	}
+	if store.UpdateRepo() != "ZyphrZero/chatgpt2api" {
+		t.Fatalf("UpdateRepo() = %q, want ZyphrZero/chatgpt2api", store.UpdateRepo())
+	}
+	if store.Proxy() != "socks5://10.6.6.90:1070" {
+		t.Fatalf("Proxy() = %q, want saved proxy", store.Proxy())
 	}
 }
 

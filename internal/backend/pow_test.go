@@ -3,6 +3,7 @@ package backend
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -40,6 +41,63 @@ func TestBuildPOWConfigMatchesLatestWebFormat(t *testing.T) {
 	res, ok := config[0].(int)
 	if !ok || !validRes[res] {
 		t.Fatalf("config[0] resolution sum = %v, not a real resolution sum", config[0])
+	}
+}
+
+// 验证 PoW 载荷内部自洽，且与请求其余部分使用同一身份。
+//
+// 同一份浏览器身份在请求体、请求头与 PoW 探针里必须自报一致的语言与时区。
+// 此前载荷固定写 en-US / EST，而请求体用的是 Asia/Shanghai（-480），
+// 头里是 OAI-Language: zh-CN，三者互相矛盾。
+func TestBuildPOWConfigIdentityIsSelfConsistent(t *testing.T) {
+	config := buildPOWConfig("UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
+
+	// index 7/8 是 navigator.language 与 languages，必须与请求身份一致。
+	if got := config[7]; got != "zh-CN" {
+		t.Fatalf("config[7] language = %v, want zh-CN", got)
+	}
+	if got := config[8]; got != "zh-CN,zh,en" {
+		t.Fatalf("config[8] languages = %v, want zh-CN,zh,en", got)
+	}
+
+	// index 1 是本地时间字符串，时区必须与请求体的 Asia/Shanghai 一致。
+	localTime, _ := config[1].(string)
+	if !strings.Contains(localTime, "GMT+0800") {
+		t.Fatalf("config[1] local time = %q, want GMT+0800 offset", localTime)
+	}
+	if strings.Contains(localTime, "Eastern Standard Time") {
+		t.Fatalf("config[1] local time = %q, still reports the old EST zone", localTime)
+	}
+
+	// index 13 是 performance.now()，应为页面存活毫秒数（量级远小于 Unix 毫秒）。
+	uptime, ok := config[13].(float64)
+	if !ok {
+		t.Fatalf("config[13] = %v, want float64", config[13])
+	}
+	if uptime > 1e10 {
+		t.Fatalf("config[13] = %v, looks like absolute Unix millis rather than page uptime", uptime)
+	}
+
+	// index 17 是绝对秒级时间戳，必须落在合理区间。
+	stamp, ok := config[17].(float64)
+	if !ok {
+		t.Fatalf("config[17] = %v, want float64", config[17])
+	}
+	if stamp < 1e9 {
+		t.Fatalf("config[17] = %v, want a real unix-seconds timestamp", stamp)
+	}
+
+	// navigator 探针中的 hardwareConcurrency 必须与核数字段一致。
+	core, ok := config[16].(int)
+	if !ok {
+		t.Fatalf("config[16] = %v, want int core count", config[16])
+	}
+	probe, _ := config[10].(string)
+	if strings.HasPrefix(probe, "hardwareConcurrency−") {
+		want := fmt.Sprintf("hardwareConcurrency−%d", core)
+		if probe != want {
+			t.Fatalf("config[10] = %q, want %q to match config[16]", probe, want)
+		}
 	}
 }
 

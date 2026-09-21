@@ -1291,7 +1291,7 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updates := map[string]any{}
-		for _, key := range []string{"type", "status", "quota"} {
+		for _, key := range []string{"type", "status", "quota", "proxy"} {
 			if value, ok := body[key]; ok && value != nil {
 				updates[key] = value
 			}

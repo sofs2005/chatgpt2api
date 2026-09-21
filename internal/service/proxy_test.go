@@ -14,9 +14,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"chatgpt2api/internal/util"
 )
 
 func TestSOCKS5AddressModes(t *testing.T) {
@@ -161,6 +165,107 @@ func TestProxyTestUsesBrowserFingerprintHeaders(t *testing.T) {
 	if seenSecCHUA == "" {
 		t.Fatal("Sec-Ch-Ua should be sent to the upstream request")
 	}
+}
+
+// 出站浏览器的身份必须自洽：UA、Sec-Ch-Ua、Sec-Ch-Ua-Full-Version 的主版本
+// 必须一致，且 Accept-Language 必须是我们统一设置的值。
+//
+// 这是针对真实出站路径的测试。此前的测试只断言头「非空」（TestProxyTestUsesBrowserFingerprintHeaders）
+// 或只断言 headers() 返回的 map 内容，都绕过了 surf impersonate 中间件的覆盖，
+// 因此「Sec-Ch-Ua 说 145、Sec-Ch-Ua-Full-Version 说 148」这类矛盾长期未被发现。
+//
+// 这里使用明文 HTTP 直连 httptest：被测机制是 surf 的 impersonate 请求中间件
+// （在 TransportAdapter.RoundTrip 中先于传输层执行），与协议无关，
+// 因此无需 TLS 即可完整复现头覆盖行为，也避免了 SetFallbackRoots 的进程级一次性限制。
+func TestBrowserHTTPClientEmitsSelfConsistentIdentityHeaders(t *testing.T) {
+	var seenMu sync.Mutex
+	var seen http.Header
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenMu.Lock()
+		seen = r.Header.Clone()
+		seenMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	// 逐个校验池中每种指纹：出站身份都必须自洽。
+	for family, versions := range BrowserFamilyVersionPools() {
+		for _, version := range versions {
+			t.Run(family+version, func(t *testing.T) {
+				fp := BrowserFingerprintFromFamilyVersion(family, version)
+				headers := BrowserHeadersForFingerprint(fp)
+
+				client := browserHTTPClientForProfile("", util.Clean(fp["impersonate"]), 5*time.Second)
+				req, err := http.NewRequest(http.MethodGet, target.URL, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for key, value := range headers {
+					req.Header.Set(key, value)
+				}
+				req.Header.Set("Accept-Language", BrowserAcceptLanguage)
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatalf("request failed: %v", err)
+				}
+				defer resp.Body.Close()
+				_, _ = io.Copy(io.Discard, resp.Body)
+
+				seenMu.Lock()
+				got := seen.Clone()
+				seenMu.Unlock()
+
+				userAgent := got.Get("User-Agent")
+				secCHUA := got.Get("Sec-Ch-Ua")
+				fullVersion := strings.Trim(got.Get("Sec-Ch-Ua-Full-Version"), `"`)
+				if userAgent == "" || secCHUA == "" || fullVersion == "" {
+					t.Fatalf("incomplete identity headers: UA=%q CH=%q FullVersion=%q", userAgent, secCHUA, fullVersion)
+				}
+
+				wantMajor := browserMajorVersion(version)
+				uaMajor := identityMajorFromUserAgent(userAgent)
+				// Firefox 的 Sec-Ch-Ua 不含 Chromium 品牌，按族选择对应品牌。
+				brand := "Chromium"
+				if family == "firefox" {
+					brand = "Firefox"
+				}
+				chMajor := identityMajorFromClientHint(secCHUA, brand)
+				fullMajor := browserMajorVersion(fullVersion)
+
+				if uaMajor != wantMajor {
+					t.Fatalf("User-Agent major = %q, want %q (UA=%q)", uaMajor, wantMajor, userAgent)
+				}
+				if chMajor != wantMajor {
+					t.Fatalf("Sec-Ch-Ua major = %q, want %q (CH=%q)", chMajor, wantMajor, secCHUA)
+				}
+				if fullMajor != wantMajor {
+					t.Fatalf("Sec-Ch-Ua-Full-Version major = %q, want %q (FullVersion=%q)", fullMajor, wantMajor, fullVersion)
+				}
+				if gotLanguage := got.Get("Accept-Language"); gotLanguage != BrowserAcceptLanguage {
+					t.Fatalf("Accept-Language = %q, want %q", gotLanguage, BrowserAcceptLanguage)
+				}
+			})
+		}
+	}
+}
+
+// identityMajorFromUserAgent 取 UA 中的浏览器主版本。
+// Chromium 系优先看 Chrome/，Firefox 看 Firefox/。
+func identityMajorFromUserAgent(userAgent string) string {
+	if version := browserRegexpVersion(userAgent, `Chrome/([0-9]+(?:\.[0-9]+){0,3})`); version != "" {
+		return browserMajorVersion(version)
+	}
+	if version := browserRegexpVersion(userAgent, `Firefox/([0-9]+(?:\.[0-9]+){0,3})`); version != "" {
+		return browserMajorVersion(version)
+	}
+	return ""
+}
+
+// identityMajorFromClientHint 从 Sec-Ch-Ua 中取指定品牌的版本。
+func identityMajorFromClientHint(secCHUA, brand string) string {
+	pattern := `"` + regexp.QuoteMeta(brand) + `";v="([0-9]+)`
+	return browserRegexpVersion(secCHUA, pattern)
 }
 
 func mustChatGPTCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {

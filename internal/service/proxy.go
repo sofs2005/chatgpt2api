@@ -23,6 +23,17 @@ type ProxyConfig interface {
 	Proxy() string
 }
 
+// BrowserAcceptLanguage 是出站请求统一的 Accept-Language。
+//
+// 真实浏览器的 Accept-Language 来自浏览器语言设置，对同一份浏览器身份的所有请求
+// 取值相同。它必须与 OAI-Language、PoW 配置里的 navigator.language 保持一致，
+// 否则同一份身份会自报不同语言，是风控可识别的矛盾信号。
+//
+// surf 的 Impersonate() 会把 Accept-Language 硬编码成 en-US，且它的请求中间件
+// 优先级为 0，晚于调用方设置的头。因此这里在更高优先级上再写回统一值，
+// 保证「我们自己设的语言」最终生效。
+const BrowserAcceptLanguage = "zh-CN,zh;q=0.9,en;q=0.8"
+
 type ProxyService struct {
 	config ProxyConfig
 }
@@ -43,8 +54,57 @@ func (s *ProxyService) BrowserHTTPClient(timeout time.Duration) *http.Client {
 	return browserHTTPClient(s.config.Proxy(), timeout)
 }
 
-func (s *ProxyService) BrowserHTTPClientWithProfile(profile string, timeout time.Duration) *http.Client {
-	return browserHTTPClientForProfile(s.config.Proxy(), profile, timeout)
+// AccountProxy 返回账号绑定的代理；未绑定时返回空串，表示使用全局代理。
+func AccountProxy(account map[string]any) string {
+	if account == nil {
+		return ""
+	}
+	return util.Clean(account["proxy"])
+}
+
+// BrowserHTTPClientForProxy 用显式代理构建浏览器指纹 client。
+// proxy 为空（账号未绑定）时回落到全局代理，保持既有部署行为不变。
+func (s *ProxyService) BrowserHTTPClientForProxy(proxy, profile string, timeout time.Duration) *http.Client {
+	proxy = strings.TrimSpace(proxy)
+	if proxy == "" && s != nil && s.config != nil {
+		proxy = s.config.Proxy()
+	}
+	return browserHTTPClientForProfile(proxy, profile, timeout)
+}
+
+// BrowserHTTPClientForAccount 为账号构建浏览器指纹 client。
+//
+// 账号绑定了自己的代理时必须优先使用它：cf_clearance 与签发时的出口 IP 强绑定，
+// 出口 IP 漂移会让凭证失效并反向触发 Cloudflare 风控。绑定代理让出口 IP 稳定，
+// 是复用 cf_clearance 的前提。
+//
+// 账号的**所有**出站请求都必须走同一个 IP：session 刷新携带的正是该账号的
+// cf_clearance，若它从全局代理发出，凭证会因 IP 不符当场作废。
+func (s *ProxyService) BrowserHTTPClientForAccount(account map[string]any, profile string, timeout time.Duration) *http.Client {
+	return s.BrowserHTTPClientForProxy(AccountProxy(account), profile, timeout)
+}
+
+// accountProxyKey 是请求上下文里承载账号级代理的键。
+//
+// session 刷新的 httpDo 只能看到 *http.Request，拿不到 access token，
+// 因此账号绑定的代理随请求一起传递，由发请求的一方从上下文取出。
+type accountProxyKey struct{}
+
+// WithAccountProxy 把账号级代理绑定到请求上下文；代理为空时原样返回。
+func WithAccountProxy(ctx context.Context, proxy string) context.Context {
+	if ctx == nil || strings.TrimSpace(proxy) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, accountProxyKey{}, strings.TrimSpace(proxy))
+}
+
+// AccountProxyFromContext 取出请求上下文里的账号级代理；未绑定时返回空串。
+func AccountProxyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(accountProxyKey{}).(string)
+	return value
 }
 
 func (s *ProxyService) Test(candidate string, timeout time.Duration) map[string]any {
@@ -97,6 +157,14 @@ func browserHTTPClientForProfile(proxy, profile string, timeout time.Duration) *
 	builder = applyBrowserProfile(builder, profile).
 		Session().
 		Timeout(timeout)
+
+	// Impersonate() 的请求中间件优先级为 0，会把 Accept-Language 固定成 en-US。
+	// 用优先级 1 的中间件在其之后写回统一语言，使出站语言与 OAI-Language、
+	// PoW 的 navigator.language 保持一致，避免同一身份自报不同语言。
+	builder = builder.With(func(req *surf.Request) error {
+		req.GetRequest().Header.Set("Accept-Language", BrowserAcceptLanguage)
+		return nil
+	}, 1)
 
 	if proxy = strings.TrimSpace(proxy); proxy != "" {
 		builder = builder.Proxy(g.String(proxy))

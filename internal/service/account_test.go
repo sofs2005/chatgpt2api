@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -20,6 +21,7 @@ import (
 type testAccountConfig struct {
 	textMode  string
 	imageMode string
+	proxy     string
 }
 
 func (testAccountConfig) AutoRemoveInvalidAccounts() bool     { return false }
@@ -36,7 +38,61 @@ func (c testAccountConfig) ImageAccountScheduleMode() string {
 	}
 	return c.imageMode
 }
-func (testAccountConfig) Proxy() string { return "" }
+func (c testAccountConfig) Proxy() string { return c.proxy }
+
+func TestFetchRemoteInfoUsesAccountBoundProxy(t *testing.T) {
+	// 账号绑定的代理必须优先于全局代理：cf_clearance 与签发时的出口 IP 绑定，
+	// 若账号请求走全局代理，凭证会因 IP 不符当场作废。
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{proxy: "http://global-proxy.example:8080"})
+	accounts.remoteBaseURL = unusedLocalBaseURL(t)
+	var gotProxy string
+	accounts.browserHTTPClient = func(proxy, _ string, _ time.Duration) *http.Client {
+		gotProxy = proxy
+		return &http.Client{Timeout: time.Second}
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"proxy": "http://account-proxy.example:3128"})
+
+	if _, err := accounts.FetchRemoteInfo(context.Background(), "token-1"); err == nil {
+		t.Fatal("FetchRemoteInfo() error = nil, want the stub client to fail")
+	}
+	if gotProxy != "http://account-proxy.example:3128" {
+		t.Fatalf("account proxy = %q, want the account-bound proxy", gotProxy)
+	}
+}
+
+func TestFetchRemoteInfoFallsBackToGlobalProxy(t *testing.T) {
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{proxy: "http://global-proxy.example:8080"})
+	accounts.remoteBaseURL = unusedLocalBaseURL(t)
+	var gotProxy string
+	accounts.browserHTTPClient = func(proxy, _ string, _ time.Duration) *http.Client {
+		gotProxy = proxy
+		return &http.Client{Timeout: time.Second}
+	}
+	accounts.AddAccounts([]string{"token-1"})
+
+	if _, err := accounts.FetchRemoteInfo(context.Background(), "token-1"); err == nil {
+		t.Fatal("FetchRemoteInfo() error = nil, want the stub client to fail")
+	}
+	// 未绑定账号级代理时保持既有部署行为：留空让 ProxyService 回落到全局代理。
+	if gotProxy != "" {
+		t.Fatalf("account proxy = %q, want empty so the global proxy applies", gotProxy)
+	}
+}
+
+// unusedLocalBaseURL 返回一个本机未监听的地址。
+// 上例只关心「传给 client 构造器的代理是谁」，用不到真实上游；
+// 指向本地可避免测试依赖外网。
+func unusedLocalBaseURL(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve local port: %v", err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+	return "http://" + address
+}
 
 func TestFetchRemoteInfoBootstrapsBeforeAccountRefresh(t *testing.T) {
 	var mu sync.Mutex
@@ -85,7 +141,7 @@ func TestFetchRemoteInfoBootstrapsBeforeAccountRefresh(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -169,7 +225,7 @@ func TestRunUpstreamAccountActionsCallsConfirmedEndpoints(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -235,7 +291,7 @@ func TestFetchRemoteInfoSummarizesForbiddenChallenge(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -273,7 +329,7 @@ func TestRefreshAccountsReturnsEmptyErrorsArray(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -446,7 +502,7 @@ func TestRefreshAccountsUsesStoredCookiesForQuotaRefresh(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	now := time.Now().UTC()
@@ -477,6 +533,8 @@ func TestRefreshAccountsUsesStoredCookiesForQuotaRefresh(t *testing.T) {
 	}
 }
 
+// 未绑定出口代理时，超出挑战凭证窗口的 cf_clearance 不再发送；
+// oai-did 属于长期身份 cookie，不受该窗口影响。
 func TestRefreshAccountsSkipsStaleCloudflareCookies(t *testing.T) {
 	var bootstrapCookie string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -498,7 +556,7 @@ func TestRefreshAccountsSkipsStaleCloudflareCookies(t *testing.T) {
 	now := time.Now().UTC()
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -508,7 +566,7 @@ func TestRefreshAccountsSkipsStaleCloudflareCookies(t *testing.T) {
 			"oai-did":      "did-cookie",
 		},
 		"session_cookie_updated_at": map[string]string{
-			"cf_clearance": now.Add(-31 * time.Minute).Format(time.RFC3339),
+			"cf_clearance": now.Add(-3 * time.Hour).Format(time.RFC3339),
 		},
 	})
 
@@ -543,7 +601,7 @@ func TestRefreshAccountStateMarksUnauthorizedInitAsInvalid(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -885,7 +943,7 @@ func TestRefreshAccountsUsesStoredBrowserCookiesForSessionRefresh(t *testing.T) 
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
@@ -934,7 +992,7 @@ func TestRefreshAccountsMarksRateLimitedResponse(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -984,7 +1042,7 @@ func TestGetAvailableAccessTokenReservesKnownImageQuota(t *testing.T) {
 	}})
 	defer server.Close()
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -1026,7 +1084,7 @@ func TestGetAvailableAccessTokenLimitsUnknownImageQuotaToOneInFlight(t *testing.
 	}, nil)
 	defer server.Close()
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -1064,7 +1122,7 @@ func TestGetAvailableAccessTokenAllowsFreeUnknownImageQuota(t *testing.T) {
 	}, nil)
 	defer server.Close()
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"free-token"})
@@ -1099,7 +1157,7 @@ func TestGetAvailableAccessTokenReportsRefreshFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -1116,7 +1174,7 @@ func TestGetAvailableAccessTokenReportsRefreshFailure(t *testing.T) {
 
 func TestGetAvailableAccessTokenUsesCachedAccountOnConnectionRefreshFailure(t *testing.T) {
 	accounts := newTestAccountService(t)
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return &http.Client{
 			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return nil, errors.New(`Get "https://chatgpt.com/": surf: HTTP/2 request failed: uTLS.HandshakeContext() error: EOF; HTTP/1.1 fallback failed: uTLS.HandshakeContext() error: EOF`)
@@ -1302,7 +1360,7 @@ func TestStartLimitedWatcherSkipsAccountBeforeRestoreTime(t *testing.T) {
 
 	accounts := newTestAccountService(t)
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
 		return server.Client()
 	}
 	accounts.AddAccounts([]string{"token-1"})
@@ -1384,7 +1442,7 @@ func TestAccountLeaseBusyTokenBlocksImageWhileTextInFlight(t *testing.T) {
 	}})
 	defer server.Close()
 	accounts.remoteBaseURL = server.URL
-	accounts.browserHTTPClient = func(string, time.Duration) *http.Client { return server.Client() }
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client { return server.Client() }
 	accounts.AddAccounts([]string{"shared-token"})
 	accounts.UpdateAccount("shared-token", map[string]any{"status": "正常", "quota": 5, "type": "Plus"})
 
@@ -2175,13 +2233,18 @@ func TestGetAccountGeneratesAndPersistsFingerprintForDisabledAccount(t *testing.
 	}
 }
 
-func TestGetAccountKeepsExistingFingerprintStable(t *testing.T) {
+// 池外的浏览器身份（此处 edge/143，surf 无法兑现 Edge TLS）迁移入池，
+// 但账号的稳定身份 oai-device-id / oai-session-id 必须原样保留，
+// 否则会与注册时写入的 oai-did cookie 脱节，造成新的身份撕裂。
+func TestGetAccountMigratesOutOfPoolFingerprintAndKeepsIdentity(t *testing.T) {
 	backend := &accountStorageSpy{accounts: []map[string]any{{
 		"access_token": "token-1",
 		"type":         "Plus",
 		"status":       "正常",
 		"fp": map[string]any{
 			"version":        1,
+			"browser-family": "edge",
+			"browser-version": "143",
 			"impersonate":    "edge101",
 			"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
 			"oai-device-id":  "device-1",
@@ -2200,14 +2263,22 @@ func TestGetAccountKeepsExistingFingerprintStable(t *testing.T) {
 	if secondFP["oai-device-id"] != "device-1" || secondFP["oai-session-id"] != "session-1" {
 		t.Fatalf("second fp changed device/session: %#v", secondFP)
 	}
-	if util.Clean(firstFP["browser-family"]) != "edge" || util.Clean(firstFP["browser-version"]) != "143" {
-		t.Fatalf("first fp family/version = %#v, want edge/143", firstFP)
+	// edge 在 surf 中无可兑现的 TLS 指纹，迁移后落到 chrome 且必须在池内。
+	if util.Clean(firstFP["browser-family"]) != "chrome" || util.Clean(firstFP["browser-version"]) != "145" {
+		t.Fatalf("first fp family/version = %#v, want chrome/145", firstFP)
 	}
-	if util.Clean(secondFP["browser-family"]) != "edge" || util.Clean(secondFP["browser-version"]) != "143" {
-		t.Fatalf("second fp family/version = %#v, want edge/143", secondFP)
+	if !browserFamilyVersionInPool(util.Clean(firstFP["browser-family"]), util.Clean(firstFP["browser-version"])) {
+		t.Fatalf("first fp family/version = %#v, want an in-pool version", firstFP)
 	}
-	if backend.saveCount != 1 {
-		t.Fatalf("saveCount = %d, want 1 to persist filled client hints only once", backend.saveCount)
+	// UA 与 Client-Hints 必须与迁移后的版本自洽。
+	if got := util.Clean(firstFP["user-agent"]); !strings.Contains(got, "Chrome/145.0.0.0") {
+		t.Fatalf("user-agent = %q, want Chrome/145.0.0.0", got)
+	}
+	if got := util.Clean(firstFP["sec-ch-ua-full-version"]); got != `"145.0.0.0"` {
+		t.Fatalf("sec-ch-ua-full-version = %q, want \"145.0.0.0\"", got)
+	}
+	if util.Clean(secondFP["browser-family"]) != util.Clean(firstFP["browser-family"]) || util.Clean(secondFP["browser-version"]) != util.Clean(firstFP["browser-version"]) {
+		t.Fatalf("second fp family/version = %#v, want stable %#v", secondFP, firstFP)
 	}
 }
 
@@ -2547,15 +2618,35 @@ func TestBrowserHeadersForFingerprintAcceptsStringMap(t *testing.T) {
 	}
 }
 
+// 指纹池只包含 TLS 指纹层（surf）能真正兑现的浏览器与版本。
+// 池中出现 surf 无法兑现的族/版本，会让 UA 与 Client-Hints 版本号互相矛盾。
 func TestBrowserFamilyVersionPoolsContainVerifiedVersions(t *testing.T) {
 	want := map[string][]string{
-		"chrome":  []string{"148", "147", "146"},
-		"edge":    []string{"148", "147", "146"},
-		"firefox": []string{"151", "150", "149"},
-		"safari":  []string{"26.5", "26.4", "26.3"},
+		"chrome":  []string{"145"},
+		"firefox": []string{"148"},
 	}
 	if got := BrowserFamilyVersionPools(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("BrowserFamilyVersionPools() = %#v, want %#v", got, want)
+	}
+}
+
+// 池中每个族/版本都必须能映射到 surf 内置的 UA 主版本，
+// 否则出站会出现「Sec-Ch-Ua 与 UA 版本不一致」的矛盾信号。
+func TestBrowserFamilyVersionPoolsMatchSurfImpersonation(t *testing.T) {
+	surfUserAgentMajor := map[string]string{
+		"chrome":  "145",
+		"firefox": "148",
+	}
+	for family, versions := range BrowserFamilyVersionPools() {
+		wantMajor, ok := surfUserAgentMajor[family]
+		if !ok {
+			t.Fatalf("family %q has no surf impersonation backing", family)
+		}
+		for _, version := range versions {
+			if version != wantMajor {
+				t.Fatalf("family %q version %q does not match surf UA major %q", family, version, wantMajor)
+			}
+		}
 	}
 }
 
@@ -2571,10 +2662,8 @@ func TestBrowserFingerprintFromFamilyVersionBuildsExpectedFamilies(t *testing.T)
 		wantSecCHUAContains string
 		wantFullVersion     string
 	}{
-		{name: "chrome148", family: "chrome", version: "148", wantFamily: "chrome", wantVersion: "148", wantImpersonate: "chrome148", wantUserAgent: "Chrome/148.0.0.0", wantSecCHUAContains: `Google Chrome";v="148`, wantFullVersion: `"148.0.0.0"`},
-		{name: "edge148", family: "edge", version: "148", wantFamily: "edge", wantVersion: "148", wantImpersonate: "edge148", wantUserAgent: "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0", wantSecCHUAContains: `Microsoft Edge";v="148`, wantFullVersion: `"148.0.0.0"`},
-		{name: "firefox151", family: "firefox", version: "151", wantFamily: "firefox", wantVersion: "151", wantImpersonate: "firefox151", wantUserAgent: "Firefox/151.0", wantSecCHUAContains: `Firefox";v="151`, wantFullVersion: `"151.0.0.0"`},
-		{name: "safari265", family: "safari", version: "26.5", wantFamily: "safari", wantVersion: "26.5", wantImpersonate: "safari26.5", wantUserAgent: "Version/26.5 Safari/605.1.15", wantSecCHUAContains: `Safari";v="26`, wantFullVersion: `"26.5.0.0"`},
+		{name: "chrome145", family: "chrome", version: "145", wantFamily: "chrome", wantVersion: "145", wantImpersonate: "chrome145", wantUserAgent: "Chrome/145.0.0.0", wantSecCHUAContains: `Google Chrome";v="145`, wantFullVersion: `"145.0.0.0"`},
+		{name: "firefox148", family: "firefox", version: "148", wantFamily: "firefox", wantVersion: "148", wantImpersonate: "firefox148", wantUserAgent: "Firefox/148.0", wantSecCHUAContains: `Firefox";v="148`, wantFullVersion: `"148.0.0.0"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2602,6 +2691,22 @@ func TestBrowserFingerprintFromFamilyVersionBuildsExpectedFamilies(t *testing.T)
 			}
 			if util.Clean(fp["oai-device-id"]) == "" || util.Clean(fp["oai-session-id"]) == "" {
 				t.Fatalf("fingerprint missing generated ids: %#v", fp)
+			}
+		})
+	}
+}
+
+// 被移除的族（edge/safari）不再产生指纹，必须回落到默认 chrome145，
+// 而不是生成一套 surf 无法兑现、UA 与 TLS 相互矛盾的身份。
+func TestBrowserFingerprintFromFamilyVersionRejectsRemovedFamilies(t *testing.T) {
+	for _, family := range []string{"edge", "safari"} {
+		t.Run(family, func(t *testing.T) {
+			fp := BrowserFingerprintFromFamilyVersion(family, "148")
+			if got := util.Clean(fp["browser-family"]); got != "chrome" {
+				t.Fatalf("browser-family = %q, want chrome fallback", got)
+			}
+			if got := util.Clean(fp["impersonate"]); got != "chrome145" {
+				t.Fatalf("impersonate = %q, want chrome145 fallback", got)
 			}
 		})
 	}

@@ -48,6 +48,9 @@ type refreshResult struct {
 type SessionRefreshContext struct {
 	Cookies map[string]string
 	Headers map[string]string
+	// Proxy 是账号绑定的代理。刷新请求携带该账号的 cf_clearance，
+	// 而 cf_clearance 与签发时的出口 IP 强绑定，必须从同一个 IP 发出。
+	Proxy string
 }
 
 const (
@@ -142,7 +145,7 @@ func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string, r
 	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sessionEndpoint, nil)
+	req, err := http.NewRequestWithContext(WithAccountProxy(ctx, requestContext.Proxy), http.MethodGet, sessionEndpoint, nil)
 	if err != nil {
 		return refreshResult{err: fmt.Errorf("create request: %w", err)}
 	}

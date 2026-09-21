@@ -66,7 +66,7 @@ type AccountService struct {
 	busyTokenAliases                  map[string]string
 	busyTokenAliasRefs                map[string]int
 	remoteBaseURL                     string
-	browserHTTPClient                 func(profile string, timeout time.Duration) *http.Client
+	browserHTTPClient                 func(proxy, profile string, timeout time.Duration) *http.Client
 	textRequestCount                  map[string]int
 	freeTextCooldownUntil             map[string]time.Time
 	freeTextCooldownOverrideToken     string
@@ -86,11 +86,11 @@ const (
 )
 
 func NewAccountService(backend storage.Backend, config AccountConfig, proxy *ProxyService, logs *LogService) *AccountService {
-	browserHTTPClient := func(profile string, timeout time.Duration) *http.Client {
+	browserHTTPClient := func(accountProxy, profile string, timeout time.Duration) *http.Client {
 		if proxy == nil {
 			return &http.Client{Timeout: timeout}
 		}
-		return proxy.BrowserHTTPClientWithProfile(profile, timeout)
+		return proxy.BrowserHTTPClientForProxy(accountProxy, profile, timeout)
 	}
 	s := &AccountService{
 		storage:                   backend,
@@ -110,8 +110,11 @@ func NewAccountService(backend storage.Backend, config AccountConfig, proxy *Pro
 		random:                    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	// Initialize SessionRefresher with the uTLS client for /api/auth/session.
+	// 刷新请求必须走账号自己绑定的代理：它携带该账号的 cf_clearance，
+	// 而 cf_clearance 与签发时的出口 IP 强绑定，换一个 IP 发出会立刻作废。
+	// 代理经请求上下文传入，因为 httpDo 只能拿到 *http.Request。
 	s.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
-		client := s.browserHTTPClient(defaultRemoteProfile, refreshTimeout)
+		client := s.browserHTTPClient(AccountProxyFromContext(req.Context()), defaultRemoteProfile, refreshTimeout)
 		if client == nil {
 			client = &http.Client{Timeout: refreshTimeout}
 		}
@@ -208,6 +211,22 @@ func (s *AccountService) listRefreshableLimitedTokens(now time.Time) []string {
 }
 
 func (s *AccountService) AddAccounts(tokens []string) map[string]any {
+	return s.addAccounts(tokens, "")
+}
+
+// AddAccountsWithDeviceID 用于注册链路：新账号的浏览器指纹沿用注册时使用的设备身份。
+//
+// 注册流程用固定的 Chrome UA 与随机 deviceID 完成，并把 oai-did=<deviceID>
+// 写入了 auth 域 cookie。若入库时再随机一套浏览器族/版本与新的 device id，
+// 同一账号就会「cookie 指向设备 A、UA 与 OAI-Device-Id 指向设备 B」，
+// 构成 Cloudflare 与上游都能识别的身份撕裂。
+//
+// deviceID 为空时行为与 AddAccounts 一致（随机指纹）。
+func (s *AccountService) AddAccountsWithDeviceID(tokens []string, deviceID string) map[string]any {
+	return s.addAccounts(tokens, util.Clean(deviceID))
+}
+
+func (s *AccountService) addAccounts(tokens []string, deviceID string) map[string]any {
 	cleaned := cleanTokens(tokens)
 	if len(cleaned) == 0 {
 		return map[string]any{"added": 0, "skipped": 0, "items": s.ListAccounts()}
@@ -236,7 +255,7 @@ func (s *AccountService) AddAccounts(tokens []string) map[string]any {
 		updates := map[string]any{"access_token": token, "type": util.ValueOr(current["type"], "Free")}
 		if !ok {
 			updates["enabled"] = true
-			updates["fp"] = NewAccountBrowserFingerprint(s.random)
+			updates["fp"] = newAccountFingerprintForDevice(s.random, deviceID)
 		}
 		normalized := normalizeAccount(mergeMaps(current, updates))
 		if normalized, _ = ensureAccountFingerprint(normalized); normalized != nil {
@@ -969,6 +988,8 @@ func (s *AccountService) GetAvailableAccessToken(ctx context.Context) (string, e
 	return lease.Token, nil
 }
 
+// sessionRefreshContext 组装 /api/auth/session 刷新所需的浏览器上下文。
+// 账号绑定的代理一并带上，使刷新请求与账号的常规出站请求共用同一个出口 IP。
 func (s *AccountService) sessionRefreshContext(accessToken string, overrideCookies map[string]string) SessionRefreshContext {
 	account := s.GetAccount(accessToken)
 	headers := BrowserHeadersForFingerprint(nil)
@@ -982,7 +1003,7 @@ func (s *AccountService) sessionRefreshContext(accessToken string, overrideCooki
 	for name, value := range overrideCookies {
 		cookies[name] = value
 	}
-	return SessionRefreshContext{Cookies: cookies, Headers: headers}
+	return SessionRefreshContext{Cookies: cookies, Headers: headers, Proxy: AccountProxy(account)}
 }
 
 func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error) {
@@ -1608,7 +1629,7 @@ func (s *AccountService) newRemoteAccountClient(ctx context.Context, accessToken
 		return nil, fmt.Errorf("access_token is required")
 	}
 	baseURL := strings.TrimRight(firstNonEmpty(s.remoteBaseURL, "https://chatgpt.com"), "/")
-	client := s.browserHTTPClient(s.remoteImpersonation(accessToken), timeout)
+	client := s.browserHTTPClient(AccountProxy(s.GetAccount(accessToken)), s.remoteImpersonation(accessToken), timeout)
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
@@ -2508,6 +2529,20 @@ func ensureAccountFingerprint(account map[string]any) (map[string]any, bool) {
 		return nil, false
 	}
 	normalized := util.CopyMap(account)
+	// 指纹池收紧后，历史账号可能持有池外的族/版本（如 chrome148、edge147、safari26.5）。
+	// 这些版本在 TLS 指纹层无法兑现，继续沿用会让 UA 与 Client-Hints 互相矛盾，
+	// 因此把浏览器身份字段迁移到当前池内的等价族/版本。
+	// 注意：只重建浏览器身份，必须保留 oai-device-id / oai-session-id——
+	// 它们是账号的稳定身份，且 oai-did cookie 与注册设备绑定，重建会造成新的身份撕裂。
+	if stored := util.StringMap(normalized["fp"]); len(stored) > 0 && !browserFamilyVersionInPool(
+		util.Clean(stored["browser-family"]), util.Clean(stored["browser-version"]),
+	) {
+		migrated := migrateAccountFingerprintIntoPool(stored)
+		normalized["fp"] = migrated
+		normalized["browser-family"] = util.Clean(migrated["browser-family"])
+		normalized["browser-version"] = util.Clean(migrated["browser-version"])
+		return normalized, true
+	}
 	fp, changed := NormalizeBrowserFingerprint(normalized["fp"])
 	family, version := browserFingerprintFamilyVersion(fp)
 	if util.Clean(fp["browser-family"]) != family {
@@ -2530,55 +2565,51 @@ func ensureAccountFingerprint(account map[string]any) (map[string]any, bool) {
 	return normalized, changed
 }
 
+// migrateAccountFingerprintIntoPool 把池外的浏览器身份迁移到池内的等价族/版本。
+//
+// 族映射保留「同内核」语义：firefox 保持 firefox（surf 有 Firefox TLS 实现），
+// 其余（edge 与 safari 这类 surf 无法兑现的族）统一落到 chrome，
+// 因为 surf 的 Chrome TLS 指纹是它们唯一可用的替代。
+// 账号的 oai-device-id / oai-session-id 原样保留，避免与既有 oai-did cookie 脱节。
+func migrateAccountFingerprintIntoPool(stored map[string]any) map[string]any {
+	family := "chrome"
+	if strings.EqualFold(util.Clean(stored["browser-family"]), "firefox") {
+		family = "firefox"
+	}
+	versions := browserFamilyVersionPools[family]
+	if len(versions) == 0 {
+		return NewAccountBrowserFingerprint(nil)
+	}
+	migrated := BrowserFingerprintFromFamilyVersion(family, versions[0])
+	if deviceID := util.Clean(stored["oai-device-id"]); deviceID != "" {
+		migrated["oai-device-id"] = deviceID
+	}
+	if sessionID := util.Clean(stored["oai-session-id"]); sessionID != "" {
+		migrated["oai-session-id"] = sessionID
+	}
+	return migrated
+}
+
+// browserFingerprintFamilyVersion 返回账号指纹的族与版本，结果一定落在当前指纹池内。
+//
+// 指纹池只含 TLS 层能兑现的组合（chrome145 / firefox148）。历史账号的 UA 可能是
+// Edge、Safari 或别的 Chrome 版本，这些在 TLS 层无法兑现，因此只保留「是否 Firefox」
+// 这一维度：Firefox 落 firefox，其余一律落 chrome。这样 UA、Client-Hints 与
+// TLS 指纹始终同源，不会出现「UA 说 Safari、CH 说 Chrome 145」这类矛盾。
 func browserFingerprintFamilyVersion(fp map[string]any) (string, string) {
-	if fp == nil {
-		return "chrome", "145"
-	}
-	family := util.Clean(fp["browser-family"])
-	version := util.Clean(fp["browser-version"])
-	if family != "" && version != "" {
-		return family, version
-	}
-	userAgent := util.Clean(fp["user-agent"])
-	if edgeVersion := browserRegexpVersion(userAgent, `Edg[A-Z]*/([0-9]+(?:\.[0-9]+){0,3})`); edgeVersion != "" {
-		if family == "" {
-			family = "edge"
-		}
-		if version == "" {
-			version = browserMajorVersion(edgeVersion)
-		}
-	}
-	if chromeVersion := browserRegexpVersion(userAgent, `Chrome/([0-9]+(?:\.[0-9]+){0,3})`); chromeVersion != "" {
-		if family == "" {
-			family = "chrome"
-		}
-		if version == "" {
-			version = browserMajorVersion(chromeVersion)
-		}
-	}
-	if firefoxVersion := browserRegexpVersion(userAgent, `Firefox/([0-9]+(?:\.[0-9]+){0,3})`); firefoxVersion != "" {
-		if family == "" {
+	family := "chrome"
+	if fp != nil {
+		userAgent := util.Clean(fp["user-agent"])
+		storedFamily := util.Clean(fp["browser-family"])
+		if storedFamily == "firefox" || (storedFamily == "" && browserRegexpVersion(userAgent, `Firefox/([0-9]+(?:\.[0-9]+){0,3})`) != "") {
 			family = "firefox"
 		}
-		if version == "" {
-			version = browserMajorVersion(firefoxVersion)
-		}
 	}
-	if safariVersion := browserRegexpVersion(userAgent, `Version/([0-9]+(?:\.[0-9]+){0,3})`); safariVersion != "" && strings.Contains(userAgent, "Safari/") && !strings.Contains(userAgent, "Chrome/") && !strings.Contains(userAgent, "Chromium/") {
-		if family == "" {
-			family = "safari"
-		}
-		if version == "" {
-			version = safariVersion
-		}
+	versions := browserFamilyVersionPools[family]
+	if len(versions) == 0 {
+		return "chrome", "145"
 	}
-	if family == "" {
-		family = "chrome"
-	}
-	if version == "" {
-		version = "145"
-	}
-	return family, version
+	return family, versions[0]
 }
 
 func normalizeAccount(item map[string]any) map[string]any {
@@ -2627,6 +2658,13 @@ func normalizeAccount(item map[string]any) map[string]any {
 		normalized["restore_at"] = restore
 	} else {
 		normalized["restore_at"] = nil
+	}
+	// 账号级代理：绑定后该账号的出口 IP 固定，cf_clearance 的签发 IP 前提才能成立。
+	// 留空表示沿用全局代理。
+	if proxy := util.Clean(normalized["proxy"]); proxy != "" {
+		normalized["proxy"] = proxy
+	} else {
+		normalized["proxy"] = nil
 	}
 	normalized["success"] = util.ToInt(normalized["success"], 0)
 	normalized["fail"] = util.ToInt(normalized["fail"], 0)
@@ -2697,6 +2735,7 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			"limits_progress":    util.ValueOr(account["limits_progress"], []any{}),
 			"default_model_slug": account["default_model_slug"],
 			"restoreAt":          account["restore_at"],
+			"proxy":              util.Clean(account["proxy"]),
 			"success":            util.ToInt(account["success"], 0),
 			"fail":               util.ToInt(account["fail"], 0),
 			"lastUsedAt":         account["last_used_at"],
@@ -2945,11 +2984,8 @@ func summarizeRefreshErrorBody(body []byte) string {
 		}
 	}
 	lower := strings.ToLower(text)
-	if strings.Contains(lower, "cf_chl") ||
-		strings.Contains(lower, "challenge-platform") ||
-		strings.Contains(lower, "enable javascript and cookies to continue") ||
-		strings.Contains(lower, "cloudflare") {
-		return "upstream returned Cloudflare challenge page; refresh browser fingerprint/session or change proxy"
+	if util.IsCloudflareChallengeBody(lower) {
+		return util.CloudflareChallengeMessage
 	}
 	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<body") {
 		return "upstream returned HTML error page"

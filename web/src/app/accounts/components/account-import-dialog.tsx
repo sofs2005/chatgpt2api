@@ -393,6 +393,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
             />
             <p className="text-xs leading-5 text-stone-500">
               Cookies 会作为敏感账号凭据保存在本地，仅用于后端访问 ChatGPT session endpoint 时复用浏览器已通过的 CF 上下文。
+              注意 cf_clearance 与签发时的出口 IP 绑定：导入后建议在账号编辑里为该账号绑定固定代理，否则 IP 漂移会让它失效。
             </p>
           </div>
         </div>

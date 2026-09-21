@@ -160,6 +160,8 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restoreAt?: string | null;
+  // 账号级代理。绑定后该账号出口 IP 固定，cf_clearance 才能长期复用。
+  proxy?: string;
   success: number;
   fail: number;
   lastUsedAt: string | null;
@@ -966,6 +968,7 @@ export async function updateAccount(
     type?: AccountType;
     status?: AccountStatus;
     quota?: number;
+    proxy?: string;
   },
 ) {
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {

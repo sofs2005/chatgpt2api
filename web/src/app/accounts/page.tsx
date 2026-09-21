@@ -274,6 +274,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const [editType, setEditType] = useState<AccountType>("Free");
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [editQuota, setEditQuota] = useState("0");
+  const [editProxy, setEditProxy] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -590,6 +591,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
     setEditType(account.type);
     setEditStatus(account.status === "禁用" ? "正常" : account.status);
     setEditQuota(String(account.quota));
+    setEditProxy(account.proxy ?? "");
   };
 
   const handleUpdateAccount = async () => {
@@ -603,6 +605,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
         type: editType,
         status: editStatus,
         quota: Number(editQuota || 0),
+        proxy: editProxy.trim(),
       });
       applyAccountItems(data.items);
       setEditingAccount(null);
@@ -919,6 +922,18 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                 onChange={(event) => setEditQuota(event.target.value)}
                 className="h-11 rounded-xl border-stone-200 bg-white"
               />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">专属代理（可选）</label>
+              <Input
+                value={editProxy}
+                onChange={(event) => setEditProxy(event.target.value)}
+                placeholder="http://user:pass@host:port 或 socks5://host:port"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+              <p className="text-xs leading-5 text-muted-foreground">
+                绑定后该账号出口 IP 固定，Cloudflare 的 cf_clearance 才能长期复用。留空则使用全局代理。
+              </p>
             </div>
             {canRunUpstreamActions ? (
               <div className="space-y-3 rounded-2xl border border-stone-200 bg-stone-50 p-4">

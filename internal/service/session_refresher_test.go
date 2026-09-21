@@ -140,6 +140,47 @@ func TestSessionRefresherDeduplicatesConcurrentRefreshes(t *testing.T) {
 	}
 }
 
+func TestSessionRefresherCarriesAccountProxyToRequest(t *testing.T) {
+	var got string
+	refresher := NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		got = AccountProxyFromContext(req.Context())
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access","sessionToken":"new-session","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+
+	_, err := refresher.RefreshSessionWithContext(context.Background(), "old-access", "old-session", SessionRefreshContext{
+		Proxy: "http://user:pass@proxy.example:8080",
+	})
+	if err != nil {
+		t.Fatalf("RefreshSessionWithContext() error = %v", err)
+	}
+	// cf_clearance 与签发时的出口 IP 绑定，刷新必须从账号自己的代理发出。
+	if got != "http://user:pass@proxy.example:8080" {
+		t.Fatalf("account proxy = %q, want the bound proxy", got)
+	}
+}
+
+func TestSessionRefresherWithoutAccountProxyLeavesContextEmpty(t *testing.T) {
+	var got string
+	refresher := NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		got = AccountProxyFromContext(req.Context())
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access","sessionToken":"new-session","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+
+	_, err := refresher.RefreshSession(context.Background(), "old-access", "old-session")
+	if err != nil {
+		t.Fatalf("RefreshSession() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("account proxy = %q, want empty when the account binds no proxy", got)
+	}
+}
+
 func waitForCondition(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

@@ -331,6 +331,10 @@ func newUpstreamImageError(err error) *ImageGenerationError {
 
 const maxTransientImageStreamAttempts = 3
 
+// maxCloudflareSwitchAttempts 限制因 Cloudflare 挑战拦截而换号的总次数。
+// 池中账号可能全部被拦，必须有上限，否则换号会退化成无限循环。
+const maxCloudflareSwitchAttempts = 3
+
 // 对齐上游 _generate_single_image 的重试预算：
 // TLS 握手错误与连接超时（curl 28）都属于网络/代理抖动，应同账号递增等待后重试，
 // 而非立即耗尽重试次数或误把账号标记为不可用。
@@ -441,13 +445,10 @@ func isTransientImageStreamErrorMessage(message string) bool {
 
 func imageStreamErrorMessage(message string) string {
 	text := strings.TrimSpace(message)
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "cf_chl") ||
-		strings.Contains(lower, "challenge-platform") ||
-		strings.Contains(lower, "enable javascript and cookies to continue") ||
-		strings.Contains(lower, "cloudflare challenge") {
-		return "upstream returned Cloudflare challenge page; refresh browser fingerprint/session or change proxy"
+	if util.IsCloudflareChallengeMessage(text) {
+		return util.CloudflareChallengeMessage
 	}
+	lower := strings.ToLower(text)
 	if detail, ok := util.SummarizeUpstreamConnectionError(text); ok {
 		return detail
 	}
@@ -744,6 +745,14 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 	transientAttempts := 0
 	tlsAttempts := 0
 	connTimeoutAttempts := 0
+	// cfExhaustedTokens 记录已被 Cloudflare 挑战拦下的账号。
+	// 挑战拦截与该账号的 cookie/指纹绑定，同账号重试通常无效，
+	// 换一套账号身份（另一套 cf_clearance 与指纹）才有机会通过。
+	cfExhaustedTokens := map[string]struct{}{}
+	// cfRetryAttempts 限制 CF 换号重试的总次数。
+	// 池中账号可能全部被挑战拦截，此时排除集无法再缩小，
+	// 必须有次数上限，否则会退化成无限换号循环。
+	cfRetryAttempts := 0
 	session, hasSession := e.activeImageConversationSession(request)
 	preferredToken := ""
 	if hasSession {
@@ -752,7 +761,7 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 	for {
 		pendingWait := time.Duration(0)
 		request.reportStep("getting_account")
-		lease, err := e.nextImageAccessLease(ctx, preferredToken)
+		lease, err := e.nextImageAccessLease(ctx, preferredToken, cfExhaustedTokens)
 		if err != nil {
 			result.lastError = err.Error()
 			result.err = NewImageGenerationError(err.Error())
@@ -913,6 +922,22 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 			if !emittedForToken && IsTokenInvalidError(result.lastError) {
 				return true
 			}
+			// Cloudflare 挑战拦截：换账号重试。
+			// 挑战判定与该账号的 cookie 与浏览器指纹绑定，同账号重试通常无效，
+			// 因此把该账号加入排除集，并优先尝试另一个账号。
+			// 受 cfRetryAttempts 上限约束：池中账号可能全部被拦，届时不再换号，
+			// 让错误如实上报，而不是无限循环。
+			if !emittedForToken && util.IsCloudflareChallengeMessage(result.lastError) &&
+				cfRetryAttempts < maxCloudflareSwitchAttempts {
+				cfRetryAttempts++
+				if useSession {
+					e.invalidateImageConversationSession(request)
+					hasSession = false
+					preferredToken = ""
+				}
+				cfExhaustedTokens[token] = struct{}{}
+				return true
+			}
 			// TLS 握手错误：同账号递增等待 min(2*n,10)s 后重试，避免网络抖动误伤账号。
 			if !emittedForToken && isTLSConnectionImageError(result.lastError) && tlsAttempts < maxImageTLSRetries {
 				tlsAttempts++
@@ -954,12 +979,30 @@ func (e *Engine) StreamImageOutputs(ctx context.Context, client *backend.Client,
 	return e.StreamResponsesImageOutputs(ctx, client, request, index, total)
 }
 
-func (e *Engine) nextImageAccessLease(ctx context.Context, preferredToken string) (service.AccountLease, error) {
+// nextImageAccessLease 取下一个可用于生图的账号租约。
+//
+// excludedTokens 中的账号会被跳过（当前用于已被 Cloudflare 挑战拦下的账号：
+// 挑战与该账号的 cookie/指纹绑定，同账号重试通常无效，换号才有机会通过）。
+// 若排除后无号可用，会退回「不排除」再试一次，保证不会因为全部账号都被
+// 挑战拦截而直接失败——此时同账号重试至少仍有机会（例如 CF 判定是瞬时的）。
+func (e *Engine) nextImageAccessLease(ctx context.Context, preferredToken string, excludedTokens map[string]struct{}) (service.AccountLease, error) {
 	if e.Accounts != nil {
 		preferredToken = strings.TrimSpace(preferredToken)
 		if preferredToken != "" {
+			if _, excluded := excludedTokens[preferredToken]; !excluded {
+				lease, err := e.Accounts.GetAvailableImageAccessTokenFor(ctx, func(account map[string]any) bool {
+					return util.Clean(account["access_token"]) == preferredToken
+				})
+				if err == nil && lease.Token != "" {
+					return lease, nil
+				}
+				lease.Release()
+			}
+		}
+		if len(excludedTokens) > 0 {
 			lease, err := e.Accounts.GetAvailableImageAccessTokenFor(ctx, func(account map[string]any) bool {
-				return util.Clean(account["access_token"]) == preferredToken
+				_, excluded := excludedTokens[util.Clean(account["access_token"])]
+				return !excluded
 			})
 			if err == nil && lease.Token != "" {
 				return lease, nil

@@ -9,6 +9,44 @@ const UpstreamConnectionFailureMessage = "upstream connection failed before TLS 
 // 后者才需要排查证书与指纹。混用会把排查方向指向错误的地方。
 const UpstreamProxyUnreachableMessage = "upstream proxy refused the connection (connection refused); check the proxy address/port is correct and the proxy is running"
 
+// CloudflareChallengeMessage 是 Cloudflare 挑战页的统一对外文案。
+const CloudflareChallengeMessage = "upstream returned Cloudflare challenge page; refresh browser fingerprint/session or change proxy"
+
+// IsCloudflareChallengeBody 判断响应体是否是 Cloudflare 挑战页。
+//
+// 这是唯一的判定入口：此前该特征匹配在 backend / service / protocol 三处各写一份，
+// 新增特征时必须同步多处，容易漏改。所有调用方都应使用这里。
+// 传入的应当是已小写的响应体文本。
+//
+// 这里允许裸 "cloudflare" 命中：挑战页 HTML 本身包含大量 cloudflare 标识，
+// 而响应体不会嵌入代理地址等无关文本。
+func IsCloudflareChallengeBody(lower string) bool {
+	return strings.Contains(lower, "cf_chl") ||
+		strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "enable javascript and cookies to continue") ||
+		strings.Contains(lower, "cloudflare")
+}
+
+// IsCloudflareChallengeMessage 判断错误文案是否表示 Cloudflare 挑战拦截。
+// 用于重试决策：挑战拦截可以靠换账号（换一套 cookie 与指纹）自愈。
+//
+// 与 IsCloudflareChallengeBody 的区别：这里刻意不匹配裸 "cloudflare"，
+// 因为错误文案里可能嵌入代理主机名等无关文本（例如 proxy.cloudflare.example），
+// 裸匹配会把普通失败误判成挑战拦截，导致无谓的换号重试。
+func IsCloudflareChallengeMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, CloudflareChallengeMessage) {
+		return true
+	}
+	return strings.Contains(lower, "cf_chl") ||
+		strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "enable javascript and cookies to continue") ||
+		strings.Contains(lower, "cloudflare challenge")
+}
+
 // UpstreamConnectionFailureClass 是 transport 错误的归类结果。
 type UpstreamConnectionFailureClass int
 

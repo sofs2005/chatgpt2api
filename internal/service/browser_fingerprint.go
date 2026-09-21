@@ -22,11 +22,24 @@ const (
 	DefaultBrowserImpersonationProfile   = "chrome145"
 )
 
+// browserFamilyVersionPools 只包含「TLS 指纹层能真正兑现」的浏览器与版本。
+//
+// 出站请求的 TLS/HTTP2 指纹由 surf 提供，而 surf 仅实现两套浏览器指纹
+// （surf@v1.0.199/profiles 下只有 chrome 与 firefox）：Chrome 对应
+// HelloChrome_145，Firefox 对应 HelloFirefox_148。且 Impersonate().Chrome()
+// 不接收版本参数——impersonate 字符串里的版本号会被完全丢弃。
+//
+// 因此池中若出现 chrome146/147/148、edge*、safari*，实际出站仍会是
+// 「Chrome 145 的 TLS + 被 surf 改写成 Chrome 145 的 UA」，而账号指纹里
+// 未被 surf 覆盖的 Sec-Ch-Ua-Full-Version 仍然是原版本号，于是出现
+// 「Sec-Ch-Ua 说 145、Sec-Ch-Ua-Full-Version 说 148」这种自相矛盾信号。
+// 收紧到 surf 能兑现的集合后，UA / Client-Hints / TLS / HTTP2 全部同源一致。
+//
+// 版本号必须与 surf 内置的 UA 严格对应（chromeUserAgent 为 Chrome/145.0.0.0，
+// firefoxUserAgent 为 Firefox/148.0），否则仍会产生矛盾。
 var browserFamilyVersionPools = map[string][]string{
-	"chrome":  []string{"148", "147", "146"},
-	"edge":    []string{"148", "147", "146"},
-	"firefox": []string{"151", "150", "149"},
-	"safari":  []string{"26.5", "26.4", "26.3"},
+	"chrome":  []string{"145"},
+	"firefox": []string{"148"},
 }
 
 type browserFamilyWeight struct {
@@ -35,10 +48,8 @@ type browserFamilyWeight struct {
 }
 
 var browserFamilySelectionWeights = []browserFamilyWeight{
-	{family: "chrome", weight: 50},
-	{family: "edge", weight: 20},
-	{family: "firefox", weight: 20},
-	{family: "safari", weight: 10},
+	{family: "chrome", weight: 70},
+	{family: "firefox", weight: 30},
 }
 
 type browserHeaderMetadata struct {
@@ -72,6 +83,18 @@ func NewBrowserFingerprint() map[string]any {
 func NewAccountBrowserFingerprint(random *rand.Rand) map[string]any {
 	family, version := randomBrowserFamilyVersion(random)
 	return BrowserFingerprintFromFamilyVersion(family, version)
+}
+
+// newAccountFingerprintForDevice 生成账号指纹；deviceID 非空时沿用它作为设备身份。
+//
+// 注册链路用它把「注册时实际使用的设备 id」带进账号，避免入库时另起一套身份，
+// 与注册阶段写入的 oai-did cookie 脱节。设备 id 为空时退化为随机指纹。
+func newAccountFingerprintForDevice(random *rand.Rand, deviceID string) map[string]any {
+	fp := NewAccountBrowserFingerprint(random)
+	if deviceID = strings.TrimSpace(deviceID); deviceID != "" {
+		fp["oai-device-id"] = deviceID
+	}
+	return fp
 }
 
 func randomBrowserFamilyVersion(random *rand.Rand) (string, string) {
@@ -152,33 +175,27 @@ func browserFingerprintTemplateFromFamilyVersion(family, version string) (browse
 
 	switch family {
 	case "chrome":
-		return chromiumBrowserFingerprintTemplate(family, version, "Google Chrome", `Not:A-Brand`, "99", "chrome", false), true
-	case "edge":
-		return chromiumBrowserFingerprintTemplate(family, version, "Microsoft Edge", `Not A(Brand`, "24", "edge", true), true
+		return chromiumBrowserFingerprintTemplate(family, version), true
 	case "firefox":
 		return firefoxBrowserFingerprintTemplate(family, version), true
-	case "safari":
-		return safariBrowserFingerprintTemplate(family, version), true
 	default:
 		return browserFingerprintTemplate{}, false
 	}
 }
 
-func chromiumBrowserFingerprintTemplate(family, version, clientHintName, brandName, brandVersion, impersonatePrefix string, includeEdgeSuffix bool) browserFingerprintTemplate {
+// chromiumBrowserFingerprintTemplate 只服务 Chrome：指纹池不含 edge，
+// 因为 surf 没有 Edge 的 TLS 实现，Edge 身份无法兑现。
+func chromiumBrowserFingerprintTemplate(family, version string) browserFingerprintTemplate {
 	major := browserMajorVersion(version)
 	fullVersion := browserNormalizeFullVersion(version)
-	userAgent := fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36", major)
-	if includeEdgeSuffix {
-		userAgent += fmt.Sprintf(" Edg/%s.0.0.0", major)
-	}
 	return browserFingerprintTemplate{
 		family:          family,
 		version:         version,
-		userAgent:       userAgent,
-		secCHUA:         fmt.Sprintf(`"%s";v="%s", "Chromium";v="%s", "%s";v="%s"`, clientHintName, major, major, brandName, brandVersion),
+		userAgent:       fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36", major),
+		secCHUA:         fmt.Sprintf(`"Not:A-Brand";v="99", "Google Chrome";v="%s", "Chromium";v="%s"`, major, major),
 		fullVersion:     fullVersion,
-		fullVersionList: fmt.Sprintf(`"%s";v="%s", "Chromium";v="%s", "%s";v="%s"`, clientHintName, fullVersion, fullVersion, brandName, brandVersion),
-		impersonate:     impersonatePrefix + major,
+		fullVersionList: fmt.Sprintf(`"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="%s", "Chromium";v="%s"`, fullVersion, fullVersion),
+		impersonate:     "chrome" + major,
 	}
 }
 
@@ -193,20 +210,6 @@ func firefoxBrowserFingerprintTemplate(family, version string) browserFingerprin
 		fullVersion:     fullVersion,
 		fullVersionList: fmt.Sprintf(`"Not A(Brand";v="99.0.0.0", "Firefox";v="%s"`, fullVersion),
 		impersonate:     "firefox" + major,
-	}
-}
-
-func safariBrowserFingerprintTemplate(family, version string) browserFingerprintTemplate {
-	major := browserMajorVersion(version)
-	fullVersion := browserNormalizeFullVersion(version)
-	return browserFingerprintTemplate{
-		family:          family,
-		version:         version,
-		userAgent:       fmt.Sprintf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/%s Safari/605.1.15", version),
-		secCHUA:         fmt.Sprintf(`"Not A(Brand";v="99", "Safari";v="%s"`, major),
-		fullVersion:     fullVersion,
-		fullVersionList: fmt.Sprintf(`"Not A(Brand";v="99.0.0.0", "Safari";v="%s"`, fullVersion),
-		impersonate:     "safari" + version,
 	}
 }
 
@@ -293,7 +296,7 @@ func BrowserHeadersForFingerprint(raw any) map[string]string {
 		"Sec-Ch-Ua-Bitness":           firstNonEmpty(values["sec-ch-ua-bitness"], DefaultBrowserSecCHUABitness),
 		"Sec-Ch-Ua-Full-Version":      firstNonEmpty(values["sec-ch-ua-full-version"], DefaultBrowserSecCHUAFullVersion),
 		"Sec-Ch-Ua-Full-Version-List": firstNonEmpty(values["sec-ch-ua-full-version-list"], DefaultBrowserSecCHUAFullVersionList),
-		"Sec-Ch-Ua-Platform-Version":   firstNonEmpty(values["sec-ch-ua-platform-version"], DefaultBrowserSecCHUAPlatformVersion),
+		"Sec-Ch-Ua-Platform-Version":  firstNonEmpty(values["sec-ch-ua-platform-version"], DefaultBrowserSecCHUAPlatformVersion),
 	}
 	if value := values["oai-device-id"]; value != "" {
 		headers["OAI-Device-Id"] = value

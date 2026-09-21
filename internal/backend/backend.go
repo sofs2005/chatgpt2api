@@ -20,8 +20,13 @@ import (
 )
 
 const (
-	DefaultClientVersion     = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
-	DefaultClientBuildNumber = "5955942"
+	// DefaultClientVersion / DefaultClientBuildNumber 是上游前端构建标识，
+	// 由 chatgpt.com 的前端产物决定，会随上游发版变化。
+	// 取值来源：真实浏览器抓包（最近一次 2026-09-20）。
+	// 上游若再次发版，这两个值需要重新抓取后同步，否则会与 PoW 配置中的
+	// data-build 混用新旧两个版本，构成可识别的身份不一致。
+	DefaultClientVersion     = "prod-51404fa88033510cc879b69b6499ac2cf384ae62"
+	DefaultClientBuildNumber = "11018478"
 
 	browserUserAgent              = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 	browserSecCHUA                = `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`
@@ -98,8 +103,18 @@ func NewClient(accessToken string, lookup AccountLookup, proxy *service.ProxySer
 	c.deviceID = c.fp["oai-device-id"]
 	c.sessionID = c.fp["oai-session-id"]
 	c.initAccountCookies()
-	c.httpClient = proxy.BrowserHTTPClientWithProfile(c.fp["impersonate"], 300*time.Second)
+	// 账号绑定了自己的代理时优先使用，使 cf_clearance 的签发 IP 与出口 IP 保持一致。
+	c.httpClient = proxy.BrowserHTTPClientForAccount(c.accountForFingerprint(), c.fp["impersonate"], 300*time.Second)
 	return c
+}
+
+// accountForFingerprint 返回当前 access token 对应的账号数据。
+// 账号不存在（如匿名链路）时返回 nil，调用方按「未绑定代理」处理。
+func (c *Client) accountForFingerprint() map[string]any {
+	if c == nil || c.AccessToken == "" || c.lookup == nil {
+		return nil
+	}
+	return c.lookup.GetAccount(c.AccessToken)
 }
 
 // ImagePollOptions 暴露当前生图轮询配置，供装配层校验与可观测使用。
@@ -278,10 +293,7 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 }
 
 func (c *Client) buildFingerprint() map[string]string {
-	account := map[string]any{}
-	if c.AccessToken != "" && c.lookup != nil {
-		account = c.lookup.GetAccount(c.AccessToken)
-	}
+	account := c.accountForFingerprint()
 	fp := service.BrowserFingerprintStringMap(account["fp"])
 	for _, key := range []string{"user-agent", "impersonate", "oai-device-id", "oai-session-id", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-ch-ua-arch", "sec-ch-ua-bitness", "sec-ch-ua-full-version", "sec-ch-ua-full-version-list", "sec-ch-ua-platform-version"} {
 		if value := util.Clean(account[key]); value != "" {
@@ -538,27 +550,65 @@ func (c *Client) bootstrapHeaders() map[string]string {
 	}
 }
 
+// bootstrapRetryStatuses 是 bootstrap 值得重试的上游状态码。
+// 403 通常是 Cloudflare 挑战（cf_clearance 失效或指纹不匹配），
+// 429 是上游限流；两者都可能是瞬时的，短暂退避后重试一次比立刻失败更划算。
+// 重试仍失败则如实上抛，由上层决定是否换账号。
+var bootstrapRetryStatuses = map[int]struct{}{
+	http.StatusForbidden:       {},
+	http.StatusTooManyRequests: {},
+}
+
+const (
+	maxBootstrapAttempts    = 3
+	bootstrapRetryBaseDelay = 800 * time.Millisecond
+)
+
 func (c *Client) bootstrap(ctx context.Context) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxBootstrapAttempts; attempt++ {
+		err, retryable := c.bootstrapOnce(ctx, attempt)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !retryable || attempt == maxBootstrapAttempts {
+			break
+		}
+		if wait := time.Duration(attempt) * bootstrapRetryBaseDelay; wait > 0 {
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return lastErr
+}
+
+// bootstrapOnce 执行一次 bootstrap。第二个返回值表示失败是否值得重试。
+func (c *Client) bootstrapOnce(ctx context.Context, attempt int) (error, bool) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/", nil)
 	for key, value := range c.bootstrapHeaders() {
 		req.Header.Set(key, value)
 	}
 	resp, err := c.do(req)
 	if err != nil {
-		c.reportStage("bootstrap", false, map[string]any{"error": err})
-		return upstreamTransportError("bootstrap", err)
+		c.reportStage("bootstrap", false, map[string]any{"error": err, "attempt": attempt})
+		return upstreamTransportError("bootstrap", err), false
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.reportStage("bootstrap", false, map[string]any{"status": resp.StatusCode})
-		return upstreamHTTPError("bootstrap", resp.StatusCode, data)
+		_, retryable := bootstrapRetryStatuses[resp.StatusCode]
+		c.reportStage("bootstrap", false, map[string]any{"status": resp.StatusCode, "attempt": attempt})
+		return upstreamHTTPError("bootstrap", resp.StatusCode, data), retryable
 	}
 	c.powSources, c.powDataBuild = parsePOWResources(string(data))
 	if len(c.powSources) == 0 {
 		c.powSources = []string{defaultPOWScript}
 	}
-	return nil
+	return nil, false
 }
 
 func (c *Client) getChatRequirements(ctx context.Context) (ChatRequirements, error) {
@@ -1126,8 +1176,8 @@ func summarizeUpstreamErrorBody(body []byte) string {
 		return ""
 	}
 	lower := strings.ToLower(text)
-	if isCloudflareChallengeBody(lower) {
-		return "upstream returned Cloudflare challenge page; refresh browser fingerprint/session or change proxy"
+	if util.IsCloudflareChallengeBody(lower) {
+		return util.CloudflareChallengeMessage
 	}
 	if looksLikeHTMLBody(lower) {
 		return "upstream returned HTML error page"
@@ -1137,13 +1187,6 @@ func summarizeUpstreamErrorBody(body []byte) string {
 		return "body=" + text[:maxBodyDetail] + "...(truncated)"
 	}
 	return "body=" + text
-}
-
-func isCloudflareChallengeBody(lower string) bool {
-	return strings.Contains(lower, "cf_chl") ||
-		strings.Contains(lower, "challenge-platform") ||
-		strings.Contains(lower, "enable javascript and cookies to continue") ||
-		strings.Contains(lower, "cloudflare")
 }
 
 func looksLikeHTMLBody(lower string) bool {

@@ -263,7 +263,7 @@ func TestClientSkipsStaleCloudflareCookiesToUpstream(t *testing.T) {
 					"oai-did":      "did-cookie",
 				},
 				"session_cookie_updated_at": map[string]string{
-					"cf_clearance": now.Add(-31 * time.Minute).Format(time.RFC3339),
+					"cf_clearance": now.Add(-3 * time.Hour).Format(time.RFC3339),
 					"__cf_bm":      now.Add(-5 * time.Minute).Format(time.RFC3339),
 				},
 			},
@@ -284,6 +284,48 @@ func TestClientSkipsStaleCloudflareCookiesToUpstream(t *testing.T) {
 		if !strings.Contains(seenCookie, want) {
 			t.Fatalf("Cookie header = %q, missing %q", seenCookie, want)
 		}
+	}
+}
+
+// 账号绑定固定出口代理后，cf_clearance 的 IP 前提成立，
+// 即使时间戳很旧也必须继续发送，否则等于主动放弃已有通行证。
+func TestClientKeepsClearanceForAccountWithStableProxy(t *testing.T) {
+	var seenCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html data-build="build-1"></html>`))
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	client := &Client{
+		BaseURL:     server.URL,
+		AccessToken: "token-1",
+		httpClient:  server.Client(),
+		lookup: testAccountLookup{
+			"token-1": {
+				"proxy": "http://127.0.0.1:8080",
+				"session_cookies": map[string]string{
+					"cf_clearance": "bound-cf",
+					"oai-did":      "did-cookie",
+				},
+				"session_cookie_updated_at": map[string]string{
+					"cf_clearance": now.Add(-30 * time.Hour).Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	client.fp = client.buildFingerprint()
+	client.applyBrowserFingerprint()
+	client.userAgent = client.fp["user-agent"]
+	client.initAccountCookies()
+
+	if err := client.bootstrap(context.Background()); err != nil {
+		t.Fatalf("bootstrap() error = %v", err)
+	}
+	if !strings.Contains(seenCookie, "cf_clearance=bound-cf") {
+		t.Fatalf("Cookie header = %q, want cf_clearance kept for stable exit IP", seenCookie)
 	}
 }
 

@@ -263,7 +263,9 @@ func (s *RegisterService) runWorker(index int, config map[string]any) registerWo
 		return registerWorkerResult{ok: false, index: index, err: err.Error(), cost: cost}
 	}
 	if s.accounts != nil {
-		s.accounts.AddAccounts([]string{accessToken})
+		// 沿用注册时实际使用的 deviceID：注册阶段已把 oai-did=<deviceID> 写入 cookie，
+		// 入库时若另生成一套设备身份，会造成 cookie 与请求头互相矛盾。
+		s.accounts.AddAccountsWithDeviceID([]string{accessToken}, worker.deviceID)
 		s.accounts.RefreshAccounts(context.Background(), []string{accessToken})
 	}
 	s.appendLog(fmt.Sprintf("%s 注册成功，本次耗时%.1fs", util.Clean(result["email"]), cost), "green")

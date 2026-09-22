@@ -52,26 +52,19 @@ func PlanContext(messages []map[string]any, tools any, choice any, options Optio
 	latest, _ := latestUserMessage(messages)
 	toolsText := toolsText(tools, choice)
 	historyNeedsFile := historyEstimated > options.InlineMaxChars || historyEstimated > options.ForceFileMaxChars
-	needsFile := historyNeedsFile || toolsText != ""
-	if !needsFile {
+	if !historyNeedsFile {
 		return Plan{Mode: ModeInline, InlineMessages: cloneMessages(messages), LatestUserText: latest}
 	}
 
-	history := ""
-	if historyNeedsFile {
-		history = historyText(messages, -1)
-	}
+	history := historyText(messages, -1)
 
-	files := make([]File, 0, 2)
+	files := make([]File, 0, 1)
 	if strings.TrimSpace(history) != "" {
 		files = append(files, File{Filename: "history.txt", ContentType: "text/plain", Text: "# Conversation Context\n\n" + strings.TrimSpace(history) + "\n", Purpose: "history"})
 	}
-	if strings.TrimSpace(toolsText) != "" {
-		files = append(files, File{Filename: "tools.txt", ContentType: "text/plain", Text: toolsText, Purpose: "tools"})
-	}
 
 	mode := ModeHybrid
-	if historyNeedsFile && estimated > options.ForceFileMaxChars {
+	if estimated > options.ForceFileMaxChars {
 		mode = ModeFile
 	}
 	summary := strings.TrimSpace(history)
@@ -168,7 +161,7 @@ func buildInlineMessages(latest string, hasHistoryFile bool, toolsText string) [
 		lines = append(lines, "当前用户任务已包含在 history.txt 的最后一个 user 消息中。")
 	}
 	if strings.TrimSpace(toolsText) != "" {
-		lines = append(lines, "可用工具说明也在 tools.txt；必须优先遵守以下桥接工具规则，不要把 history.txt 或 tools.txt 当作本地路径读取。\n\n"+strings.TrimSpace(toolsText))
+		lines = append(lines, "必须优先遵守以下桥接工具规则；不要把 history.txt 当作本地路径读取。\n\n"+strings.TrimSpace(toolsText))
 	}
 	content := strings.Join(lines, "\n\n")
 	return []map[string]any{{"role": "user", "content": content}}
@@ -195,7 +188,7 @@ func toolFallbackText(tools any, choice any) string {
 	if len(catalog.Tools) == 0 {
 		return ""
 	}
-	return "上下文附件上传失败。可用桥接工具槽位：" + strings.Join(catalog.BridgeNames(), ", ") + "。请阅读 tools.txt，并按其中的桥接工具说明输出 XML：<tool_calls><invoke name=\"bridge-0\"><parameter name=\"ARG\"><![CDATA[value]]></parameter></invoke></tool_calls>"
+	return "上下文附件上传失败。可用桥接工具槽位：" + strings.Join(catalog.BridgeNames(), ", ") + "。请按以下桥接工具说明输出 XML：<tool_calls><invoke name=\"bridge-0\"><parameter name=\"ARG\"><![CDATA[value]]></parameter></invoke></tool_calls>"
 }
 
 func toolMaps(tools any) []map[string]any {

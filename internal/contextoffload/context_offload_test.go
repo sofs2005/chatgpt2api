@@ -159,8 +159,11 @@ func TestPlanContextSkipsMetadataOnlyLatestUserForCurrentTask(t *testing.T) {
 	}
 }
 
-func TestPlanContextKeepsBridgeToolInstructionsInline(t *testing.T) {
-	messages := []map[string]any{{"role": "user", "content": "use a tool"}}
+func TestPlanContextKeepsToolRequestsInlineWithoutUpload(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "system", "content": "bridge-0 rules"},
+		{"role": "user", "content": "use a tool"},
+	}
 	tools := []map[string]any{{
 		"type": "function",
 		"function": map[string]any{
@@ -169,21 +172,23 @@ func TestPlanContextKeepsBridgeToolInstructionsInline(t *testing.T) {
 			"parameters":  map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}}, "required": []any{"file_path"}},
 		},
 	}}
-	plan := PlanContext(messages, tools, nil, tinyOptions())
+	plan := PlanContext(messages, tools, nil, Options{InlineMaxChars: 1000, ForceFileMaxChars: 2000})
 
-	inline := plan.InlineMessages[0]["content"].(string)
-	if !strings.Contains(inline, "<invoke name=\"bridge-0\"") {
-		t.Fatalf("inline prompt missing bridge invoke format: %s", inline)
+	if plan.Mode != ModeInline {
+		t.Fatalf("Mode = %q, want %q", plan.Mode, ModeInline)
 	}
-	if !strings.Contains(inline, "input keys: file_path; required: file_path") {
-		t.Fatalf("inline prompt missing compact parameter hint: %s", inline)
+	if len(plan.Files) != 0 {
+		t.Fatalf("tools request generated uploads: %#v", plan.Files)
 	}
-	if strings.Contains(inline, "<tool_call><tool_name>") {
-		t.Fatalf("inline prompt contains legacy tool call format: %s", inline)
+	if got := plan.InlineMessages[0]["content"]; got != "bridge-0 rules" {
+		t.Fatalf("tool prompt system message was not preserved inline: %#v", got)
+	}
+	if got := plan.InlineMessages[1]["content"]; got != "use a tool" {
+		t.Fatalf("inline content = %#v", got)
 	}
 }
 
-func TestPlanContextCreatesToolsFileUnlessChoiceNone(t *testing.T) {
+func TestPlanContextNeverUploadsToolsFile(t *testing.T) {
 	messages := []map[string]any{{"role": "user", "content": "use a tool"}}
 	tools := []map[string]any{{
 		"type": "function",
@@ -194,21 +199,48 @@ func TestPlanContextCreatesToolsFileUnlessChoiceNone(t *testing.T) {
 		},
 	}}
 
+	for _, choice := range []any{nil, "auto", "required", "none"} {
+		plan := PlanContext(messages, tools, choice, tinyOptions())
+		for _, file := range plan.Files {
+			if file.Purpose == "tools" {
+				t.Fatalf("tool_choice %#v generated a tools file: %#v", choice, file)
+			}
+		}
+		if len(plan.Files) != 0 {
+			t.Fatalf("tool_choice %#v generated files: %#v", choice, plan.Files)
+		}
+	}
+}
+
+func TestPlanContextUploadsOnlyHistoryWhenToolsPresent(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "assistant", "content": strings.Repeat("prior ", 30)},
+		{"role": "tool", "content": strings.Repeat("tool output\n", 15)},
+		{"role": "user", "content": "continue now"},
+	}
+	tools := []map[string]any{{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "Read",
+			"description": "Read file contents.",
+			"parameters":  map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}}},
+		},
+	}}
+
 	plan := PlanContext(messages, tools, nil, tinyOptions())
 
 	if len(plan.Files) != 1 {
-		t.Fatalf("len(Files) = %d, want tools file", len(plan.Files))
+		t.Fatalf("len(Files) = %d, want only the history file", len(plan.Files))
 	}
-	if plan.Files[0].Purpose != "tools" || !strings.Contains(plan.Files[0].Text, "Bridge-call slots available: bridge-0") {
-		t.Fatalf("unexpected tools file: %#v", plan.Files[0])
+	if plan.Files[0].Purpose != "history" || plan.Files[0].Filename != "history.txt" {
+		t.Fatalf("unexpected file: %#v", plan.Files[0])
 	}
-	if strings.Contains(plan.Files[0].Text, "Tool: Read") {
-		t.Fatalf("tools file leaked legacy tool block: %#v", plan.Files[0])
+	inline := plan.InlineMessages[0]["content"].(string)
+	if !strings.Contains(inline, "<invoke name=\"bridge-0\"") {
+		t.Fatalf("inline prompt missing bridge tool rules: %s", inline)
 	}
-
-	nonePlan := PlanContext(messages, tools, "none", tinyOptions())
-	if len(nonePlan.Files) != 0 {
-		t.Fatalf("tool_choice none generated files: %#v", nonePlan.Files)
+	if strings.Contains(inline, "tools.txt") {
+		t.Fatalf("inline prompt still references the removed tools file: %s", inline)
 	}
 }
 

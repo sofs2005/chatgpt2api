@@ -19,13 +19,15 @@ import (
 )
 
 type testAccountConfig struct {
-	textMode  string
-	imageMode string
-	proxy     string
+	textMode      string
+	imageMode     string
+	proxy         string
+	removeInvalid bool
+	removeRateLmt bool
 }
 
-func (testAccountConfig) AutoRemoveInvalidAccounts() bool     { return false }
-func (testAccountConfig) AutoRemoveRateLimitedAccounts() bool { return false }
+func (c testAccountConfig) AutoRemoveInvalidAccounts() bool     { return c.removeInvalid }
+func (c testAccountConfig) AutoRemoveRateLimitedAccounts() bool { return c.removeRateLmt }
 func (c testAccountConfig) TextAccountScheduleMode() string {
 	if c.textMode == "" {
 		return "load_balance"
@@ -2502,13 +2504,13 @@ func TestGetAccountMigratesOutOfPoolFingerprintAndKeepsIdentity(t *testing.T) {
 		"type":         "Plus",
 		"status":       "正常",
 		"fp": map[string]any{
-			"version":        1,
-			"browser-family": "edge",
+			"version":         1,
+			"browser-family":  "edge",
 			"browser-version": "143",
-			"impersonate":    "edge101",
-			"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-			"oai-device-id":  "device-1",
-			"oai-session-id": "session-1",
+			"impersonate":     "edge101",
+			"user-agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+			"oai-device-id":   "device-1",
+			"oai-session-id":  "session-1",
 		},
 	}}}
 	accounts := NewAccountService(backend, testAccountConfig{}, nil, NewLogService())
@@ -2993,6 +2995,53 @@ func newTestAccountService(t *testing.T) *AccountService {
 	return newTestAccountServiceWithConfig(t, testAccountConfig{})
 }
 
+func accountLogSummaries(accounts *AccountService) []string {
+	items := accounts.logs.Search(LogQuery{Limit: 200, View: LogViewAll})
+	summaries := make([]string, 0, len(items))
+	for _, item := range items {
+		summaries = append(summaries, util.Clean(item["summary"]))
+	}
+	return summaries
+}
+
+func TestUpdateAccountDoesNotWriteLog(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "email": "alice@example.com"})
+
+	for _, summary := range accountLogSummaries(accounts) {
+		if summary == "更新账号" {
+			t.Fatalf("UpdateAccount() wrote a %q log; account status churn must stay out of the log list", summary)
+		}
+	}
+}
+
+func TestAccountAutoMaintenanceDoesNotWriteLogs(t *testing.T) {
+	accounts := newTestAccountServiceWithConfig(t, testAccountConfig{removeInvalid: true, removeRateLmt: true})
+	accounts.AddAccounts([]string{"token-1", "token-2", "token-3"})
+
+	accounts.RemoveInvalidToken("token-1")
+	if accounts.GetAccount("token-1") != nil {
+		t.Fatal("RemoveInvalidToken() did not remove the account; test config is not exercising the removal path")
+	}
+	accounts.UpdateAccount("token-2", map[string]any{"status": "限流"})
+	accounts.UpdateAccountFromSessionImport("token-3", "token-3-rotated", map[string]any{"status": "正常"}, true)
+
+	forbidden := map[string]struct{}{
+		"更新账号":        {},
+		"更新Session账号": {},
+		"刷新账号token":   {},
+		"自动移除限流账号":    {},
+		"自动移除异常账号":    {},
+	}
+	for _, summary := range accountLogSummaries(accounts) {
+		if _, bad := forbidden[summary]; bad {
+			t.Fatalf("auto maintenance wrote a %q log; internal account churn must stay out of the log list", summary)
+		}
+	}
+}
+
 func newTestAccountServiceWithConfig(t *testing.T, cfg testAccountConfig) *AccountService {
 	t.Helper()
 	backend := newTestStorageBackend(t)
@@ -3158,13 +3207,13 @@ func TestFingerprintMigrationDropsFingerprintBoundClearance(t *testing.T) {
 		"type":         "Plus",
 		"status":       "正常",
 		"fp": map[string]any{
-			"version":        1,
-			"browser-family": "edge",
+			"version":         1,
+			"browser-family":  "edge",
 			"browser-version": "143",
-			"impersonate":    "edge101",
-			"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-			"oai-device-id":  "device-1",
-			"oai-session-id": "session-1",
+			"impersonate":     "edge101",
+			"user-agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+			"oai-device-id":   "device-1",
+			"oai-session-id":  "session-1",
 		},
 		"session_cookies": map[string]any{
 			"cf_clearance": "old-clearance",

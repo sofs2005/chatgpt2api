@@ -58,6 +58,18 @@ func recordAccountUsage(ctx context.Context, token, accountName string) {
 	tracker.Record(token, accountName)
 }
 
+// upstreamAccountName picks the most human-readable identifier available for an
+// account. Not every account carries an email (session imports and manual tokens
+// often only have an account id), so fall back before giving up - the log then
+// shows an id instead of blank.
+func upstreamAccountName(account map[string]any) string {
+	return firstNonEmpty(
+		util.Clean(account["email"]),
+		util.Clean(account["user_id"]),
+		util.Clean(account["chatgpt_account_id"]),
+	)
+}
+
 func (t *AccountUsageTracker) Record(token, accountName string) {
 	token = strings.TrimSpace(token)
 	accountName = strings.TrimSpace(accountName)
@@ -266,7 +278,7 @@ func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]s
 	defer lease.Release()
 	accountName := ""
 	if account := e.Accounts.GetAccount(lease.Token); account != nil {
-		accountName = util.Clean(account["email"])
+		accountName = upstreamAccountName(account)
 	}
 	recordAccountUsage(ctx, lease.Token, accountName)
 	if fn == nil {
@@ -284,7 +296,7 @@ func (e *Engine) RunEditableFileExport(ctx context.Context, kind, prompt string,
 	err := e.withTextLease(ctx, exhausted, func(client *backend.Client, lease service.AccountLease) error {
 		accountName := ""
 		if account := e.Accounts.GetAccount(lease.Token); account != nil {
-			accountName = util.Clean(account["email"])
+			accountName = upstreamAccountName(account)
 		}
 		recordAccountUsage(ctx, lease.Token, accountName)
 		exported, exportErr := client.ExportEditableFile(ctx, kind, prompt, base64Images, outputDir)

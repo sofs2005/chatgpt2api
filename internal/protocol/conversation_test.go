@@ -1548,6 +1548,114 @@ func newImageLeaseTestEngine(t *testing.T, tokens ...string) (*Engine, *service.
 	return engine, accounts
 }
 
+// imageLeaseAccountID derives the account_id the tracker records for a token.
+// The account name is not asserted here: acquiring an image lease refreshes the
+// account from the upstream /me endpoint, so the name is not under test control.
+func imageLeaseAccountID(token string) string {
+	return util.SHA1Short(token, 16)
+}
+
+func TestNextImageAccessLeaseRecordsUpstreamAccount(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1")
+	accounts.UpdateAccount("token-1", map[string]any{"email": "alice@example.com"})
+	ctx, _ := WithAccountUsageTracker(context.Background())
+
+	lease, err := engine.nextImageAccessLease(ctx, "", nil)
+	if err != nil {
+		t.Fatalf("nextImageAccessLease() error = %v", err)
+	}
+	defer lease.Release()
+
+	usedAccounts := AccountUsageFromContext(ctx)
+	if len(usedAccounts) != 1 {
+		t.Fatalf("used accounts = %#v, want one account", usedAccounts)
+	}
+	if got, want := util.Clean(usedAccounts[0]["account_id"]), imageLeaseAccountID("token-1"); got != want {
+		t.Fatalf("account_id = %q, want %q", got, want)
+	}
+	if util.Clean(usedAccounts[0]["token_preview"]) == "" {
+		t.Fatal("token_preview is empty, want anonymized token")
+	}
+}
+
+func TestNextImageAccessLeaseRecordsExcludedFilterBranch(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1", "token-2")
+	accounts.UpdateAccount("token-2", map[string]any{"email": "bob@example.com"})
+	ctx, _ := WithAccountUsageTracker(context.Background())
+
+	lease, err := engine.nextImageAccessLease(ctx, "", map[string]struct{}{"token-1": {}})
+	if err != nil {
+		t.Fatalf("nextImageAccessLease() error = %v", err)
+	}
+	defer lease.Release()
+
+	if lease.Token != "token-2" {
+		t.Fatalf("lease.Token = %q, want token-2", lease.Token)
+	}
+	usedAccounts := AccountUsageFromContext(ctx)
+	if len(usedAccounts) != 1 {
+		t.Fatalf("used accounts = %#v, want one account", usedAccounts)
+	}
+	if got, want := util.Clean(usedAccounts[0]["account_id"]), imageLeaseAccountID("token-2"); got != want {
+		t.Fatalf("account_id = %q, want %q", got, want)
+	}
+}
+
+func TestNextImageAccessLeaseRecordsPreferredTokenBranch(t *testing.T) {
+	engine, accounts := newImageLeaseTestEngine(t, "token-1", "token-2")
+	accounts.UpdateAccount("token-2", map[string]any{"email": "bob@example.com"})
+	ctx, _ := WithAccountUsageTracker(context.Background())
+
+	lease, err := engine.nextImageAccessLease(ctx, "token-2", nil)
+	if err != nil {
+		t.Fatalf("nextImageAccessLease() error = %v", err)
+	}
+	defer lease.Release()
+
+	if lease.Token != "token-2" {
+		t.Fatalf("lease.Token = %q, want token-2", lease.Token)
+	}
+	usedAccounts := AccountUsageFromContext(ctx)
+	if len(usedAccounts) != 1 {
+		t.Fatalf("used accounts = %#v, want one account", usedAccounts)
+	}
+	if got, want := util.Clean(usedAccounts[0]["account_id"]), imageLeaseAccountID("token-2"); got != want {
+		t.Fatalf("account_id = %q, want %q", got, want)
+	}
+}
+
+func TestNextImageAccessLeaseRecordsTokenProviderFallback(t *testing.T) {
+	engine := &Engine{
+		ImageTokenProvider: func(context.Context) (string, error) { return "provider-token", nil },
+	}
+	ctx, _ := WithAccountUsageTracker(context.Background())
+
+	lease, err := engine.nextImageAccessLease(ctx, "", nil)
+	if err != nil {
+		t.Fatalf("nextImageAccessLease() error = %v", err)
+	}
+	if lease.Token != "provider-token" {
+		t.Fatalf("lease.Token = %q, want provider-token", lease.Token)
+	}
+	usedAccounts := AccountUsageFromContext(ctx)
+	if len(usedAccounts) != 1 {
+		t.Fatalf("used accounts = %#v, want one account", usedAccounts)
+	}
+	if got, want := util.Clean(usedAccounts[0]["account_id"]), imageLeaseAccountID("provider-token"); got != want {
+		t.Fatalf("account_id = %q, want %q", got, want)
+	}
+}
+
+func TestNextImageAccessLeaseWithoutTrackerDoesNotPanic(t *testing.T) {
+	engine, _ := newImageLeaseTestEngine(t, "token-1")
+
+	lease, err := engine.nextImageAccessLease(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("nextImageAccessLease() error = %v", err)
+	}
+	lease.Release()
+}
+
 func newImageLeaseAccountServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

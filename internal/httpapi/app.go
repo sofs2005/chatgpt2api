@@ -262,7 +262,9 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	billingRef := a.protocolBillingReference(identity, "/v1/images/generations", model)
 	a.attachProtocolBillingCharger(body, identity, billingRef)
-	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
+	ctx, _ := protocol.WithAccountUsageTracker(r.Context())
+	*r = *r.WithContext(ctx)
+	result, stream, err := a.engine.HandleImageGenerations(ctx, body)
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, billingRef, body)
 }
 
@@ -311,7 +313,9 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	billingRef := a.protocolBillingReference(identity, "/v1/images/edits", model)
 	a.attachProtocolBillingCharger(body, identity, billingRef)
-	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
+	ctx, _ := protocol.WithAccountUsageTracker(r.Context())
+	*r = *r.WithContext(ctx)
+	result, stream, err := a.engine.HandleImageEdits(ctx, body, images)
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, billingRef, body)
 }
 
@@ -343,7 +347,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	billingRef := a.protocolBillingReference(identity, "/v1/chat/completions", model)
 	a.attachProtocolBillingCharger(body, identity, billingRef)
 	ctx, _ := protocol.WithAccountUsageTracker(r.Context())
-	r = r.WithContext(ctx)
+	*r = *r.WithContext(ctx)
 	result, stream, err := a.engine.HandleChatCompletions(ctx, body)
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, billingRef)
 }
@@ -431,7 +435,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	billingRef := a.protocolBillingReference(identity, "/v1/responses", model)
 	a.attachProtocolBillingCharger(body, identity, billingRef)
 	ctx, _ := protocol.WithAccountUsageTracker(r.Context())
-	r = r.WithContext(ctx)
+	*r = *r.WithContext(ctx)
 	result, stream, err := a.engine.HandleResponsesScoped(ctx, body, identityScope(identity))
 	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, billingRef)
 }
@@ -458,7 +462,7 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	defer release()
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	ctx, _ := protocol.WithAccountUsageTracker(r.Context())
-	r = r.WithContext(ctx)
+	*r = *r.WithContext(ctx)
 	result, stream, err := a.engine.HandleMessages(ctx, body)
 	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate, service.BillingReference{})
 }
@@ -2026,6 +2030,7 @@ func (a *App) imageOwnerDisplayNames() map[string]string {
 }
 
 func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity, payload map[string]any, endpoint, summary string, run func(context.Context, map[string]any) (map[string]any, error)) (map[string]any, error) {
+	ctx, _ = protocol.WithAccountUsageTracker(ctx)
 	start := time.Now()
 	requestCapture := payloadAuditCapture(payload)
 	payload["owner_id"] = identityScope(identity)

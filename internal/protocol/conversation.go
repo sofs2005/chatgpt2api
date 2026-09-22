@@ -1017,6 +1017,7 @@ func (e *Engine) nextImageAccessLease(ctx context.Context, preferredToken string
 					return util.Clean(account["access_token"]) == preferredToken
 				})
 				if err == nil && lease.Token != "" {
+					e.recordImageAccountUsage(ctx, lease.Token)
 					return lease, nil
 				}
 				lease.Release()
@@ -1028,12 +1029,14 @@ func (e *Engine) nextImageAccessLease(ctx context.Context, preferredToken string
 				return !excluded
 			})
 			if err == nil && lease.Token != "" {
+				e.recordImageAccountUsage(ctx, lease.Token)
 				return lease, nil
 			}
 			lease.Release()
 		}
 		lease, err := e.Accounts.GetAvailableImageAccessToken(ctx)
 		if err == nil {
+			e.recordImageAccountUsage(ctx, lease.Token)
 			return lease, nil
 		}
 		if e.ImageTokenProvider == nil || len(e.Accounts.ListAccounts()) > 0 {
@@ -1045,9 +1048,25 @@ func (e *Engine) nextImageAccessLease(ctx context.Context, preferredToken string
 		if err != nil {
 			return service.AccountLease{}, err
 		}
+		e.recordImageAccountUsage(ctx, token)
 		return service.AccountLease{Token: token}, nil
 	}
 	return service.AccountLease{}, fmt.Errorf("no account service configured")
+}
+
+// recordImageAccountUsage records the account serving an image request so the
+// business log can attribute the call to a upstream account. Accounts may be
+// absent (ImageTokenProvider-only deployments), in which case the token is still
+// recorded without a name.
+func (e *Engine) recordImageAccountUsage(ctx context.Context, token string) {
+	if e == nil {
+		return
+	}
+	accountName := ""
+	if e.Accounts != nil {
+		accountName = upstreamAccountName(e.Accounts.GetAccount(token))
+	}
+	recordAccountUsage(ctx, token, accountName)
 }
 
 func (e *Engine) activeImageConversationSession(request ConversationRequest) (service.ImageConversationSession, bool) {

@@ -723,6 +723,65 @@ func TestCreationTaskResponseImageRouteIsNotAnAdminTaskResource(t *testing.T) {
 	}
 }
 
+func TestRunLoggedImageTaskCreatesAccountUsageTrackerForLogs(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	installHTTPTestImageStream(t, app)
+	_, err := app.runLoggedImageTask(
+		context.Background(),
+		service.Identity{ID: "user-1", Role: service.AuthRoleUser, Name: "frontend"},
+		map[string]any{"model": "gpt-image-2", "prompt": "draw", "n": 1},
+		"/api/creation-tasks/image-generations",
+		"文生图",
+		func(ctx context.Context, payload map[string]any) (map[string]any, error) {
+			result, _, err := app.engine.HandleImageGenerations(ctx, payload)
+			return result, err
+		},
+	)
+	if err != nil {
+		t.Fatalf("runLoggedImageTask() error = %v", err)
+	}
+	logs := app.logs.Search(service.LogQuery{Limit: 20})
+	item := findLogBySummary(logs, "文生图调用完成")
+	if item == nil {
+		t.Fatalf("expected image task log, got %#v", logs)
+	}
+	detail := util.StringMap(item["detail"])
+	if detail["endpoint"] != "/api/creation-tasks/image-generations" || util.Clean(detail["upstream_account_id"]) == "" || util.Clean(detail["upstream_token_preview"]) == "" {
+		t.Fatalf("image task log detail missing upstream account fields: %#v", detail)
+	}
+}
+
+func TestImageGenerationsCallLogIncludesUpstreamAccount(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "frontend", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	installHTTPTestImageStream(t, app)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2","n":1,"response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("image generation status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	items := app.logs.Search(service.LogQuery{Limit: 20})
+	item := findLogBySummary(items, "文生图调用完成")
+	if item == nil {
+		t.Fatalf("expected image generation log, got %#v", items)
+	}
+	detail := util.StringMap(item["detail"])
+	if util.Clean(detail["upstream_account_id"]) == "" || util.Clean(detail["upstream_token_preview"]) == "" {
+		t.Fatalf("image generation log detail missing upstream account fields: %#v", detail)
+	}
+}
+
 func TestRunLoggedImageTaskLogsTextOutputAsFailure(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
@@ -3825,6 +3884,39 @@ func TestProtocolCallLogCapturesUnknownLengthRequestWithoutDuplicateAudit(t *tes
 		t.Fatalf("small request should not be marked truncated: %#v", detail)
 	}
 	if auditLog := findHTTPAuditLogByPath(items, "/v1/images/generations"); auditLog != nil {
+		t.Fatalf("protocol request should not also create generic audit log: %#v", auditLog)
+	}
+}
+
+// A successful protocol call already writes a business log carrying the request
+// args, so the audit middleware must not append a second generic audit entry.
+// The handler rebinds the request context, and only an in-place *r update is
+// visible to the middleware that marks the request as business-logged.
+func TestProtocolSuccessDoesNotWriteDuplicateAuditLog(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	_, rawKey, err := app.auth.CreateAPIKey(service.AuthRoleUser, "frontend", service.AuthOwner{})
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+	app.engine.HandleChatCompletionsFunc = func(context.Context, map[string]any) (map[string]any, *protocol.StreamResult, error) {
+		return map[string]any{"choices": []any{}}, nil, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("chat completions status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	items := app.logs.Search(service.LogQuery{Limit: 50, View: service.LogViewAll})
+	if findLogBySummary(items, "文本生成调用完成") == nil {
+		t.Fatalf("expected business call log, got %#v", items)
+	}
+	if auditLog := findHTTPAuditLogByPath(items, "/v1/chat/completions"); auditLog != nil {
 		t.Fatalf("protocol request should not also create generic audit log: %#v", auditLog)
 	}
 }

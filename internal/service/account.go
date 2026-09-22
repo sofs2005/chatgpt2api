@@ -534,11 +534,6 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 		s.clearStickyLocked(accessToken, true, true)
 		s.items = append(s.items[:idx], s.items[idx+1:]...)
 		_ = s.saveLocked()
-		s.logs.Add("自动移除限流账号", map[string]any{
-			"module":         "accounts",
-			"operation_type": "自动移除",
-			"token":          util.AnonymizeToken(accessToken),
-		})
 		return nil
 	}
 	if status := util.Clean(account["status"]); status == "异常" || status == "限流" || status == "禁用" || status == "刷新中" || status == "过期待刷新" {
@@ -550,12 +545,6 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 	alignFingerprintDeviceID(account)
 	s.items[idx] = account
 	_ = s.saveLocked()
-	s.logs.Add("更新账号", map[string]any{
-		"module":         "accounts",
-		"operation_type": "更新",
-		"token":          util.AnonymizeToken(accessToken),
-		"status":         account["status"],
-	})
 	return util.CopyMap(account)
 }
 
@@ -616,12 +605,6 @@ func (s *AccountService) UpdateAccountFromSessionImport(oldAccessToken, newAcces
 		}
 	}
 	_ = s.saveLocked()
-	s.logs.Add("更新Session账号", map[string]any{
-		"module":         "accounts",
-		"operation_type": "更新",
-		"token":          util.AnonymizeToken(newAccessToken),
-		"status":         account["status"],
-	})
 	return true
 }
 
@@ -1394,11 +1377,6 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 		s.clearStickyLocked(resolvedToken, true, true)
 		s.items = append(s.items[:idx], s.items[idx+1:]...)
 		_ = s.saveLocked()
-		s.logs.Add("自动移除限流账号", map[string]any{
-			"module":         "accounts",
-			"operation_type": "自动移除",
-			"token":          util.AnonymizeToken(resolvedToken),
-		})
 		return nil
 	}
 	s.items[idx] = account
@@ -1406,20 +1384,11 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 	return util.CopyMap(account)
 }
 
-func (s *AccountService) RemoveInvalidToken(accessToken, event string) bool {
+func (s *AccountService) RemoveInvalidToken(accessToken string) bool {
 	if !s.config.AutoRemoveInvalidAccounts() {
 		return false
 	}
-	removed := s.RemoveToken(accessToken)
-	if removed {
-		s.logs.Add("自动移除异常账号", map[string]any{
-			"module":         "accounts",
-			"operation_type": "自动移除",
-			"source":         event,
-			"token":          util.AnonymizeToken(accessToken),
-		})
-	}
-	return removed
+	return s.RemoveToken(accessToken)
 }
 
 func (s *AccountService) ApplyAccountError(accessToken, event string, err error) (string, bool) {
@@ -1451,14 +1420,14 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 			return "检测到token过期，已提交刷新任务", true
 		}
 		// Accounts without session_token cannot be refreshed and become invalid.
-		if !s.RemoveInvalidToken(accessToken, event) {
+		if !s.RemoveInvalidToken(accessToken) {
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常", "quota": 0, "image_quota_unknown": false})
 		}
 		return "检测到token过期且无法刷新", true
 	}
 	// Revoked or invalidated tokens cannot be refreshed.
 	if IsAccountInvalidErrorMessage(message) {
-		if !s.RemoveInvalidToken(accessToken, event) {
+		if !s.RemoveInvalidToken(accessToken) {
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常", "quota": 0, "image_quota_unknown": false})
 		}
 		return "检测到封号", true
@@ -1530,12 +1499,6 @@ func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, n
 		}
 	}
 	_ = s.saveLocked()
-	s.logs.Add("刷新账号token", map[string]any{
-		"module":         "accounts",
-		"operation_type": "更新",
-		"token":          util.AnonymizeToken(newAccessToken),
-		"status":         account["status"],
-	})
 	return true
 }
 

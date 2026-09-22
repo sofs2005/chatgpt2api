@@ -219,6 +219,58 @@ func TestWithTextLeaseRecordsUpstreamAccountEmail(t *testing.T) {
 	}
 }
 
+func TestUpstreamAccountNameFallbackOrder(t *testing.T) {
+	cases := []struct {
+		name    string
+		account map[string]any
+		want    string
+	}{
+		{
+			name:    "email wins",
+			account: map[string]any{"email": "alice@example.com", "user_id": "user-1", "chatgpt_account_id": "acct-1"},
+			want:    "alice@example.com",
+		},
+		{
+			name:    "user_id when email is blank",
+			account: map[string]any{"email": "  ", "user_id": "user-1", "chatgpt_account_id": "acct-1"},
+			want:    "user-1",
+		},
+		{
+			name:    "chatgpt_account_id when email and user_id are missing",
+			account: map[string]any{"chatgpt_account_id": "acct-1"},
+			want:    "acct-1",
+		},
+		{
+			name:    "empty account yields empty name",
+			account: map[string]any{},
+			want:    "",
+		},
+	}
+	for _, tc := range cases {
+		if got := upstreamAccountName(tc.account); got != tc.want {
+			t.Fatalf("%s: upstreamAccountName() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestWithTextLeaseRecordsUserIDWhenEmailMissing(t *testing.T) {
+	engine, accounts := newTextLeaseTestEngine(t, "token-1")
+	accounts.UpdateAccount("token-1", map[string]any{"user_id": "user-42"})
+	ctx, _ := WithAccountUsageTracker(context.Background())
+
+	if err := engine.withTextLease(ctx, nil, func(_ *backend.Client, _ service.AccountLease) error { return nil }); err != nil {
+		t.Fatalf("withTextLease() error = %v", err)
+	}
+
+	usedAccounts := AccountUsageFromContext(ctx)
+	if len(usedAccounts) != 1 {
+		t.Fatalf("used accounts = %#v, want one account", usedAccounts)
+	}
+	if got := util.Clean(usedAccounts[0]["account_name"]); got != "user-42" {
+		t.Fatalf("account_name = %q, want user-42", got)
+	}
+}
+
 func TestTextModelDoesNotForceImageChatRoute(t *testing.T) {
 	if IsImageChatRequest(map[string]any{"model": "gpt-5", "messages": []any{map[string]any{"role": "user", "content": "hello"}}}) {
 		t.Fatal("gpt-5 text chat should not be routed as an image request without image modality")

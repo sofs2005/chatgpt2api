@@ -541,6 +541,10 @@ func (s *AccountService) UpdateAccount(accessToken string, updates map[string]an
 	if status := util.Clean(account["status"]); status == "异常" || status == "限流" || status == "禁用" || status == "刷新中" || status == "过期待刷新" {
 		s.clearStickyLocked(accessToken, true, true)
 	}
+	// cookie 首次写入时（如会话导入）必须同步对齐设备身份：
+	// 导入链路先 AddAccounts 生成随机指纹，再把浏览器带来的 session_cookies
+	// 通过这里写入，此时 oai-did cookie 与 fp[oai-device-id] 是两个不同的设备。
+	alignFingerprintDeviceID(account)
 	s.items[idx] = account
 	_ = s.saveLocked()
 	s.logs.Add("更新账号", map[string]any{
@@ -2362,6 +2366,10 @@ func (s *AccountService) findIndexLocked(accessToken string) int {
 	return -1
 }
 
+// loadAccounts 读取并规范化历史账号。
+//
+// 这里刻意不落库：加载路径保持只读，身份修正交由 GetAccount 在账号被真正
+// 使用时完成并持久化（见 ensureAccountFingerprint）。
 func (s *AccountService) loadAccounts() []map[string]any {
 	items, err := s.storage.LoadAccounts()
 	if err != nil {
@@ -2593,6 +2601,7 @@ func ensureAccountFingerprint(account map[string]any) (map[string]any, bool) {
 	// 因此把浏览器身份字段迁移到当前池内的等价族/版本。
 	// 注意：只重建浏览器身份，必须保留 oai-device-id / oai-session-id——
 	// 它们是账号的稳定身份，且 oai-did cookie 与注册设备绑定，重建会造成新的身份撕裂。
+	migratedPool := false
 	if stored := util.StringMap(normalized["fp"]); len(stored) > 0 && !browserFamilyVersionInPool(
 		util.Clean(stored["browser-family"]), util.Clean(stored["browser-version"]),
 	) {
@@ -2600,6 +2609,13 @@ func ensureAccountFingerprint(account map[string]any) (map[string]any, bool) {
 		normalized["fp"] = migrated
 		normalized["browser-family"] = util.Clean(migrated["browser-family"])
 		normalized["browser-version"] = util.Clean(migrated["browser-version"])
+		migratedPool = true
+	}
+	// 指纹迁移会改写浏览器身份，而 cf_clearance 是绑定在签发时那套身份上的：
+	// 旧身份的通行证配上新身份的 UA/TLS，对 CF 而言是自相矛盾的信号，
+	// 比「没有凭证」更容易触发挑战。因此迁移时连同时间戳一起丢弃。
+	if migratedPool {
+		dropFingerprintBoundClearance(normalized)
 		return normalized, true
 	}
 	fp, changed := NormalizeBrowserFingerprint(normalized["fp"])
@@ -2621,7 +2637,70 @@ func ensureAccountFingerprint(account map[string]any) (map[string]any, bool) {
 		normalized["browser-version"] = version
 		changed = true
 	}
+	if alignFingerprintDeviceID(normalized) {
+		changed = true
+	}
 	return normalized, changed
+}
+
+// alignFingerprintDeviceID 让指纹里的 oai-device-id 与 cookie 里的 oai-did 同源。
+//
+// 导入账号时，oai-did cookie 是真实浏览器写的，而 fp["oai-device-id"] 由
+// NewAccountBrowserFingerprint 随机生成，二者从入库那一刻就不同。出站请求同时发送
+// 两者（header OAI-Device-Id 与 cookie oai-did），上游与 Cloudflare 因此看到
+// 「cookie 指向设备 A、请求头指向设备 B」的身份撕裂。
+//
+// 以 cookie 为准回填指纹：cookie 是浏览器与服务端之间的既成事实，
+// 改指纹比改 cookie 更安全——cf_clearance 等凭证是按 cookie 侧身份签发的。
+func alignFingerprintDeviceID(account map[string]any) bool {
+	fp := util.StringMap(account["fp"])
+	if len(fp) == 0 {
+		return false
+	}
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	cookieDeviceID := util.Clean(cookies["oai-did"])
+	if cookieDeviceID == "" {
+		return false
+	}
+	if util.Clean(fp["oai-device-id"]) == cookieDeviceID {
+		return false
+	}
+	fp["oai-device-id"] = cookieDeviceID
+	account["fp"] = fp
+	return true
+}
+
+// dropFingerprintBoundClearance 丢弃与浏览器身份绑定的 Cloudflare 挑战凭证。
+//
+// 指纹迁移改写了 UA / Client-Hints / TLS profile，旧的 cf_clearance 与 cf_chl_*
+// 是绑定在旧身份上的。继续携带会发出「凭证说身份 A、请求说身份 B」的矛盾信号，
+// 因此连同时间戳一起清除，让下一次请求以干净身份重新通过挑战。
+// __cf_bm / __cflb / _cfuvid 与身份无关，保留。
+func dropFingerprintBoundClearance(account map[string]any) bool {
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	if len(cookies) == 0 {
+		return false
+	}
+	dropped := false
+	for name := range cookies {
+		if name == "cf_clearance" || strings.HasPrefix(name, "cf_chl_") {
+			delete(cookies, name)
+			dropped = true
+		}
+	}
+	if !dropped {
+		return false
+	}
+	account["session_cookies"] = cookies
+	if updatedAt := util.StringMap(account["session_cookie_updated_at"]); len(updatedAt) > 0 {
+		for name := range updatedAt {
+			if name == "cf_clearance" || strings.HasPrefix(name, "cf_chl_") {
+				delete(updatedAt, name)
+			}
+		}
+		account["session_cookie_updated_at"] = updatedAt
+	}
+	return true
 }
 
 // migrateAccountFingerprintIntoPool 把池外的浏览器身份迁移到池内的等价族/版本。

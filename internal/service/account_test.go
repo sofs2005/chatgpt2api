@@ -3038,3 +3038,119 @@ func writeJSON(t *testing.T, w http.ResponseWriter, payload any) {
 		t.Fatalf("write json: %v", err)
 	}
 }
+
+// 导入账号的 oai-did cookie 来自真实浏览器，而 fp[oai-device-id] 由入库时随机生成，
+// 二者从入库那刻起就不同。出站请求会同时发送 cookie 与 OAI-Device-Id 头，
+// 上游因此看到两个不同的设备身份——必须对齐到 cookie 侧。
+func TestEnsureAccountFingerprintAlignsDeviceIDWithCookie(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+
+	accounts.UpdateAccount("token-1", map[string]any{
+		"session_cookies": map[string]string{
+			"oai-did":      "browser-device-id",
+			"cf_clearance": "clearance-value",
+		},
+	})
+
+	account := accounts.GetAccount("token-1")
+	fp := account["fp"].(map[string]any)
+	if got := util.Clean(fp["oai-device-id"]); got != "browser-device-id" {
+		t.Fatalf("fp[oai-device-id] = %q, want browser-device-id", got)
+	}
+	// 设备身份对齐不应丢掉 cookie 本身。
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	if cookies["oai-did"] != "browser-device-id" {
+		t.Fatalf("oai-did cookie = %q, want browser-device-id", cookies["oai-did"])
+	}
+}
+
+// 没有 oai-did cookie 时不得凭空改写指纹（注册链路走 AddAccountsWithDeviceID）。
+func TestEnsureAccountFingerprintKeepsDeviceIDWithoutCookie(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	before := util.Clean(accounts.GetAccount("token-1")["fp"].(map[string]any)["oai-device-id"])
+
+	accounts.UpdateAccount("token-1", map[string]any{
+		"session_cookies": map[string]string{"__cf_bm": "bm-value"},
+	})
+
+	after := util.Clean(accounts.GetAccount("token-1")["fp"].(map[string]any)["oai-device-id"])
+	if after != before {
+		t.Fatalf("oai-device-id = %q, want unchanged %q", after, before)
+	}
+}
+
+// 指纹迁移会改写浏览器身份，而 cf_clearance 绑定的是旧身份。
+// 继续携带等于发出「凭证说身份 A、请求说身份 B」的矛盾信号，
+// 因此迁移时必须连同时间戳一起丢弃；与身份无关的 CF cookie 保留。
+func TestFingerprintMigrationDropsFingerprintBoundClearance(t *testing.T) {
+	backend := &accountStorageSpy{accounts: []map[string]any{{
+		"access_token": "token-1",
+		"type":         "Plus",
+		"status":       "正常",
+		"fp": map[string]any{
+			"version":        1,
+			"browser-family": "edge",
+			"browser-version": "143",
+			"impersonate":    "edge101",
+			"user-agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+			"oai-device-id":  "device-1",
+			"oai-session-id": "session-1",
+		},
+		"session_cookies": map[string]any{
+			"cf_clearance": "old-clearance",
+			"cf_chl_2":     "challenge-token",
+			"__cf_bm":      "bm-value",
+			"_cfuvid":      "visitor-id",
+		},
+		"session_cookie_updated_at": map[string]any{
+			"cf_clearance": "2026-09-22T00:00:00Z",
+			"cf_chl_2":     "2026-09-22T00:00:00Z",
+			"__cf_bm":      "2026-09-22T00:00:00Z",
+			"_cfuvid":      "2026-09-22T00:00:00Z",
+		},
+	}}}
+	accounts := NewAccountService(backend, testAccountConfig{}, nil, NewLogService())
+
+	account := accounts.GetAccount("token-1")
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	if _, ok := cookies["cf_clearance"]; ok {
+		t.Fatalf("cf_clearance should be dropped on migration: %#v", cookies)
+	}
+	if _, ok := cookies["cf_chl_2"]; ok {
+		t.Fatalf("cf_chl_* should be dropped on migration: %#v", cookies)
+	}
+	if cookies["__cf_bm"] != "bm-value" || cookies["_cfuvid"] != "visitor-id" {
+		t.Fatalf("identity-independent cookies should survive: %#v", cookies)
+	}
+	updatedAt := SessionCookieStringMap(account["session_cookie_updated_at"])
+	if _, ok := updatedAt["cf_clearance"]; ok {
+		t.Fatalf("cf_clearance timestamp should be dropped: %#v", updatedAt)
+	}
+	if _, ok := updatedAt["cf_chl_2"]; ok {
+		t.Fatalf("cf_chl_* timestamp should be dropped: %#v", updatedAt)
+	}
+	if updatedAt["__cf_bm"] != "2026-09-22T00:00:00Z" {
+		t.Fatalf("__cf_bm timestamp should survive: %#v", updatedAt)
+	}
+}
+
+// 账号已在池内时不得丢弃 cf_clearance——迁移只发生在身份被改写时。
+func TestInPoolFingerprintKeepsClearance(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{
+		"session_cookies": map[string]string{
+			"cf_clearance": "fresh-clearance",
+			"oai-did":      "device-1",
+		},
+		"session_cookie_updated_at": map[string]string{"cf_clearance": "2026-09-22T00:00:00Z"},
+	})
+
+	account := accounts.GetAccount("token-1")
+	cookies := SessionCookieStringMap(account["session_cookies"])
+	if cookies["cf_clearance"] != "fresh-clearance" {
+		t.Fatalf("cf_clearance = %q, want fresh-clearance for in-pool fingerprint", cookies["cf_clearance"])
+	}
+}

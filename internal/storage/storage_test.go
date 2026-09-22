@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -240,5 +242,121 @@ func TestDocumentNameValidation(t *testing.T) {
 				t.Fatalf("SaveJSONDocument(%q) succeeded, want error", name)
 			}
 		})
+	}
+}
+
+func TestSQLiteEnablesIncrementalAutoVacuum(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
+	backend, err := NewDatabaseBackend("sqlite:///" + filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatalf("NewDatabaseBackend() error = %v", err)
+	}
+	defer backend.db.Close()
+
+	var mode int
+	if err := backend.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatalf("read auto_vacuum: %v", err)
+	}
+	if mode != autoVacuumIncremental {
+		t.Fatalf("auto_vacuum = %d, want %d", mode, autoVacuumIncremental)
+	}
+}
+
+// 已有库打开时应迁移到 INCREMENTAL 并回收历史空闲页。
+// 没有这一步时，删除只标记空闲，文件永不收缩。
+func TestSQLiteVacuumMigratesExistingDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
+	dsn := "sqlite:///" + filepath.ToSlash(dbPath)
+
+	// 用关闭 auto_vacuum 的连接建库并塞入数据，模拟历史库。
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE blob_store (id INTEGER PRIMARY KEY, data TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	payload := strings.Repeat("x", 4096)
+	for i := 0; i < 400; i++ {
+		if _, err := raw.Exec(`INSERT INTO blob_store (data) VALUES (?)`, payload); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	if _, err := raw.Exec(`DELETE FROM blob_store`); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	grown, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+
+	backend, err := NewDatabaseBackend(dsn)
+	if err != nil {
+		t.Fatalf("NewDatabaseBackend() error = %v", err)
+	}
+	defer backend.db.Close()
+
+	var mode, free int
+	if err := backend.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatalf("read auto_vacuum: %v", err)
+	}
+	if mode != autoVacuumIncremental {
+		t.Fatalf("auto_vacuum = %d, want %d", mode, autoVacuumIncremental)
+	}
+	if err := backend.db.QueryRow(`PRAGMA freelist_count`).Scan(&free); err != nil {
+		t.Fatalf("read freelist_count: %v", err)
+	}
+	if free != 0 {
+		t.Fatalf("freelist_count = %d, want 0 after migration VACUUM", free)
+	}
+
+	shrunk, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if shrunk.Size() >= grown.Size() {
+		t.Fatalf("file size = %d, want smaller than %d after VACUUM", shrunk.Size(), grown.Size())
+	}
+}
+
+// 删除日志后应主动回收空闲页，否则保留期清理不释放磁盘。
+func TestDeleteLogsBeforeReclaimsFreePages(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chatgpt2api.db")
+	backend, err := NewDatabaseBackend("sqlite:///" + filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatalf("NewDatabaseBackend() error = %v", err)
+	}
+	defer backend.db.Close()
+
+	payload := strings.Repeat("y", 4096)
+	for i := 0; i < 400; i++ {
+		if err := backend.AppendLog(map[string]any{
+			"time":    "2026-04-30 10:00:00",
+			"type":    "event",
+			"summary": "bulk",
+			"detail":  map[string]any{"payload": payload},
+		}); err != nil {
+			t.Fatalf("AppendLog() error = %v", err)
+		}
+	}
+
+	deleted, err := backend.DeleteLogsBefore("2026-05-01")
+	if err != nil {
+		t.Fatalf("DeleteLogsBefore() error = %v", err)
+	}
+	if deleted != 400 {
+		t.Fatalf("DeleteLogsBefore() = %d, want 400", deleted)
+	}
+
+	var free int
+	if err := backend.db.QueryRow(`PRAGMA freelist_count`).Scan(&free); err != nil {
+		t.Fatalf("read freelist_count: %v", err)
+	}
+	if free != 0 {
+		t.Fatalf("freelist_count = %d, want 0 after reclaim", free)
 	}
 }

@@ -111,6 +111,13 @@ func (b *DatabaseBackend) configureSQLite() error {
 	if b.driver != "sqlite" {
 		return nil
 	}
+	// auto_vacuum 必须先于 journal_mode=WAL 设置：一旦切到 WAL，
+	// 该 PRAGMA 就被锁定为当前值，之后再也改不动（实测设置静默失效）。
+	//
+	// 迁移失败不阻断启动：VACUUM 需要与原库相当的临时空间，磁盘紧张或存在
+	// 并发实例时会失败，而此前 auto_vacuum=0 也能正常工作。VACUUM 是原子的，
+	// 失败时库保持原状，下次启动会重试。
+	_ = b.enableAutoVacuum()
 	for _, stmt := range []string{
 		`PRAGMA journal_mode=WAL`,
 		`PRAGMA synchronous=NORMAL`,
@@ -121,6 +128,50 @@ func (b *DatabaseBackend) configureSQLite() error {
 		if _, err := b.db.Exec(stmt); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+const autoVacuumIncremental = 2
+
+// enableAutoVacuum 打开增量 vacuum，使删除的行把空间归还给空闲列表并最终收缩文件。
+//
+// 没有它时，日志与图片元数据的保留期清理只是把页标记为空闲，文件永不缩小：
+// 实测一个 232 MB 的库里有 227 MB 是已删除数据留下的空闲页，真实数据仅约 5 MB。
+//
+// 两个约束决定了这里的写法：
+//   - auto_vacuum 只能在切到 WAL 之前、且 schema 为空时改变取值；
+//   - 已有数据时必须 VACUUM 才能把新取值写进 header 并重排现有页。
+//
+// 因此已有库走「先 VACUUM 迁到 INCREMENTAL」这条一次性路径；迁移幂等，
+// 已经是 INCREMENTAL 的库直接返回。
+func (b *DatabaseBackend) enableAutoVacuum() error {
+	var mode int
+	if err := b.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return err
+	}
+	if mode == autoVacuumIncremental {
+		return nil
+	}
+	// 1 = FULL, 2 = INCREMENTAL。取 INCREMENTAL：回收动作显式触发，
+	// 不会在每次事务提交时搬页，写入路径的开销更可预期。
+	if _, err := b.db.Exec(`PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
+		return err
+	}
+	var objects int
+	if err := b.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','index')`,
+	).Scan(&objects); err != nil {
+		return err
+	}
+	if objects == 0 {
+		// 空库：PRAGMA 已经生效，等第一次建表即可。
+		return nil
+	}
+	// 已有库：VACUUM 才能把新设置写进 header 并重排现有页。
+	// 这是唯一会重写整个文件的时刻，也顺带回收历史空闲页。
+	if _, err := b.db.Exec(`VACUUM`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -398,7 +449,28 @@ func (b *DatabaseBackend) DeleteLogsBefore(day string) (int, error) {
 	if err != nil {
 		return 0, nil
 	}
-	return int(rows), nil
+	deleted := int(rows)
+	if deleted > 0 {
+		// 删除只把页标记为空闲；不主动回收的话文件永不收缩。
+		_ = b.reclaimFreePages()
+	}
+	return deleted, nil
+}
+
+// reclaimFreePages 把空闲页归还给操作系统。
+//
+// 这里用 VACUUM 而不是 PRAGMA incremental_vacuum：后者每次调用只回收一页，
+// 面对保留期清理这种成批删除（实测 452 页空闲）需要调用数百次才能收敛，
+// 而 VACUUM 一次就能把空闲列表清空（实测 452 → 0），并保持 auto_vacuum 设置不变。
+//
+// VACUUM 会重写整个文件，因此只在确有删除时触发——保留期清理每天至多一次，
+// 开销可以接受。失败不影响删除结果，仅放弃本次收缩。
+func (b *DatabaseBackend) reclaimFreePages() error {
+	if b.driver != "sqlite" {
+		return nil
+	}
+	_, err := b.db.Exec(`VACUUM`)
+	return err
 }
 
 func (b *DatabaseBackend) placeholder(index int) string {

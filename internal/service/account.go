@@ -33,6 +33,9 @@ import (
 //	limits_progress     - Usage limit progress
 //	default_model_slug  - Default model slug
 //	restore_at          - Quota restore time
+//	file_upload_quota   - Remaining attachment upload quota (display only)
+//	file_upload_restore_at - Attachment upload quota restore time (display only)
+//	file_upload_quota_unknown - Whether the attachment upload quota is unknown
 type AccountConfig interface {
 	AutoRemoveInvalidAccounts() bool
 	AutoRemoveRateLimitedAccounts() bool
@@ -1572,6 +1575,8 @@ func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string
 	limits := anyList(init["limits_progress"])
 	accountType := s.detectAccountType(accessToken, me, init)
 	quota, restoreAt, unknown := extractQuotaAndRestoreAt(limits)
+	// 附件上传额度独立于生图额度：仅用于展示，不参与限流状态判定与账号调度。
+	fileUploadQuota, fileUploadRestoreAt, fileUploadUnknown := extractFeatureQuota(limits, "file_upload")
 	chatGPTAccountID := firstNonEmpty(
 		chatGPTAccountIDFromPayload(decodeAccessTokenPayload(accessToken)),
 		util.Clean(me["chatgpt_account_id"]),
@@ -1583,16 +1588,19 @@ func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string
 		status = "限流"
 	}
 	return map[string]any{
-		"email":               me["email"],
-		"user_id":             me["id"],
-		"chatgpt_account_id":  chatGPTAccountID,
-		"type":                accountType,
-		"quota":               quota,
-		"image_quota_unknown": unknown,
-		"limits_progress":     limits,
-		"default_model_slug":  init["default_model_slug"],
-		"restore_at":          restoreAt,
-		"status":              status,
+		"email":                     me["email"],
+		"user_id":                   me["id"],
+		"chatgpt_account_id":        chatGPTAccountID,
+		"type":                      accountType,
+		"quota":                     quota,
+		"image_quota_unknown":       unknown,
+		"file_upload_quota":         fileUploadQuota,
+		"file_upload_restore_at":    fileUploadRestoreAt,
+		"file_upload_quota_unknown": fileUploadUnknown,
+		"limits_progress":           limits,
+		"default_model_slug":        init["default_model_slug"],
+		"restore_at":                restoreAt,
+		"status":                    status,
 	}, nil
 }
 
@@ -2768,6 +2776,18 @@ func normalizeAccount(item map[string]any) map[string]any {
 	}
 	normalized["quota"] = quota
 	normalized["image_quota_unknown"] = util.ToBool(normalized["image_quota_unknown"])
+	// 附件上传额度与生图额度相互独立，只用于展示，不参与限流判定。
+	// 老账号记录里没有该字段，按「未知」展示，避免误显示成 0。
+	if _, ok := normalized["file_upload_quota"]; ok {
+		fileUploadQuota := util.ToInt(normalized["file_upload_quota"], 0)
+		if fileUploadQuota < 0 {
+			fileUploadQuota = 0
+		}
+		normalized["file_upload_quota"] = fileUploadQuota
+		normalized["file_upload_quota_unknown"] = util.ToBool(normalized["file_upload_quota_unknown"])
+	} else {
+		normalized["file_upload_quota_unknown"] = true
+	}
 	if email := util.Clean(normalized["email"]); email != "" {
 		normalized["email"] = email
 	} else {
@@ -2796,6 +2816,11 @@ func normalizeAccount(item map[string]any) map[string]any {
 		normalized["restore_at"] = restore
 	} else {
 		normalized["restore_at"] = nil
+	}
+	if restore := util.Clean(normalized["file_upload_restore_at"]); restore != "" {
+		normalized["file_upload_restore_at"] = restore
+	} else {
+		normalized["file_upload_restore_at"] = nil
 	}
 	// 账号级代理：绑定后该账号的出口 IP 固定，cf_clearance 的签发 IP 前提才能成立。
 	// 留空表示沿用全局代理。
@@ -2857,26 +2882,29 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 		}
 		cookieStatus, missingCookies := accountCookieCompleteness(account)
 		out = append(out, map[string]any{
-			"id":                 accountIDFromToken(token),
-			"token_preview":      util.AnonymizeToken(token),
-			"access_token":       token,
-			"type":               util.ValueOr(account["type"], "Free"),
-			"status":             util.ValueOr(account["status"], "正常"),
-			"enabled":            accountEnabledValue(account),
-			"quota":              util.ValueOr(account["quota"], 0),
-			"imageQuotaUnknown":  util.ToBool(account["image_quota_unknown"]),
-			"cookieStatus":       cookieStatus,
-			"missingCookies":     missingCookies,
-			"email":              account["email"],
-			"user_id":            account["user_id"],
-			"chatgpt_account_id": account["chatgpt_account_id"],
-			"limits_progress":    util.ValueOr(account["limits_progress"], []any{}),
-			"default_model_slug": account["default_model_slug"],
-			"restoreAt":          account["restore_at"],
-			"proxy":              util.Clean(account["proxy"]),
-			"success":            util.ToInt(account["success"], 0),
-			"fail":               util.ToInt(account["fail"], 0),
-			"lastUsedAt":         account["last_used_at"],
+			"id":                     accountIDFromToken(token),
+			"token_preview":          util.AnonymizeToken(token),
+			"access_token":           token,
+			"type":                   util.ValueOr(account["type"], "Free"),
+			"status":                 util.ValueOr(account["status"], "正常"),
+			"enabled":                accountEnabledValue(account),
+			"quota":                  util.ValueOr(account["quota"], 0),
+			"imageQuotaUnknown":      util.ToBool(account["image_quota_unknown"]),
+			"fileUploadQuota":        account["file_upload_quota"],
+			"fileUploadRestoreAt":    account["file_upload_restore_at"],
+			"fileUploadQuotaUnknown": util.ToBool(account["file_upload_quota_unknown"]),
+			"cookieStatus":           cookieStatus,
+			"missingCookies":         missingCookies,
+			"email":                  account["email"],
+			"user_id":                account["user_id"],
+			"chatgpt_account_id":     account["chatgpt_account_id"],
+			"limits_progress":        util.ValueOr(account["limits_progress"], []any{}),
+			"default_model_slug":     account["default_model_slug"],
+			"restoreAt":              account["restore_at"],
+			"proxy":                  util.Clean(account["proxy"]),
+			"success":                util.ToInt(account["success"], 0),
+			"fail":                   util.ToInt(account["fail"], 0),
+			"lastUsedAt":             account["last_used_at"],
 		})
 	}
 	return out
@@ -2994,9 +3022,15 @@ func searchAccountType(value any) string {
 }
 
 func extractQuotaAndRestoreAt(limits []any) (int, any, bool) {
+	return extractFeatureQuota(limits, "image_gen")
+}
+
+// extractFeatureQuota 从 limits_progress 中取出某个功能的剩余额度。
+// 返回的 bool 表示该功能在 limits_progress 中缺失（额度未知），而不是额度为零。
+func extractFeatureQuota(limits []any, featureName string) (int, any, bool) {
 	for _, raw := range limits {
 		item, ok := raw.(map[string]any)
-		if !ok || item["feature_name"] != "image_gen" {
+		if !ok || item["feature_name"] != featureName {
 			continue
 		}
 		restore := any(nil)

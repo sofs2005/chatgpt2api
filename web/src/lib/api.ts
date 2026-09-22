@@ -149,6 +149,10 @@ export type Account = {
   enabled: boolean;
   quota: number;
   imageQuotaUnknown?: boolean;
+  // 附件上传额度独立于生图额度，仅用于展示，不参与限流判定与账号调度。
+  fileUploadQuota?: number | null;
+  fileUploadRestoreAt?: string | null;
+  fileUploadQuotaUnknown?: boolean;
   cookieStatus?: "完整" | "部分" | "无";
   missingCookies?: string[];
   email?: string | null;

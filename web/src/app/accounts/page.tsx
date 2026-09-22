@@ -171,6 +171,14 @@ function formatQuota(account: Account) {
   return String(Math.max(0, account.quota));
 }
 
+// 附件上传额度：上游 file_upload 限额，与生图额度互相独立，仅作展示。
+function formatFileUploadQuota(account: Account) {
+  if (account.fileUploadQuotaUnknown || account.fileUploadQuota === null || account.fileUploadQuota === undefined) {
+    return "未知";
+  }
+  return String(Math.max(0, account.fileUploadQuota));
+}
+
 function formatRestoreAt(value?: string | null) {
   if (!value) {
     return { absolute: "—", relative: "" };
@@ -1351,7 +1359,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             ) : (
               <>
                 <div className="hidden overflow-x-auto md:block">
-                  <Table className="min-w-[980px]">
+                  <Table className="min-w-[1080px]">
                     <TableHeader>
                       <TableRow>
                         <TableHead className="w-12">
@@ -1365,6 +1373,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                         <TableHead className="w-[32%]">账号</TableHead>
                         <TableHead className="w-[19rem]">状态 / 类型 / Cookie</TableHead>
                         <TableHead className="w-32">额度</TableHead>
+                        <TableHead className="w-32">上传额度</TableHead>
                         <TableHead className="w-44">恢复时间</TableHead>
                         <TableHead className="w-36">调用</TableHead>
                         <TableHead className="w-28 text-right">操作</TableHead>
@@ -1403,6 +1412,11 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                           <TableCell>
                             <Badge variant="info" className="rounded-md px-2 py-1">
                               {formatQuota(account)}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="secondary" className="rounded-md px-2 py-1">
+                              {formatFileUploadQuota(account)}
                             </Badge>
                           </TableCell>
                           <TableCell>{renderRestoreInfo(account)}</TableCell>
@@ -1455,6 +1469,9 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                               <Badge variant="info" className="rounded-md px-2 py-1">
                                 额度 {formatQuota(account)}
                               </Badge>
+                              <Badge variant="secondary" className="rounded-md px-2 py-1">
+                                上传额度 {formatFileUploadQuota(account)}
+                              </Badge>
                             </div>
 
                             <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -1467,6 +1484,12 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                               <div className="rounded-lg bg-stone-50 p-2">
                                 <div className="text-muted-foreground">恢复</div>
                                 <div className="mt-1">{renderRestoreInfo(account)}</div>
+                              </div>
+                              <div className="rounded-lg bg-stone-50 p-2">
+                                <div className="text-muted-foreground">上传额度恢复</div>
+                                <div className="mt-1">
+                                  {formatRestoreAt(account.fileUploadRestoreAt).absolute}
+                                </div>
                               </div>
                             </div>
                           </div>

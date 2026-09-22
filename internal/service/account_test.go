@@ -274,6 +274,74 @@ func TestNormalizeAccountPreservesChatGPTAccountID(t *testing.T) {
 	}
 }
 
+func TestExtractFeatureQuotaReadsFileUploadQuota(t *testing.T) {
+	limits := []any{
+		map[string]any{"feature_name": "image_gen", "remaining": float64(4), "reset_after": "2026-05-08T01:48:36Z"},
+		map[string]any{"feature_name": "file_upload", "remaining": float64(3), "reset_after": "2026-05-09T01:48:36Z"},
+	}
+
+	quota, restoreAt, unknown := extractQuotaAndRestoreAt(limits)
+	if quota != 4 || restoreAt != "2026-05-08T01:48:36Z" || unknown {
+		t.Fatalf("image quota = %d / %#v / unknown=%v", quota, restoreAt, unknown)
+	}
+
+	fileQuota, fileRestoreAt, fileUnknown := extractFeatureQuota(limits, "file_upload")
+	if fileQuota != 3 || fileRestoreAt != "2026-05-09T01:48:36Z" || fileUnknown {
+		t.Fatalf("file upload quota = %d / %#v / unknown=%v", fileQuota, fileRestoreAt, fileUnknown)
+	}
+}
+
+func TestExtractFeatureQuotaReportsMissingFeatureAsUnknown(t *testing.T) {
+	limits := []any{map[string]any{"feature_name": "image_gen", "remaining": float64(4)}}
+
+	quota, restoreAt, unknown := extractFeatureQuota(limits, "file_upload")
+	if quota != 0 || restoreAt != nil || !unknown {
+		t.Fatalf("missing file_upload = %d / %#v / unknown=%v, want unknown", quota, restoreAt, unknown)
+	}
+}
+
+func TestFileUploadQuotaStaysOutOfImageQuotaAndStatus(t *testing.T) {
+	normalized := normalizeAccount(map[string]any{
+		"access_token":              "token-1",
+		"quota":                     5,
+		"file_upload_quota":         0,
+		"file_upload_restore_at":    "2026-05-09T01:48:36Z",
+		"file_upload_quota_unknown": false,
+		"status":                    "正常",
+	})
+	if normalized["quota"] != 5 {
+		t.Fatalf("quota = %#v, want the image quota untouched", normalized["quota"])
+	}
+	if normalized["status"] != "正常" {
+		t.Fatalf("status = %#v, want 正常 (exhausted upload quota must not limit the account)", normalized["status"])
+	}
+	if normalized["file_upload_quota"] != 0 {
+		t.Fatalf("file_upload_quota = %#v, want 0", normalized["file_upload_quota"])
+	}
+
+	public := publicAccounts([]map[string]any{normalized})[0]
+	if public["quota"] != 5 {
+		t.Fatalf("public quota = %#v, want 5", public["quota"])
+	}
+	if public["fileUploadQuota"] != 0 || public["fileUploadRestoreAt"] != "2026-05-09T01:48:36Z" {
+		t.Fatalf("public upload quota = %#v / %#v", public["fileUploadQuota"], public["fileUploadRestoreAt"])
+	}
+	if public["fileUploadQuotaUnknown"] != false {
+		t.Fatalf("public fileUploadQuotaUnknown = %#v, want false", public["fileUploadQuotaUnknown"])
+	}
+}
+
+func TestNormalizeAccountMarksLegacyRecordUploadQuotaUnknown(t *testing.T) {
+	normalized := normalizeAccount(map[string]any{"access_token": "token-1", "quota": 5})
+
+	if normalized["file_upload_quota_unknown"] != true {
+		t.Fatalf("legacy record upload quota unknown = %#v, want true", normalized["file_upload_quota_unknown"])
+	}
+	if _, ok := normalized["file_upload_quota"]; ok {
+		t.Fatalf("legacy record should not invent an upload quota: %#v", normalized["file_upload_quota"])
+	}
+}
+
 func TestFetchRemoteInfoSummarizesForbiddenChallenge(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

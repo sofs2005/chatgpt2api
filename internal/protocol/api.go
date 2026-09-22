@@ -272,7 +272,7 @@ func (e *Engine) withTextLease(ctx context.Context, exhaustedTokens map[string]s
 	if fn == nil {
 		return nil
 	}
-	return fn(e.TextBackend(lease.Token), lease)
+	return fn(e.TextBackendWithAttachmentCache(lease.Token), lease)
 }
 
 func (e *Engine) RunEditableFileExport(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (service.EditableFileRunResult, error) {

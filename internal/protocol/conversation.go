@@ -69,6 +69,8 @@ type Engine struct {
 	ResponseContexts      *ResponseContextStore
 	chatCompletionCacheMu sync.Mutex
 	ChatCompletionCache   *ChatCompletionCache
+	textAttachmentCacheMu sync.Mutex
+	TextAttachmentCache   *backend.TextAttachmentCache
 }
 
 // imageResumeEntry 记录一个续轮询令牌及其写入时间，用于 TTL 过期清理。
@@ -497,6 +499,27 @@ func (o ImageOutput) Chunk() map[string]any {
 
 func (e *Engine) TextBackend(accessToken string) *backend.Client {
 	return backend.NewClient(accessToken, e.Accounts, e.Proxy)
+}
+
+// textAttachmentCache 返回进程内共享的附件上传缓存，用于跨 token 重试复用已上传文件。
+func (e *Engine) textAttachmentCache() *backend.TextAttachmentCache {
+	if e == nil {
+		return nil
+	}
+	e.textAttachmentCacheMu.Lock()
+	defer e.textAttachmentCacheMu.Unlock()
+	if e.TextAttachmentCache == nil {
+		e.TextAttachmentCache = backend.NewTextAttachmentCache(backend.TextAttachmentCacheTTL())
+	}
+	return e.TextAttachmentCache
+}
+
+// TextBackendWithAttachmentCache 构造一次用户请求内使用的后端客户端，
+// 并挂上共享附件缓存，使重试命中同一账号时不再重复上传。
+func (e *Engine) TextBackendWithAttachmentCache(accessToken string) *backend.Client {
+	client := e.TextBackend(accessToken)
+	client.SetTextAttachmentCache(e.textAttachmentCache())
+	return client
 }
 
 func (e *Engine) ListModels(ctx context.Context) (map[string]any, error) {

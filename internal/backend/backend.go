@@ -72,6 +72,7 @@ type Client struct {
 	searchTimeout              time.Duration
 	searchPollInterval         time.Duration
 	diagnostic                 func(stage string, attrs map[string]any)
+	textAttachmentCache        *TextAttachmentCache
 }
 
 type ChatRequirements struct {

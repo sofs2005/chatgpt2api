@@ -54,13 +54,58 @@ func buildTextMessageAttachments(refs []TextAttachmentRef) []map[string]any {
 func (c *Client) uploadTextContextFiles(ctx context.Context, files []contextoffload.File, reqs ChatRequirements, timeout time.Duration) ([]TextAttachmentRef, error) {
 	refs := make([]TextAttachmentRef, 0, len(files))
 	for _, file := range files {
+		if ref, ok := c.cachedTextContextFile(file); ok {
+			refs = append(refs, ref)
+			continue
+		}
 		ref, err := c.uploadTextContextFile(ctx, file, reqs, timeout)
 		if err != nil {
 			return nil, err
 		}
+		c.storeTextContextFile(file, ref)
 		refs = append(refs, ref)
 	}
 	return refs, nil
+}
+
+// accountEmail identifies the account that owns uploaded attachments. It is the
+// stable half of the attachment cache key: tokens rotate, emails do not.
+func (c *Client) accountEmail() string {
+	account := c.accountForFingerprint()
+	if account == nil {
+		return ""
+	}
+	return strings.TrimSpace(util.Clean(account["email"]))
+}
+
+func textContextFileKey(file contextoffload.File) (string, string) {
+	filename := strings.TrimSpace(file.Filename)
+	if filename == "" {
+		filename = "context.txt"
+	}
+	return filename, file.Text
+}
+
+func (c *Client) cachedTextContextFile(file contextoffload.File) (TextAttachmentRef, bool) {
+	if c.textAttachmentCache == nil {
+		return TextAttachmentRef{}, false
+	}
+	filename, content := textContextFileKey(file)
+	return c.textAttachmentCache.Get(textAttachmentCacheKey(c.accountEmail(), filename, content))
+}
+
+func (c *Client) storeTextContextFile(file contextoffload.File, ref TextAttachmentRef) {
+	if c.textAttachmentCache == nil {
+		return
+	}
+	filename, content := textContextFileKey(file)
+	c.textAttachmentCache.Put(textAttachmentCacheKey(c.accountEmail(), filename, content), ref)
+}
+
+// SetTextAttachmentCache wires a cache shared across the per-retry clients built
+// for one user request. A nil cache disables reuse.
+func (c *Client) SetTextAttachmentCache(cache *TextAttachmentCache) {
+	c.textAttachmentCache = cache
 }
 
 func (c *Client) uploadTextContextFile(ctx context.Context, file contextoffload.File, reqs ChatRequirements, timeout time.Duration) (TextAttachmentRef, error) {

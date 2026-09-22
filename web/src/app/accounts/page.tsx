@@ -438,9 +438,15 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
       applyAccountItems(data.items);
       window.dispatchEvent(new Event(QUOTA_REFRESH_EVENT));
       if (data.errors.length > 0) {
+        const cfChallengeCount = data.results.filter((item) => item.cf_challenge).length;
         const firstError = data.errors[0]?.error;
+        // CF 挑战是出口 IP / 指纹问题，不是账号问题。单独说清，
+        // 否则使用者会误以为这批账号失效而去删号。
+        const cfHint = cfChallengeCount > 0
+          ? `其中 ${cfChallengeCount} 个是 Cloudflare 拦截（出口 IP 或指纹问题，账号本身未失效）`
+          : "";
         toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${cfHint ? `，${cfHint}` : firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
         toast.success(`刷新成功 ${data.refreshed} 个账户`);

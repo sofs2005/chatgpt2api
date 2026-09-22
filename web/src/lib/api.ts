@@ -206,6 +206,9 @@ export type AccountRefreshResult = {
   quota?: number;
   image_quota_unknown?: boolean;
   restore_at?: string | null;
+  // 本次失败是 Cloudflare 挑战（出口 IP / 指纹 / cookie 上下文问题），
+  // 而不是账号本身有问题。后端不会因此改动账号状态。
+  cf_challenge?: boolean;
 };
 
 type AccountRefreshResponse = {

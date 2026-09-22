@@ -81,3 +81,34 @@ func TestImageConversationSessionServiceOverwriteInvalidateCleanupAndReload(t *t
 		t.Fatal("Cleanup() kept expired binding")
 	}
 }
+
+// Cleanup 必须能被过期项真正触发删除；这是会话表唯一的收缩路径。
+// 该逻辑此前没有任何调用点，导致 image_conversation_sessions.json 只增不减。
+func TestImageConversationSessionServiceCleanupRemovesExpired(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_conversation_sessions.json")
+	backend := newImageConversationSessionTestBackend(t)
+	svc := NewImageConversationSessionService(path, backend)
+
+	old := time.Now().Add(-72 * time.Hour)
+	fresh := time.Now().Add(-1 * time.Hour)
+	svc.Bind(ImageConversationSession{OwnerID: "owner", FrontendConversationID: "old", AccessToken: "t1", UpstreamConversationID: "c1", UpstreamParentMessageID: "m1", LastUsedAt: old})
+	svc.Bind(ImageConversationSession{OwnerID: "owner", FrontendConversationID: "fresh", AccessToken: "t2", UpstreamConversationID: "c2", UpstreamParentMessageID: "m2", LastUsedAt: fresh})
+
+	if removed := svc.Cleanup(48 * time.Hour); removed != 1 {
+		t.Fatalf("Cleanup() removed %d, want 1", removed)
+	}
+	if _, ok := svc.Get("owner", "old"); ok {
+		t.Fatal("Cleanup() kept the expired binding")
+	}
+	if _, ok := svc.Get("owner", "fresh"); !ok {
+		t.Fatal("Cleanup() removed the fresh binding")
+	}
+	// 过期项被持久化删除，重载后不应复活。
+	reloaded := NewImageConversationSessionService(path, backend)
+	if _, ok := reloaded.Get("owner", "old"); ok {
+		t.Fatal("expired binding reappeared after reload")
+	}
+	if _, ok := reloaded.Get("owner", "fresh"); !ok {
+		t.Fatal("fresh binding lost after reload")
+	}
+}

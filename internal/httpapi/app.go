@@ -54,6 +54,7 @@ type App struct {
 	editableFiles *service.EditableFileTaskService
 	announce      *service.AnnouncementService
 	prompts       *service.PromptFavoriteService
+	imageSessions *service.ImageConversationSessionService
 	cpa           *service.CPAConfig
 	cpaImport     *service.CPAImportService
 	sub2          *service.Sub2APIConfig
@@ -99,7 +100,7 @@ func NewApp() (*App, error) {
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	imageSessions := service.NewImageConversationSessionService(filepath.Join(cfg.DataDir, "image_conversation_sessions.json"), storageBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger, ImageConversationSessions: imageSessions}
-	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), globalLimiter: service.NewGlobalLimiter(cfg.GlobalConcurrentLimit()), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), imageSessions: imageSessions, cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), globalLimiter: service.NewGlobalLimiter(cfg.GlobalConcurrentLimit()), cancel: cancel}
 	app.editableFiles = service.NewEditableFileTaskService(documentStore, cfg.DataDir, func(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (service.EditableFileRunResult, error) {
 		if app.engine == nil {
 			return service.EditableFileRunResult{}, fmt.Errorf("editable file engine is not configured")
@@ -153,11 +154,39 @@ func NewApp() (*App, error) {
 	})
 	accounts.StartLimitedWatcher(ctx, time.Duration(cfg.RefreshAccountIntervalMinute())*time.Minute)
 	logs.StartRetentionCleaner(ctx, cfg.LogRetentionDays, 24*time.Hour, logger)
+	app.startImageSessionCleaner(ctx, logger)
 	_, _ = app.images.CleanupStorage(service.ImageStorageCleanupOptions{
 		RetentionDays: cfg.ImageRetentionDays(),
 		MaxBytes:      cfg.ImageStorageLimitBytes(),
 	})
 	return app, nil
+}
+
+// startImageSessionCleaner 定期清理过期的生图会话绑定。
+//
+// 会话表原本只增不减：ImageConversationSessionService.Cleanup 定义了却没有任何
+// 调用点，每发起一次生图就多一项，且每项都带着 access_token。会话只用于生图
+// 任务的续轮询，超过图片保留期后不再有复用价值，因此按同一周期回收。
+func (a *App) startImageSessionCleaner(ctx context.Context, logger *service.Logger) {
+	if a == nil || a.imageSessions == nil || a.config == nil {
+		return
+	}
+	retention := time.Duration(a.config.ImageRetentionDays()) * 24 * time.Hour
+	go func() {
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				if removed := a.imageSessions.Cleanup(retention); removed > 0 && logger != nil {
+					logger.Info("image conversation session cleanup completed", "removed", removed)
+				}
+				timer.Reset(24 * time.Hour)
+			}
+		}
+	}()
 }
 
 func newUpdateService(cfg *config.Store) *service.UpdateService {

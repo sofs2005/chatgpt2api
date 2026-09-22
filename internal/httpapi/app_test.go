@@ -4543,3 +4543,33 @@ func encodeHTTPTestPNG(file interface {
 	}
 	return png.Encode(file, img)
 }
+
+// 会话清理必须真的被挂上并执行：Cleanup 定义了却没有任何调用点，是原缺陷。
+// 清理器首次触发是立即的（timer 0），因此启动后短时间内应删掉过期会话。
+func TestStartImageSessionCleanerRemovesExpiredSessions(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	expired := time.Now().Add(-90 * 24 * time.Hour)
+	app.imageSessions.Bind(service.ImageConversationSession{
+		OwnerID:                 "owner",
+		FrontendConversationID:  "expired",
+		AccessToken:             "token",
+		UpstreamConversationID:  "conv",
+		UpstreamParentMessageID: "msg",
+		LastUsedAt:              expired,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app.startImageSessionCleaner(ctx, nil)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := app.imageSessions.Get("owner", "expired"); !ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expired session survived; cleaner is not wired or not running")
+}

@@ -181,6 +181,29 @@ func TestSessionRefresherWithoutAccountProxyLeavesContextEmpty(t *testing.T) {
 	}
 }
 
+// profile 必须随请求抵达发送方：httpDo 拿不到 access token，
+// 只能从请求上下文取账号的指纹 profile，否则会回落到硬编码的 chrome。
+func TestSessionRefresherCarriesAccountProfileToRequest(t *testing.T) {
+	var got string
+	refresher := NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		got = AccountProfileFromContext(req.Context())
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access","sessionToken":"new-session","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+
+	_, err := refresher.RefreshSessionWithContext(context.Background(), "old-access", "old-session", SessionRefreshContext{
+		Profile: "firefox148",
+	})
+	if err != nil {
+		t.Fatalf("RefreshSessionWithContext() error = %v", err)
+	}
+	if got != "firefox148" {
+		t.Fatalf("account profile = %q, want the account's own fingerprint profile", got)
+	}
+}
+
 func waitForCondition(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

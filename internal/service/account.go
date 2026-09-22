@@ -110,11 +110,15 @@ func NewAccountService(backend storage.Backend, config AccountConfig, proxy *Pro
 		random:                    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	// Initialize SessionRefresher with the uTLS client for /api/auth/session.
-	// 刷新请求必须走账号自己绑定的代理：它携带该账号的 cf_clearance，
-	// 而 cf_clearance 与签发时的出口 IP 强绑定，换一个 IP 发出会立刻作废。
-	// 代理经请求上下文传入，因为 httpDo 只能拿到 *http.Request。
+	// 刷新请求必须与账号的常规出站请求共用同一套身份：
+	//   - 代理：它携带该账号的 cf_clearance，而 cf_clearance 与签发时的出口 IP
+	//     强绑定，换一个 IP 发出会立刻作废；
+	//   - profile：请求头来自账号指纹，TLS/HTTP2 指纹由 profile 决定，
+	//     两者不同源会让 firefox 账号发出自相矛盾的身份。
+	// 二者都经请求上下文传入，因为 httpDo 只能拿到 *http.Request。
 	s.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
-		client := s.browserHTTPClient(AccountProxyFromContext(req.Context()), defaultRemoteProfile, refreshTimeout)
+		profile := firstNonEmpty(AccountProfileFromContext(req.Context()), defaultRemoteProfile)
+		client := s.browserHTTPClient(AccountProxyFromContext(req.Context()), profile, refreshTimeout)
 		if client == nil {
 			client = &http.Client{Timeout: refreshTimeout}
 		}
@@ -989,21 +993,34 @@ func (s *AccountService) GetAvailableAccessToken(ctx context.Context) (string, e
 }
 
 // sessionRefreshContext 组装 /api/auth/session 刷新所需的浏览器上下文。
-// 账号绑定的代理一并带上，使刷新请求与账号的常规出站请求共用同一个出口 IP。
+//
+// 三段身份信息都必须与账号的常规出站请求一致：
+//   - headers：账号指纹
+//   - proxy：账号绑定的代理，使刷新与常规请求共用同一出口 IP
+//   - profile：账号指纹的 TLS profile，使 TLS 指纹与 header 同源
+//
+// cookie 也走 AccountSessionCookiesForRequest 的新鲜度判定，而不是原样全发：
+// /api/auth/session 与 bootstrap 一样要先过 Cloudflare，超过窗口的 cf_clearance
+// 继续发送只会被判定为可疑，与 bootstrap 路径的语义必须一致。
 func (s *AccountService) sessionRefreshContext(accessToken string, overrideCookies map[string]string) SessionRefreshContext {
 	account := s.GetAccount(accessToken)
 	headers := BrowserHeadersForFingerprint(nil)
 	cookies := map[string]string{}
 	if account != nil {
 		headers = BrowserHeadersForFingerprint(account["fp"])
-		for name, value := range SessionCookieStringMap(account["session_cookies"]) {
+		for name, value := range AccountSessionCookiesForRequest(account, time.Now()) {
 			cookies[name] = value
 		}
 	}
 	for name, value := range overrideCookies {
 		cookies[name] = value
 	}
-	return SessionRefreshContext{Cookies: cookies, Headers: headers, Proxy: AccountProxy(account)}
+	return SessionRefreshContext{
+		Cookies: cookies,
+		Headers: headers,
+		Proxy:   AccountProxy(account),
+		Profile: accountImpersonation(account),
+	}
 }
 
 func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error) {
@@ -1203,6 +1220,15 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		message := res.err.Error()
 		if normalized, handled := s.ApplyAccountError(res.token, "refresh_accounts", res.err); handled {
 			message = normalized
+		}
+		// Cloudflare 挑战是「出口 IP / 指纹 / cookie 上下文」的问题，不是账号本身的问题。
+		//
+		// 这里刻意不写 status：账号状态会被 UpdateAccount 用于自动删除
+		// （auto_remove_rate_limited_accounts 开启时，status=限流 会直接移除账号），
+		// 把一次瞬时挑战标记成限流等于因网络抖动删号。
+		// 因此只在刷新结果里如实标注，交给使用者判断。
+		if util.IsCloudflareChallengeMessage(message) {
+			detail["cf_challenge"] = true
 		}
 		pendingSessionRefresh := false
 		if current := s.GetAccount(res.token); current != nil {
@@ -1814,7 +1840,35 @@ func (s *AccountService) rememberSessionCookies(accessToken string, current map[
 	return merged
 }
 
+// bootstrapRemote 执行刷新链路的 bootstrap（GET 上游首页），换取 CF 上下文。
+//
+// 复用 util.RetryBootstrap 的重试策略：403（Cloudflare 挑战）与 429 都是瞬时失败，
+// 退避重试比直接上报划算。此前这里一次失败就直接返回，而同样是一次 bootstrap 的
+// 生图链路有重试，导致同一个瞬时 403 在生图被吸收、在批量刷新却大面积误报失败。
+//
+// 这里不换账号：RefreshAccounts 的语义是「刷新这批指定的账号」，
+// 静默换成别的账号刷新没有意义。换号只在生图/对话这类要拿到结果的路径上成立。
 func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, error) {
+	var cookies map[string]string
+	err := util.RetryBootstrap(ctx, func(attempt int) (error, bool) {
+		updated, status, err := s.bootstrapRemoteOnce(ctx, client, baseURL, accessToken, sessionCookies)
+		// 保留已刷新的 cookie：上游在挑战响应里也可能下发 __cf_bm 等新值，
+		// 丢掉会让重试仍用旧 cookie，重试就失去意义。
+		cookies = updated
+		if err == nil {
+			return nil, false
+		}
+		return err, util.IsRetryableBootstrapStatus(status)
+	})
+	if err != nil {
+		return cookies, err
+	}
+	return cookies, nil
+}
+
+// bootstrapRemoteOnce 执行一次 bootstrap。
+// 返回本次响应后应当持有的 session cookie，以及上游状态码（传输层失败为 0）。
+func (s *AccountService) bootstrapRemoteOnce(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, int, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/", nil)
 	for key, value := range s.remoteBootstrapHeaders(accessToken) {
 		req.Header.Set(key, value)
@@ -1822,15 +1876,15 @@ func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Clien
 	addSessionCookiesToRequest(req, sessionCookies)
 	resp, err := client.Do(req)
 	if err != nil {
-		return sessionCookies, err
+		return sessionCookies, 0, err
 	}
 	sessionCookies = s.rememberSessionCookies(accessToken, sessionCookies, resp)
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return sessionCookies, refreshHTTPError("bootstrap", resp.StatusCode, data)
+		return sessionCookies, resp.StatusCode, refreshHTTPError("bootstrap", resp.StatusCode, data)
 	}
-	return sessionCookies, nil
+	return sessionCookies, resp.StatusCode, nil
 }
 
 func (s *AccountService) StartLimitedWatcher(ctx context.Context, interval time.Duration) {
@@ -2397,7 +2451,12 @@ func (s *AccountService) remoteBootstrapHeaders(accessToken string) map[string]s
 }
 
 func (s *AccountService) remoteImpersonation(accessToken string) string {
-	account := s.GetAccount(accessToken)
+	return accountImpersonation(s.GetAccount(accessToken))
+}
+
+// accountImpersonation 从账号数据取出浏览器指纹 profile。
+// 账号不存在时回落到默认 profile。
+func accountImpersonation(account map[string]any) string {
 	if raw, ok := account["fp"].(map[string]any); ok {
 		if value := util.Clean(raw["impersonate"]); value != "" {
 			return value

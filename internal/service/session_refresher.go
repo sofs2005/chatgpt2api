@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"chatgpt2api/internal/util"
 )
 
 // SessionRefresher refreshes tokens through /api/auth/session with a uTLS client.
@@ -51,6 +53,12 @@ type SessionRefreshContext struct {
 	// Proxy 是账号绑定的代理。刷新请求携带该账号的 cf_clearance，
 	// 而 cf_clearance 与签发时的出口 IP 强绑定，必须从同一个 IP 发出。
 	Proxy string
+	// Profile 是账号的浏览器指纹 profile（如 chrome145 / firefox148）。
+	//
+	// 刷新请求的 header 来自账号指纹，TLS/HTTP2 指纹则由 profile 决定，
+	// 二者必须同源：若这里回落到硬编码的 chrome profile，firefox 账号就会发出
+	// 「UA 与 TLS 说 Chrome、Sec-Ch-Ua-Full-Version 说 Firefox」的矛盾身份。
+	Profile string
 }
 
 const (
@@ -145,7 +153,9 @@ func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string, r
 	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(WithAccountProxy(ctx, requestContext.Proxy), http.MethodGet, sessionEndpoint, nil)
+	ctx = WithAccountProxy(ctx, requestContext.Proxy)
+	ctx = WithAccountProfile(ctx, requestContext.Profile)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sessionEndpoint, nil)
 	if err != nil {
 		return refreshResult{err: fmt.Errorf("create request: %w", err)}
 	}
@@ -190,6 +200,11 @@ func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string, r
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		// CF 挑战页是一大段 HTML，直接截断塞进错误里既不可读，
+		// 也无法被上层识别为「挑战」而非「账号问题」。这里统一成共享文案。
+		if util.IsCloudflareChallengeBody(strings.ToLower(string(body))) {
+			return refreshResult{err: fmt.Errorf("session endpoint returned %d: %s", resp.StatusCode, util.CloudflareChallengeMessage)}
+		}
 		preview := string(body)
 		if len(preview) > 300 {
 			preview = preview[:300]

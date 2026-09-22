@@ -107,6 +107,31 @@ func AccountProxyFromContext(ctx context.Context) string {
 	return value
 }
 
+// accountProfileKey 是请求上下文里承载浏览器指纹 profile 的键。
+//
+// 与代理同理：session 刷新的 httpDo 拿不到 access token，无法自行查询账号指纹。
+// 若不传递，这里只能回落到硬编码的 chrome profile，而请求头来自账号指纹——
+// firefox 账号就会发出「TLS 与 UA 说 Chrome、Sec-Ch-Ua-Full-Version 说 Firefox」
+// 的自相矛盾身份。
+type accountProfileKey struct{}
+
+// WithAccountProfile 把账号的浏览器指纹 profile 绑定到请求上下文。
+func WithAccountProfile(ctx context.Context, profile string) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, accountProfileKey{}, strings.TrimSpace(profile))
+}
+
+// AccountProfileFromContext 取出请求上下文里的指纹 profile；未绑定时返回空串。
+func AccountProfileFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(accountProfileKey{}).(string)
+	return value
+}
+
 func (s *ProxyService) Test(candidate string, timeout time.Duration) map[string]any {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {

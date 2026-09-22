@@ -305,6 +305,193 @@ func TestFetchRemoteInfoSummarizesForbiddenChallenge(t *testing.T) {
 	}
 }
 
+// 刷新链路的 bootstrap 必须与生图链路一样对瞬时 Cloudflare 挑战重试。
+// 此前刷新一次 403 就直接失败，而同样一次 bootstrap 的生图有重试，
+// 导致同一个瞬时挑战在生图被吸收、在批量刷新却大面积误报失败。
+func TestBootstrapRemoteRetriesTransientChallenge(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		current := attempts
+		mu.Unlock()
+
+		switch r.URL.Path {
+		case "/":
+			// 首次返回 CF 挑战，第二次放行：模拟瞬时挑战。
+			if current == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`<html><script>window._cf_chl_opt={}</script>Enable JavaScript and cookies to continue</html>`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			writeJSON(t, w, map[string]any{"limits_progress": []map[string]any{{
+				"feature_name": "image_gen",
+				"remaining":    7,
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"token-1"})
+	if result["refreshed"] != 1 || result["failed"] != 0 {
+		t.Fatalf("refresh result = %#v, want the transient challenge retried into success", result)
+	}
+	if got := attempts; got < 2 {
+		t.Fatalf("bootstrap attempts = %d, want at least 2 (one retry after the 403)", got)
+	}
+}
+
+// 非瞬时失败（如 404）不应重试：重试只该覆盖 403/429 这类可能自愈的状态。
+func TestBootstrapRemoteDoesNotRetryNonRetryableStatus(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("<html>not found</html>"))
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"token-1"})
+	if result["failed"] != 1 {
+		t.Fatalf("refresh result = %#v, want the 404 reported as a failure", result)
+	}
+	if got := attempts; got != 1 {
+		t.Fatalf("bootstrap attempts = %d, want exactly 1 for a non-retryable status", got)
+	}
+}
+
+// session 刷新的 TLS profile 必须来自账号指纹，而不是硬编码的 chrome。
+// 请求头来自账号指纹、TLS 指纹来自 profile，二者不同源会让 firefox 账号发出
+// 「UA 与 Sec-Ch-Ua 说 Chrome、Sec-Ch-Ua-Full-Version 说 Firefox」的矛盾身份。
+func TestSessionRefreshUsesAccountProfile(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{
+		"status":        "正常",
+		"quota":         5,
+		"session_token": "session-token",
+	})
+
+	// 把账号指纹改成 firefox，模拟池中权重 30% 的那一类账号。
+	account := accounts.GetAccount("token-1")
+	fp := util.StringMap(account["fp"])
+	for key, value := range BrowserFingerprintFromFamilyVersion("firefox", "148") {
+		fp[key] = value
+	}
+	accounts.UpdateAccount("token-1", map[string]any{"fp": fp})
+
+	ctx := accounts.sessionRefreshContext("token-1", nil)
+	if ctx.Profile != "firefox148" {
+		t.Fatalf("session refresh profile = %q, want firefox148 from the account fingerprint", ctx.Profile)
+	}
+
+	// 身份必须自洽：Client-Hints 报的版本要与 UA 同源。
+	userAgent := ctx.Headers["User-Agent"]
+	if !strings.Contains(userAgent, "Firefox/148") {
+		t.Fatalf("User-Agent = %q, want a Firefox 148 identity", userAgent)
+	}
+	if got := ctx.Headers["Sec-Ch-Ua-Full-Version"]; !strings.Contains(got, "148") {
+		t.Fatalf("Sec-Ch-Ua-Full-Version = %q, want 148 to match the User-Agent", got)
+	}
+}
+
+// session 刷新与 bootstrap 共用同一套 CF cookie 新鲜度判定：
+// 超出窗口的 cf_clearance 继续发送只会被 CF 判定为可疑。
+func TestSessionRefreshDropsStaleClearance(t *testing.T) {
+	now := time.Now().UTC()
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{
+		"status":        "正常",
+		"quota":         5,
+		"session_token": "session-token",
+		"session_cookies": map[string]string{
+			"cf_clearance": "stale-cf",
+			"oai-did":      "did-cookie",
+		},
+		"session_cookie_updated_at": map[string]string{
+			// 超过 2 小时窗口，且该账号未绑定代理。
+			"cf_clearance": now.Add(-3 * time.Hour).Format(time.RFC3339),
+		},
+	})
+
+	ctx := accounts.sessionRefreshContext("token-1", nil)
+	if _, ok := ctx.Cookies["cf_clearance"]; ok {
+		t.Fatalf("session refresh cookies = %#v, want the stale cf_clearance dropped", ctx.Cookies)
+	}
+	if ctx.Cookies["oai-did"] != "did-cookie" {
+		t.Fatalf("session refresh cookies = %#v, want non-CF cookies kept", ctx.Cookies)
+	}
+}
+
+// CF 挑战是出口 IP / 指纹 / cookie 上下文的问题，不是账号本身的问题，
+// 因此刷新只做标注、绝不改账号状态：status=限流 会在
+// auto_remove_rate_limited_accounts 开启时直接删除账号。
+func TestRefreshAccountsMarksCloudflareChallengeWithoutChangingStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 所有请求都返回挑战页，模拟出口 IP 被 CF 拦截。
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<html><script>window._cf_chl_opt={}</script>Enable JavaScript and cookies to continue</html>`))
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"token-1"})
+	if result["failed"] != 1 {
+		t.Fatalf("refresh result = %#v, want the challenge reported as a failure", result)
+	}
+
+	// 账号必须原样保留：状态与额度都不变。
+	account := accounts.GetAccount("token-1")
+	if account == nil {
+		t.Fatal("GetAccount() = nil, want the account kept despite the challenge")
+	}
+	if account["status"] != "正常" || account["quota"] != 5 {
+		t.Fatalf("account = %#v, want status/quota unchanged by a Cloudflare challenge", account)
+	}
+
+	// 刷新结果里应当标注这次失败是挑战，便于使用者区分「网络问题」与「账号问题」。
+	details, ok := result["results"].([]map[string]any)
+	if !ok || len(details) != 1 {
+		t.Fatalf("results = %#v, want one refresh detail", result["results"])
+	}
+	if details[0]["cf_challenge"] != true {
+		t.Fatalf("refresh detail = %#v, want cf_challenge marked", details[0])
+	}
+}
+
 func TestRefreshAccountsReturnsEmptyErrorsArray(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -962,6 +1149,11 @@ func TestRefreshAccountsUsesStoredBrowserCookiesForSessionRefresh(t *testing.T) 
 		"quota":           5,
 		"session_token":   "refresh-session-token",
 		"session_cookies": map[string]string{"cf_clearance": "cf-cookie"},
+		// 时间戳不可省：session 刷新与 bootstrap 共用同一套新鲜度判定，
+		// 缺少时间戳的 cf_clearance 会被判定为无法确认有效性而丢弃。
+		"session_cookie_updated_at": map[string]string{
+			"cf_clearance": time.Now().UTC().Format(time.RFC3339),
+		},
 	})
 
 	result := accounts.RefreshAccounts(context.Background(), []string{"expired-access-token"})

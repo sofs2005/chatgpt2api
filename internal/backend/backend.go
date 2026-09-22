@@ -550,40 +550,12 @@ func (c *Client) bootstrapHeaders() map[string]string {
 	}
 }
 
-// bootstrapRetryStatuses 是 bootstrap 值得重试的上游状态码。
-// 403 通常是 Cloudflare 挑战（cf_clearance 失效或指纹不匹配），
-// 429 是上游限流；两者都可能是瞬时的，短暂退避后重试一次比立刻失败更划算。
-// 重试仍失败则如实上抛，由上层决定是否换账号。
-var bootstrapRetryStatuses = map[int]struct{}{
-	http.StatusForbidden:       {},
-	http.StatusTooManyRequests: {},
-}
-
-const (
-	maxBootstrapAttempts    = 3
-	bootstrapRetryBaseDelay = 800 * time.Millisecond
-)
-
+// bootstrap 执行上游 bootstrap 请求。
+// 重试策略由 util.RetryBootstrap 统一提供，与账号刷新链路共用同一份实现。
 func (c *Client) bootstrap(ctx context.Context) error {
-	var lastErr error
-	for attempt := 1; attempt <= maxBootstrapAttempts; attempt++ {
-		err, retryable := c.bootstrapOnce(ctx, attempt)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !retryable || attempt == maxBootstrapAttempts {
-			break
-		}
-		if wait := time.Duration(attempt) * bootstrapRetryBaseDelay; wait > 0 {
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	}
-	return lastErr
+	return util.RetryBootstrap(ctx, func(attempt int) (error, bool) {
+		return c.bootstrapOnce(ctx, attempt)
+	})
 }
 
 // bootstrapOnce 执行一次 bootstrap。第二个返回值表示失败是否值得重试。
@@ -600,9 +572,8 @@ func (c *Client) bootstrapOnce(ctx context.Context, attempt int) (error, bool) {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, retryable := bootstrapRetryStatuses[resp.StatusCode]
 		c.reportStage("bootstrap", false, map[string]any{"status": resp.StatusCode, "attempt": attempt})
-		return upstreamHTTPError("bootstrap", resp.StatusCode, data), retryable
+		return upstreamHTTPError("bootstrap", resp.StatusCode, data), util.IsRetryableBootstrapStatus(resp.StatusCode)
 	}
 	c.powSources, c.powDataBuild = parsePOWResources(string(data))
 	if len(c.powSources) == 0 {

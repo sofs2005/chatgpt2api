@@ -97,6 +97,9 @@ services:
     # 由 privoxy 完成协议转换与按域名分流。
     environment:
       - CHATGPT2API_PROXY=${CHATGPT2API_PROXY:-http://privoxy:8118}
+      # 只给地址不开开关等于没启用：clearance 默认关闭，本栈的存在意义就是
+      # 打开它，所以在这里默认置 true。基础 compose 不受影响，仍保持默认关闭。
+      - CHATGPT2API_CLEARANCE_ENABLED=${CHATGPT2API_CLEARANCE_ENABLED:-true}
       - CHATGPT2API_FLARESOLVERR_URL=${CHATGPT2API_FLARESOLVERR_URL:-http://flaresolverr:8191}
     volumes:
       - ${CHATGPT2API_DATA_DIR:-../data}:/app/data

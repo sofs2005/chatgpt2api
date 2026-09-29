@@ -306,11 +306,39 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 | `CHATGPT2API_IMAGE_MODEL_SLUG` | 空 | 官方生图链路发给上游的 model slug；留空表示 `auto`，由服务端自动路由到当前生图模型 |
 | `CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT` | `0` | 普通用户默认创作并发额度；图片生成/编辑按请求张数计入，聊天任务按 1 个计入；`0` 表示不限制 |
 | `CHATGPT2API_USER_DEFAULT_RPM_LIMIT` | `0` | 普通用户默认创作任务 RPM 限制，`0` 表示不限制 |
+| `CHATGPT2API_GLOBAL_CONCURRENT_LIMIT` | `0` | 全系统并发上限，`0` 表示不限制；后台保存后立即生效 |
 | `CHATGPT2API_IMAGE_RETENTION_DAYS` | `30` | 服务端缓存图片保留天数 |
 | `CHATGPT2API_LOG_RETENTION_DAYS` | `7` | 业务日志保留天数 |
 | `CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS` | `true` | 是否自动移除失效账号 |
 | `CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS` | `false` | 是否自动移除限流账号 |
 | `CHATGPT2API_LOG_LEVELS` | 空 | 日志级别过滤，多个值用逗号分隔：`debug,info,warning,error` |
+
+### 上游 Cloudflare 降低风控
+
+这组配置用于降低撞上 chatgpt.com 上游风控的概率，**默认全部关闭，不开启时出站行为与之前完全一致**。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CHATGPT2API_CLEARANCE_ENABLED` | `false` | 命中 CF 挑战时是否用 FlareSolverr 主动取 `cf_clearance` 并同账号同出口重试一次 |
+| `CHATGPT2API_FLARESOLVERR_URL` | 空 | FlareSolverr 服务地址，如 `http://flaresolverr:8191`；为空则功能不可用 |
+| `CHATGPT2API_CLEARANCE_TIMEOUT_SECONDS` | `60` | 单次求解超时，范围 5-300 |
+| `CHATGPT2API_CLEARANCE_TTL_SECONDS` | `3600` | 凭证缓存时长，实际以 cookie 自身到期时间为上限 |
+| `CHATGPT2API_UPSTREAM_POOL` | 空 | 多出口故障转移池，逗号分隔按优先级排列（`socks5://` 或 `http://`）；留空表示不使用 |
+| `CHATGPT2API_UPSTREAM_POOL_PROBE_SECONDS` | `60` | 出口健康探测间隔，范围 10-3600 |
+
+要点：
+
+- **`cf_clearance` 与签发 IP 强绑定**，因此出口池**只作用于未绑定代理的账号**。已绑定代理的账号换出口会当场作废自己的凭证，反而放大风控信号。
+- 出口切换到新 IP 后，旧出口的 `cf_clearance` 会被显式作废。
+- FlareSolverr 通过 `PROXY_URL=http://privoxy:8118` 复用同一条出口链路，**必须与触发挑战的账号同出口**：`cf_clearance` 绑定签发 IP，换个出口求解等于拿到一张当场作废的凭证。
+- `deploy/docker-compose.warp.yml` 会让 OpenAI 系域名走 WARP，出口 IP 落在 Cloudflare 自家网段，**建议只在自用部署中启用**。
+- 出口池地址含账号密码，配置接口只回显脱敏形式（`socks5://***@host:port`）；回写脱敏值会被忽略，不会覆盖已存凭据。
+
+一键拉起（WARP + Privoxy + FlareSolverr + app）：
+
+```bash
+docker compose -f deploy/docker-compose.warp.yml up -d
+```
 
 ### 存储后端
 

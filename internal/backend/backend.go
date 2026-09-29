@@ -468,12 +468,19 @@ func isClearanceChallengeResponse(resp *http.Response) bool {
 // 不匹配的版本，把一次性修复变成长期撕裂。凭证也只持久化 cookie（见
 // rememberAccountCookies），UA 只在本次重放生效。
 func (c *Client) retryWithFreshClearance(req *http.Request, resp *http.Response) (*http.Response, error) {
-	if !c.clearance.Enabled() || req == nil {
+	if req == nil {
+		return resp, nil
+	}
+	// 从这里起的每个放弃分支都要上报：此前它们静默 return，日志里看不出
+	// 兜底是没有配置、还是配置了但被跳过，两种情况的表现完全一样。
+	if !c.clearance.Enabled() {
+		c.reportStage("clearance", false, map[string]any{"skipped": "clearance disabled"})
 		return resp, nil
 	}
 	// 无 body（GET 等）可直接重放；有 body 但拿不到副本的（流式上传）放弃。
 	replayable := req.Body == nil || req.GetBody != nil
 	if !replayable {
+		c.reportStage("clearance", false, map[string]any{"skipped": "request body is not replayable"})
 		return resp, nil
 	}
 	// 出口必须与请求实际使用的那个一致：cf_clearance 绑定签发 IP，

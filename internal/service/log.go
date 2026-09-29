@@ -888,6 +888,30 @@ func (l *Logger) print(level string, message string, attrs ...any) {
 	l.logger.Log(context.Background(), slogLevel(level), message, sanitizeSlogAttrs(attrs)...)
 }
 
+// Upstream 记录一次上游阶段诊断，统一携带 route/stage 便于按链路过滤。
+//
+// 电平规则：失败进文件与 stdout（需要人当场看见）；成功与被跳过的阶段只进
+// 文件，避免正常请求刷满容器日志。被跳过的阶段尤其重要——它回答的是
+// 「兜底到底有没有试过」，此前这类分支静默返回，失败时无从判断。
+// attrs 由 backend 侧脱敏，这里只做电平映射。
+func (l *Logger) Upstream(route string, attrs map[string]any) {
+	if l == nil {
+		return
+	}
+	ok, _ := attrs["ok"].(bool)
+	skipped := strings.TrimSpace(fmt.Sprint(attrs["skipped"]))
+	fields := make([]any, 0, len(attrs)*2+2)
+	fields = append(fields, "route", route)
+	for key, value := range attrs {
+		fields = append(fields, key, value)
+	}
+	if ok || skipped != "" {
+		l.Request("debug", "upstream stage", fields...)
+		return
+	}
+	l.Request("warning", "upstream stage failed", fields...)
+}
+
 // Request 按给定级别把访问记录投递到两个 sink：日志文件始终记录，
 // stdout（容器日志）只在非 debug 级别记录。
 //

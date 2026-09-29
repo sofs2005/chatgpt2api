@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/util"
 )
 
@@ -1985,3 +1987,79 @@ func TestSolveTurnstileTokenInterpretsEncodedProgram(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// streamingBody 模拟无法重放的请求体：能读一次，但没有 GetBody 副本。
+// 真实场景是流式上传（io.Pipe 之类），http.NewRequest 不会为它生成 GetBody。
+type streamingBody struct{ *strings.Reader }
+
+func (b streamingBody) Close() error { return nil }
+
+// clearanceTestConfig 是 ClearanceConfig 的最小实现，用于把 Enabled() 拨到指定状态。
+type clearanceTestConfig struct {
+	enabled bool
+	url     string
+}
+
+func (c clearanceTestConfig) ClearanceEnabled() bool       { return c.enabled }
+func (c clearanceTestConfig) FlareSolverrURL() string      { return c.url }
+func (c clearanceTestConfig) ClearanceTimeoutSeconds() int { return 60 }
+func (c clearanceTestConfig) ClearanceTTLSeconds() int     { return 3600 }
+
+// 兜底被跳过时必须在日志里留下原因。此前两类放弃都静默返回，"没配置兜底"
+// 与"配了但没跑"在日志上完全一样，无法判断该去查配置还是查 FlareSolverr。
+func TestRetryWithFreshClearanceReportsSkipReason(t *testing.T) {
+	tests := []struct {
+		name      string
+		clearance *service.ClearanceService
+		body      io.Reader
+		getBody   bool
+		wantSkip  string
+	}{
+		// 未配置 FlareSolverr（或开关关闭）：Enabled() 为 false，走不了求解。
+		{name: "clearance disabled", clearance: service.NewClearanceService(clearanceTestConfig{}), wantSkip: "clearance disabled"},
+		// 有请求体却拿不到副本（流式上传）：无法原样重放，只能放弃。
+		{
+			name:      "streaming body",
+			clearance: service.NewClearanceService(clearanceTestConfig{enabled: true, url: "http://127.0.0.1:9"}),
+			body:      streamingBody{strings.NewReader(`{"stream":true}`)},
+			wantSkip:  "request body is not replayable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("cf-mitigated", "challenge")
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer server.Close()
+
+			client := newTestBackendClient(server)
+			client.SetClearanceService(test.clearance)
+			var stages []map[string]any
+			client.SetDiagnosticLogger(func(stage string, attrs map[string]any) {
+				stages = append(stages, attrs)
+			})
+
+			req, err := http.NewRequest(http.MethodPost, server.URL+"/backend-api/models", test.body)
+			if err != nil {
+				t.Fatalf("NewRequest() error = %v", err)
+			}
+			resp, err := client.do(req)
+			if err != nil {
+				t.Fatalf("do() error = %v", err)
+			}
+			defer resp.Body.Close()
+
+			if len(stages) != 1 {
+				t.Fatalf("stages = %#v, want exactly one clearance report", stages)
+			}
+			got := stages[0]
+			if got["stage"] != "clearance" || got["ok"] != false {
+				t.Fatalf("stage report = %#v, want failed clearance stage", got)
+			}
+			if got["skipped"] != test.wantSkip {
+				t.Fatalf("skipped = %#v, want %q", got["skipped"], test.wantSkip)
+			}
+		})
+	}
+}

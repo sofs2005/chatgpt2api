@@ -542,7 +542,9 @@ func (o ImageOutput) Chunk() map[string]any {
 }
 
 func (e *Engine) TextBackend(accessToken string) *backend.Client {
-	return backend.NewClient(accessToken, e.Accounts, e.Proxy)
+	client := backend.NewClient(accessToken, e.Accounts, e.Proxy)
+	e.attachUpstreamDiagnostics(client, "text")
+	return client
 }
 
 // textAttachmentCache 返回进程内共享的附件上传缓存，用于跨 token 重试复用已上传文件。
@@ -1178,25 +1180,23 @@ func (e *Engine) newImageClient(token string) *backend.Client {
 		)
 		client.SetImageModelSlug(e.Config.ImageModelSlug())
 	}
-	// 生图是唯一会连外部上传/下载域名且阶段较多的链路，失败时只靠归一化文案无法定位，
-	// 因此把上游阶段写入运行时日志；诊断字段由 backend 侧脱敏，这里只做电平映射。
-	if logger := e.Logger; logger != nil {
-		client.SetDiagnosticLogger(func(stage string, attrs map[string]any) {
-			fields := make([]any, 0, len(attrs)*2+1)
-			fields = append(fields, "route", "official_image")
-			// 阶段失败默认 warning；仅成功阶段降级为 debug，避免刷屏。
-			ok, _ := attrs["ok"].(bool)
-			for key, value := range attrs {
-				fields = append(fields, key, value)
-			}
-			if ok {
-				logger.Debug("upstream image stage", fields...)
-				return
-			}
-			logger.Warning("upstream image stage failed", fields...)
-		})
-	}
+	e.attachUpstreamDiagnostics(client, "official_image")
 	return client
+}
+
+// attachUpstreamDiagnostics 把上游阶段诊断接到运行时日志。
+//
+// 图片与文本两条链路都要接：此前只有图片链路接了，文本链路的 bootstrap
+// 失败时只能看到归一化文案，无法判断兜底有没有跑过、停在哪一步。
+// 脱敏由 backend 侧完成，这里只负责路由名与电平映射。
+func (e *Engine) attachUpstreamDiagnostics(client *backend.Client, route string) {
+	if client == nil || e == nil || e.Logger == nil {
+		return
+	}
+	logger := e.Logger
+	client.SetDiagnosticLogger(func(stage string, attrs map[string]any) {
+		logger.Upstream(route, attrs)
+	})
 }
 
 // rememberImageResumeToken 记录会话对应的账号令牌，供超时任务续轮询；顺带清理过期条目。

@@ -264,13 +264,14 @@ docker compose -f deploy/docker-compose.yml pull
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-默认 Compose 使用 DockerHub 公共镜像，普通用户不需要配置 GitHub Release 源、GitHub Token，也不需要登录 GitHub。也可以按需将 `deploy/docker-compose.yml` 的 `image` 改为 GHCR：
+默认 Compose 使用 GHCR 镜像。本仓库的镜像：
 
-```yaml
-image: ghcr.io/zyphrzero/chatgpt2api:latest
+```text
+ghcr.io/sofs2005/chatgpt2api:latest   # 正式发布
+ghcr.io/sofs2005/chatgpt2api:dev      # dev 分支每次推送自动构建
 ```
 
-可用镜像：
+上游原仓库的镜像（不含本仓库的降风控改动）：
 
 ```text
 zyphrzero/chatgpt2api:latest
@@ -358,20 +359,45 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 
 - **`cf_clearance` 与签发 IP 强绑定**，因此出口池**只作用于未绑定代理的账号**。已绑定代理的账号换出口会当场作废自己的凭证，反而放大风控信号。
 - 出口切换到新 IP 后，旧出口的 `cf_clearance` 会被显式作废。
-- FlareSolverr 通过 `PROXY_URL=http://privoxy:8118` 复用同一条出口链路，**必须与触发挑战的账号同出口**：`cf_clearance` 绑定签发 IP，换个出口求解等于拿到一张当场作废的凭证。
-- `deploy/docker-compose.warp.yml` 会让 OpenAI 系域名走 WARP，出口 IP 落在 Cloudflare 自家网段，**建议只在自用部署中启用**。
+- FlareSolverr **必须与触发挑战的账号同出口**：`cf_clearance` 绑定签发 IP，换个出口求解等于拿到一张当场作废的凭证。app 走代理时要把同一个地址也配给 FlareSolverr（见下表）。
 - 出口池地址含账号密码，配置接口只回显脱敏形式（`socks5://***@host:port`）；回写脱敏值会被忽略，不会覆盖已存凭据。
 
-一键拉起（WARP + Privoxy + FlareSolverr + app）：
+#### 三套 Compose 栈
+
+| 文件 | 组成 | 适用场景 |
+| --- | --- | --- |
+| `deploy/docker-compose.yml` | app | 不需要降风控，或已有外部代理方案 |
+| `deploy/docker-compose.flaresolverr.yml` | app + flaresolverr | **已有可用代理或直连**，只想加 cf_clearance 兜底 |
+| `deploy/docker-compose.warp.yml` | app + privoxy + warp + flaresolverr | 需要换出口，且接受走 WARP |
+
+三者的容器名相同（`chatgpt2api`），**切换前必须先 `down` 掉当前栈**，否则会报名字冲突。
 
 ```bash
+# 只加 clearance 兜底（app 出口不变）
+docker compose --env-file .env -f deploy/docker-compose.flaresolverr.yml up -d
+
+# 换成 WARP 出口 + clearance 兜底
 docker compose --env-file .env -f deploy/docker-compose.warp.yml up -d
 ```
 
 两个容易踩的前提：
 
-- **`--env-file` 不能省**（原因见上一节的「使用自定义镜像」）。漏掉时 WARP 栈的默认注入值会被 compose 文件里的默认值顶替，表现为 clearance 静默不生效。
-- **`.env` 里不要留空值行**。`.env` 是 bind mount 进容器的文件，其中 `CHATGPT2API_PROXY=`、`CHATGPT2API_CLEARANCE_ENABLED=false` 这类行会**压掉** compose `environment:` 段的注入值。用这套栈时应把这三行改成实际值（`http://privoxy:8118` / `true` / `http://flaresolverr:8191`），或直接删除。启动日志的 `configuration loaded` 一行会打印实际生效值。
+- **`--env-file` 不能省**（原因见「使用自定义镜像」）。漏掉时 compose 会静默使用文件里的默认值，表现为 clearance 静默不生效。
+- **`.env` 里不要留空值行**。`.env` 是 bind mount 进容器的文件，其中 `CHATGPT2API_CLEARANCE_ENABLED=false`、`CHATGPT2API_FLARESOLVERR_URL=` 这类行会**压掉** compose `environment:` 段的注入值。应改成实际值或直接删除。启动日志的 `configuration loaded` 一行会打印实际生效值。
+
+#### 出口一致性
+
+FlareSolverr 与 app 的出口必须一致。按你选的栈和代理方式：
+
+| app 的出口 | flaresolverr 栈要做的 | warp 栈要做的 |
+| --- | --- | --- |
+| 直连（`CHATGPT2API_PROXY` 为空） | 无需改动，两容器共用宿主机公网 IP | 无需改动，两者都经 privoxy 走 WARP |
+| 走代理（`CHATGPT2API_PROXY` 非空） | 取消注释 `PROXY_URL`，填**与 `CHATGPT2API_PROXY` 完全相同的地址** | 无需改动，`PROXY_URL=http://privoxy:8118` 已指向同一出口 |
+
+> FlareSolverr 用 `os.environ.get('PROXY_URL', None)` 读取该变量，**空字符串不等于未设置**，会被当作代理地址传给 Chrome。直连时请保持该行注释，不要写成 `PROXY_URL=`。
+
+`deploy/docker-compose.warp.yml` 会让 OpenAI 系域名走 WARP，出口 IP 落在 Cloudflare 自家网段，**建议只在自用部署中启用**。
+
 
 ### 存储后端
 

@@ -1,0 +1,72 @@
+# 降 CF 风控部署：不引入 WARP，只加 cf_clearance 主动兜底。
+#
+# 与另外两套栈的关系：
+#   docker-compose.yml            只有 app，无任何降风控能力；
+#   docker-compose.flaresolverr.yml（本文件）app + flaresolverr，出口沿用你现有的（或直连）；
+#   docker-compose.warp.yml       app + privoxy + warp + flaresolverr，出口换成 Cloudflare WARP。
+#
+# 本栈适用：你已经有可用的代理（或直连），不想再叠一层 WARP 出口。
+#
+# 用法（在仓库根目录，env 在根目录）：
+#   docker compose --env-file .env -f deploy/docker-compose.flaresolverr.yml up -d
+#
+# 一致性约束（本栈唯一的硬要求）：cf_clearance 绑定签发时的**出口 IP 与 UA**。
+# FlareSolverr 必须与使用该凭证的 app 同出口，否则拿到的凭证当场作废。
+# 两种情况的处理方式：
+#   - app 直连：两个容器共用宿主机公网 IP，天然同出口，本文件无需改动；
+#   - app 走代理：必须把下面的 PROXY_URL 取消注释，并填与 CHATGPT2API_PROXY
+#     完全相同的地址。
+#
+# 注意：CHATGPT2API_PROXY 若为空值，不要给 FlareSolverr 设置 PROXY_URL。
+# FlareSolverr 用 os.environ.get('PROXY_URL', None) 读取（src/flaresolverr.py:16），
+# 空字符串不等于「未设置」，会被当作代理地址传给 Chrome 并导致求解失败。
+services:
+  # cf_clearance 兜底：挑战命中时用真实无头 Chrome 过一次，取回 cookie 与 UA。
+  # 未配置 CHATGPT2API_FLARESOLVERR_URL 时后端不会调用它，可以一直挂着。
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: chatgpt2api-flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      - TZ=Asia/Shanghai
+      # 仅当 app 走代理时才需要。必须与 CHATGPT2API_PROXY 完全一致，
+      # 且不能留空——空值会被当成代理地址。直连时保持注释。
+      # - PROXY_URL=socks5://user:pass@host:1080
+    # 浏览器很吃内存，共享内存给足，否则 Chrome 会随机崩。
+    shm_size: 1gb
+    # 镜像自带 curl（见上游 Dockerfile），/health 返回 {"status":"ok"}。
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 5 http://127.0.0.1:8191/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # 端口不对宿主机暴露：只有同网络的 app 需要访问。
+
+  app:
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/sofs2005/chatgpt2api:latest}
+    pull_policy: ${CHATGPT2API_PULL_POLICY:-always}
+    container_name: chatgpt2api
+    restart: unless-stopped
+    depends_on:
+      flaresolverr:
+        condition: service_started
+    ports:
+      - "3000:80"
+    env_file:
+      # 固定为 ../.env，理由与 docker-compose.yml 相同：做成可覆盖的插值变量后，
+      # 在 deploy/ 下放一份 .env 会连带改掉它，容器会挂载到一份空白配置。
+      - ../.env
+    # 下面三项只是「.env 里没写」时的默认值。
+    #
+    # 重要：.env 是 bind mount 进容器的文件，其中已有的键**优先于**这里注入的值。
+    # 若 .env 里存在 CHATGPT2API_CLEARANCE_ENABLED=false / CHATGPT2API_FLARESOLVERR_URL=
+    # 这类行，会压掉下面的注入，兜底静默不生效。此时请直接改 .env，或删除该行。
+    # 启动日志的 configuration loaded 会打印实际生效值。
+    environment:
+      - CHATGPT2API_CLEARANCE_ENABLED=${CHATGPT2API_CLEARANCE_ENABLED:-true}
+      - CHATGPT2API_FLARESOLVERR_URL=${CHATGPT2API_FLARESOLVERR_URL:-http://flaresolverr:8191}
+    volumes:
+      - ${CHATGPT2API_DATA_DIR:-../data}:/app/data
+      - ../.env:/app/.env

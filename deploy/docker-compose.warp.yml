@@ -83,7 +83,7 @@ services:
       start_period: 30s
 
   app:
-    image: ${CHATGPT2API_IMAGE:-zyphrzero/chatgpt2api:latest}
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/sofs2005/chatgpt2api:latest}
     pull_policy: ${CHATGPT2API_PULL_POLICY:-always}
     container_name: chatgpt2api
     restart: unless-stopped

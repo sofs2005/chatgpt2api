@@ -198,13 +198,19 @@ func logStartupSummary(logger *service.Logger, cfg *config.Store, pool *service.
 	}
 	proxyConfigured := strings.TrimSpace(cfg.Proxy()) != ""
 	poolExits := len(cfg.UpstreamPool())
+	clearanceEnabled := clearance != nil && clearance.Enabled()
 	attrs := []any{
 		"data_dir", cfg.DataDir,
 		"storage_backend", storageBackendName(cfg),
 		"proxy_configured", proxyConfigured,
 		"upstream_pool_exits", poolExits,
-		"clearance_enabled", clearance != nil && clearance.Enabled(),
+		"clearance_enabled", clearanceEnabled,
 		"log_levels", strings.Join(cfg.LogLevels(), ","),
+	}
+	// FlareSolverr 地址填了、开关却是关的，是最容易配错也最难自查的一种：
+	// 两种情况都表现为「兜底从不触发」，日志里看不出区别。这里直接点名。
+	if !clearanceEnabled && cfg.FlareSolverrURL() != "" {
+		attrs = append(attrs, "clearance_hint", "flaresolverr_url is set but clearance_enabled is false")
 	}
 	// 出口池只在未绑定代理的账号上生效，有出口时才报健康数。
 	if poolExits > 0 && pool != nil {

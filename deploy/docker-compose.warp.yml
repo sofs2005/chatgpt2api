@@ -7,10 +7,13 @@
 # 用法（在 deploy/ 目录下）：
 #   docker compose -f docker-compose.warp.yml up -d
 #
-# 前置：.env 里至少要有
-#   CHATGPT2API_PROXY=http://privoxy:8118
-#   CHATGPT2API_CLEARANCE_ENABLED=true
-#   CHATGPT2API_FLARESOLVERR_URL=http://flaresolverr:8191
+# 前置：这三个变量由本文件的 app.environment 段直接注入，正常情况下不需要动 .env。
+#
+#   注意：.env 是 bind mount 进容器的文件，而 .env 里的值（即使为空）优先级高于
+#   进程环境变量。如果 .env 里存在 CHATGPT2API_PROXY= / CHATGPT2API_CLEARANCE_ENABLED=
+#   / CHATGPT2API_FLARESOLVERR_URL= 这类空值行，会压掉本文件注入的值，导致 WARP 与
+#   clearance 静默不生效。此时必须把 .env 里对应的行改成同样的值，或直接删掉该行。
+#   启动日志的 configuration loaded 一行会打印实际生效值。
 #
 # 一致性约束：cf_clearance 绑定签发时的出口 IP 与 UA。FlareSolverr 必须与使用该
 # 凭证的账号同出口，否则凭证当场作废。因此两者共用 privoxy 这一个出口，

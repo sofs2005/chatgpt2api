@@ -817,7 +817,11 @@ func logQuotaUsed(detail map[string]any, outcome string) int {
 type Logger struct {
 	levels func() []string
 	logger *slog.Logger
-	file   *os.File
+	// stdout 与 fileOnly 是同一份日志的两个单侧句柄，用于把「文件全量留痕」
+	// 和「stdout 只出异常」拆开。处理器配置与 logger 一致，格式相同。
+	stdout   *slog.Logger
+	fileOnly *slog.Logger
+	file     *os.File
 }
 
 func NewLogger(dataDir string, levels func() []string) (*Logger, error) {
@@ -830,10 +834,16 @@ func NewLogger(dataDir string, levels func() []string) (*Logger, error) {
 		return nil, err
 	}
 	writer := io.MultiWriter(os.Stdout, file)
+	// 文件侧与 stdout 侧都必须显式放开到 Debug：slog 的默认 handler 级别是
+	// LevelInfo，会把 debug 记录直接丢弃。成功请求正是压在 debug 上的，
+	// 用默认级别会让「文件全量留痕」变成空操作。
+	relaxed := &slog.HandlerOptions{Level: slog.LevelDebug}
 	return &Logger{
-		levels: levels,
-		logger: slog.New(slog.NewJSONHandler(writer, nil)),
-		file:   file,
+		levels:   levels,
+		logger:   slog.New(slog.NewJSONHandler(writer, nil)),
+		stdout:   slog.New(slog.NewJSONHandler(os.Stdout, relaxed)),
+		fileOnly: slog.New(slog.NewJSONHandler(file, relaxed)),
+		file:     file,
 	}, nil
 }
 
@@ -876,6 +886,29 @@ func (l *Logger) print(level string, message string, attrs ...any) {
 		message = level
 	}
 	l.logger.Log(context.Background(), slogLevel(level), message, sanitizeSlogAttrs(attrs)...)
+}
+
+// Request 按给定级别把访问记录投递到两个 sink：日志文件始终记录，
+// stdout（容器日志）只在非 debug 级别记录。
+//
+// 背景：成功请求原本只走 debug，而 debug 默认不开启，导致日志文件里
+// 成功请求整体缺失、容器日志里则什么都看不到。拆开两个 sink 后，
+// server.log 全量留痕，stdout 只保留需要人当场看见的异常，互不干扰。
+// 方法内不做 enabled 判定，级别只决定 JSON 里的 level 字段与是否进 stdout。
+func (l *Logger) Request(level string, message string, attrs ...any) {
+	if l == nil {
+		return
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "access"
+	}
+	sanitized := sanitizeSlogAttrs(attrs)
+	if l.fileOnly != nil {
+		l.fileOnly.Log(context.Background(), slogLevel(level), message, sanitized...)
+	}
+	if level != "debug" && l.stdout != nil {
+		l.stdout.Log(context.Background(), slogLevel(level), message, sanitized...)
+	}
 }
 
 func slogLevel(level string) slog.Level {

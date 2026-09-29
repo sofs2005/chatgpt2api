@@ -125,14 +125,16 @@ func (a *App) logHTTPRequest(r *http.Request, status int, duration time.Duration
 		"duration_ms", duration.Milliseconds(),
 		"ip_address", clientIP(r),
 	}
+	level := "debug"
 	switch {
 	case status >= http.StatusInternalServerError:
-		a.logger.Error("http request", attrs...)
+		level = "error"
 	case status >= http.StatusBadRequest:
-		a.logger.Warning("http request", attrs...)
-	default:
-		a.logger.Debug("http request", attrs...)
+		level = "warning"
 	}
+	// 统一投递：日志文件按全量记录该请求，stdout 只记录非 debug 级别。
+	// 这样默认级别下容器日志仍能看到异常请求，日志文件则始终可追溯。
+	a.logger.Request(level, "http request", attrs...)
 }
 
 func (a *App) writeAuditLog(r *http.Request, recorder *auditResponseWriter, status int, duration time.Duration, requestCapture auditRequestCapture) {

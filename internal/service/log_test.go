@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -335,4 +339,67 @@ func TestLogServiceRetentionCleanerRunsImmediately(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("retention cleaner did not remove old logs, remaining = %#v", logs.Search(LogQuery{Limit: 10}))
+}
+
+// 成功请求只走 debug，而 debug 默认不开启，此前会从日志文件里整体消失。
+// Request 必须让文件拿到全量记录，无论级别配置如何。
+func TestLoggerRequestAlwaysRecordsAccessToFile(t *testing.T) {
+	dataDir := t.TempDir()
+	logger, err := NewLogger(dataDir, func() []string { return []string{"info", "warning", "error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+
+	logger.Request("debug", "http request", "path", "/api/profile", "status", 200)
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dataDir, "logs", "server.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(server.log) error = %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "/api/profile") {
+		t.Fatalf("successful request missing from server.log: %q", text)
+	}
+	if !strings.Contains(text, `"level":"DEBUG"`) {
+		t.Fatalf("debug request should keep its level: %q", text)
+	}
+}
+
+// stdout 只应拿到非 debug 请求：成功请求高频，进容器日志会淹没异常。
+func TestLoggerRequestKeepsStdoutQuietForDebug(t *testing.T) {
+	dataDir := t.TempDir()
+	logger, err := NewLogger(dataDir, func() []string { return []string{"info", "warning", "error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+	defer logger.Close()
+
+	// 捕获 stdout，确认 debug 请求只落文件、不进 stdout。
+	orig := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = writer
+	logger.stdout = slog.New(slog.NewJSONHandler(writer, nil))
+
+	logger.Request("debug", "http request", "path", "/api/ok", "status", 200)
+	logger.Request("error", "http request", "path", "/api/boom", "status", 500)
+	_ = writer.Close()
+	os.Stdout = orig
+
+	captured, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(stdout) error = %v", err)
+	}
+	text := string(captured)
+	if strings.Contains(text, "/api/ok") {
+		t.Fatalf("debug request leaked into stdout: %s", text)
+	}
+	if !strings.Contains(text, "/api/boom") {
+		t.Fatalf("error request missing from stdout: %s", text)
+	}
 }

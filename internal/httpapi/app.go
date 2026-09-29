@@ -180,7 +180,58 @@ func NewApp() (*App, error) {
 		RetentionDays: cfg.ImageRetentionDays(),
 		MaxBytes:      cfg.ImageStorageLimitBytes(),
 	})
+	logStartupSummary(logger, cfg, pool, clearance)
 	return app, nil
+}
+
+// logStartupSummary 在启动时把生效的关键配置打进容器日志。
+//
+// 此前启动只输出一行 "starting server"，容器日志里看不出上游链路是怎么配的：
+// 代理走没走、出口池有几个、clearance 是否开启全靠翻 .env 反推。出站行为
+// 取决于这些开关的组合，排障第一步就是确认它们，所以必须在启动时可见。
+//
+// 只输出开关状态与数量，不输出地址与凭据：出口池地址按 MaskProxyURL 脱敏，
+// 全局代理只报是否已配置。
+func logStartupSummary(logger *service.Logger, cfg *config.Store, pool *service.EgressPool, clearance *service.ClearanceService) {
+	if logger == nil {
+		return
+	}
+	proxyConfigured := strings.TrimSpace(cfg.Proxy()) != ""
+	poolExits := len(cfg.UpstreamPool())
+	attrs := []any{
+		"data_dir", cfg.DataDir,
+		"storage_backend", storageBackendName(cfg),
+		"proxy_configured", proxyConfigured,
+		"upstream_pool_exits", poolExits,
+		"clearance_enabled", clearance != nil && clearance.Enabled(),
+		"log_levels", strings.Join(cfg.LogLevels(), ","),
+	}
+	// 出口池只在未绑定代理的账号上生效，有出口时才报健康数。
+	if poolExits > 0 && pool != nil {
+		status := pool.Status()
+		healthy := 0
+		for _, exit := range status.Exits {
+			if exit.Healthy {
+				healthy++
+			}
+		}
+		attrs = append(attrs, "upstream_pool_healthy", healthy)
+	}
+	logger.Info("configuration loaded", attrs...)
+}
+
+// storageBackendName 取存储后端的类型名；Info() 的 database_url 已脱敏，
+// 这里只取 db_type，避免把连接串带进日志。
+func storageBackendName(cfg *config.Store) string {
+	backend, err := cfg.StorageBackend()
+	if err != nil || backend == nil {
+		return "unknown"
+	}
+	info := backend.Info()
+	if dbType := util.Clean(info["db_type"]); dbType != "" {
+		return dbType
+	}
+	return util.Clean(info["type"])
 }
 
 // startImageSessionCleaner 定期清理过期的生图会话绑定。

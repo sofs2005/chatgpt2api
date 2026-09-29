@@ -236,8 +236,11 @@ func TestAppAuthAndSPACompatibility(t *testing.T) {
 }
 
 func TestAdminSystemCheckUpdates(t *testing.T) {
+	// 显式指定仓库，不依赖默认值：这个用例测的是 check-updates 端点本身，
+	// 而不是默认仓库指向哪里（后者由 config 包的用例负责钉住）。
+	const repo = "owner/project"
 	releaseAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/ZyphrZero/chatgpt2api/releases/latest" {
+		if r.URL.Path != "/repos/"+repo+"/releases/latest" {
 			http.NotFound(w, r)
 			return
 		}
@@ -246,11 +249,11 @@ func TestAdminSystemCheckUpdates(t *testing.T) {
 			"tag_name": "v1.2.0",
 			"name": "v1.2.0",
 			"body": "release notes",
-			"html_url": "https://github.com/ZyphrZero/chatgpt2api/releases/tag/v1.2.0",
+			"html_url": "https://github.com/owner/project/releases/tag/v1.2.0",
 			"published_at": "2026-01-01T00:00:00Z",
 			"assets": [
-				{"name":"chatgpt2api_1.2.0_linux_amd64.tar.gz","browser_download_url":"https://github.com/ZyphrZero/chatgpt2api/releases/download/v1.2.0/chatgpt2api_1.2.0_linux_amd64.tar.gz","size":123},
-				{"name":"checksums.txt","browser_download_url":"https://github.com/ZyphrZero/chatgpt2api/releases/download/v1.2.0/checksums.txt","size":64}
+				{"name":"chatgpt2api_1.2.0_linux_amd64.tar.gz","browser_download_url":"https://github.com/owner/project/releases/download/v1.2.0/chatgpt2api_1.2.0_linux_amd64.tar.gz","size":123},
+				{"name":"checksums.txt","browser_download_url":"https://github.com/owner/project/releases/download/v1.2.0/checksums.txt","size":64}
 			]
 		}`))
 	}))
@@ -268,6 +271,7 @@ func TestAdminSystemCheckUpdates(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()
 	app.update = service.NewUpdateService(service.UpdateOptions{
+		Repo:           repo,
 		APIBaseURL:     releaseAPI.URL,
 		CurrentVersion: version.Get(),
 		BuildType:      version.GetBuildType(),

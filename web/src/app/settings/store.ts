@@ -7,6 +7,7 @@ import {
   cleanupImageStorage,
   cleanupLogs,
   createCPAPool,
+  DEFAULT_UPDATE_REPO,
   deleteCPAPool,
   fetchCPAPoolFiles,
   fetchCPAPools,
@@ -110,7 +111,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     linuxdo_redirect_url: typeof config.linuxdo_redirect_url === "string" ? config.linuxdo_redirect_url : "",
     linuxdo_frontend_redirect_url:
       typeof config.linuxdo_frontend_redirect_url === "string" ? config.linuxdo_frontend_redirect_url : "/auth/linuxdo/callback",
-    update_repo: typeof config.update_repo === "string" ? config.update_repo : "ZyphrZero/chatgpt2api",
+    update_repo: typeof config.update_repo === "string" ? config.update_repo : DEFAULT_UPDATE_REPO,
     update_github_token: "",
     update_github_token_configured: Boolean(config.update_github_token_configured),
     login_page_image_url: typeof config.login_page_image_url === "string" ? config.login_page_image_url : "",
@@ -360,7 +361,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         linuxdo_client_secret: linuxDoClientSecret,
         linuxdo_redirect_url: String(config.linuxdo_redirect_url || "").trim(),
         linuxdo_frontend_redirect_url: String(config.linuxdo_frontend_redirect_url || "").trim(),
-        update_repo: String(config.update_repo ?? "ZyphrZero/chatgpt2api").trim(),
+        update_repo: String(config.update_repo ?? DEFAULT_UPDATE_REPO).trim(),
         update_github_token: updateGitHubToken,
       };
       if (!linuxDoClientSecret) {

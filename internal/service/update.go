@@ -25,8 +25,14 @@ import (
 )
 
 const (
-	updateCacheTTL       = 20 * time.Minute
-	defaultUpdateRepo    = "ZyphrZero/chatgpt2api"
+	updateCacheTTL = 20 * time.Minute
+	// DefaultUpdateRepo 是版本检查默认查询的仓库。
+	//
+	// 这个地址是 fork 之后最容易忘记同步的一处：README 的 clone 地址、镜像
+	// 地址都指向自己的仓库，只有它留在这里，于是设置页永远在查上游的
+	// release，自己打的 tag 一个都看不到（表现为长期显示「已是最新」）。
+	// 需要改默认值时改这里一处即可，config 与设置页都引它，避免再次漂移。
+	DefaultUpdateRepo    = "sofs2005/chatgpt2api"
 	defaultGitHubAPIBase = "https://api.github.com"
 	maxUpdateDownload    = 500 * 1024 * 1024
 )
@@ -95,7 +101,7 @@ type githubAsset struct {
 func NewUpdateService(options UpdateOptions) *UpdateService {
 	repo := strings.TrimSpace(options.Repo)
 	if repo == "" {
-		repo = defaultUpdateRepo
+		repo = DefaultUpdateRepo
 	}
 	apiBaseURL := strings.TrimRight(strings.TrimSpace(options.APIBaseURL), "/")
 	if apiBaseURL == "" {

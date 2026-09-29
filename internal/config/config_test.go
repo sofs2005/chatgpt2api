@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"chatgpt2api/internal/service"
 )
 
 func TestStoreUpdatePersistsRuntimeSettings(t *testing.T) {
@@ -781,6 +783,30 @@ func TestStoreReadsUpdateGitHubTokenFromEnvFile(t *testing.T) {
 	}
 }
 
+// 默认仓库是 fork 之后最容易漏改的一处：README 的 clone 地址与镜像地址都指向
+// 自己的仓库，只有这里留着上游地址，于是设置页永远在查上游的 release，
+// 自己打的 tag 一个都看不到。这里把它钉住，避免再次漂移。
+func TestStoreDefaultsUpdateRepoToOwnRepository(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetEnv(t, "CHATGPT2API_UPDATE_REPO")
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	if got := store.UpdateRepo(); got != service.DefaultUpdateRepo {
+		t.Fatalf("UpdateRepo() = %q, want %q", got, service.DefaultUpdateRepo)
+	}
+	if service.DefaultUpdateRepo != "sofs2005/chatgpt2api" {
+		t.Fatalf("DefaultUpdateRepo = %q, want sofs2005/chatgpt2api", service.DefaultUpdateRepo)
+	}
+	// 空值也要落回默认值，否则清空输入框会保存出一个空仓库。
+	if got := normalizeUpdateRepo(""); got != service.DefaultUpdateRepo {
+		t.Fatalf("normalizeUpdateRepo(\"\") = %q, want %q", got, service.DefaultUpdateRepo)
+	}
+}
+
 func TestStoreUpdatePersistsUpdateSettings(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)
@@ -895,7 +921,7 @@ func TestStoreUpdateAcceptsEchoedGitHubURLUpdateRepo(t *testing.T) {
 		t.Fatalf("Update() update_repo = %#v, want normalized owner/repo", got["update_repo"])
 	}
 	if store.UpdateRepo() != "ZyphrZero/chatgpt2api" {
-		t.Fatalf("UpdateRepo() = %q, want ZyphrZero/chatgpt2api", store.UpdateRepo())
+		t.Fatalf("UpdateRepo() = %q, want normalized owner/repo from env", store.UpdateRepo())
 	}
 	if store.Proxy() != "socks5://10.6.6.90:1070" {
 		t.Fatalf("Proxy() = %q, want saved proxy", store.Proxy())

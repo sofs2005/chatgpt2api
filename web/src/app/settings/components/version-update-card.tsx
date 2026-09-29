@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import {
   checkSystemUpdates,
+  DEFAULT_UPDATE_REPO,
   performSystemUpdate,
   restartSystemService,
   rollbackSystemUpdate,
@@ -98,7 +99,7 @@ export function VersionUpdateCard({
   const updateRepo =
     typeof config?.update_repo === "string"
       ? config.update_repo
-      : "ZyphrZero/chatgpt2api";
+      : DEFAULT_UPDATE_REPO;
   const updateGitHubToken = String(config?.update_github_token || "");
   const updateGitHubTokenConfigured = Boolean(
     config?.update_github_token_configured,

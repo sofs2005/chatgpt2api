@@ -19,6 +19,10 @@ export type ImageModel = (typeof IMAGE_MODEL_OPTIONS)[number]["value"];
 export const DEFAULT_IMAGE_MODEL: ImageModel = "auto";
 export const DEFAULT_CHAT_MODEL: ImageModel = "auto";
 export const CODEX_IMAGE_MODEL: ImageModel = "codex-gpt-image-2";
+// 版本检查默认查询的仓库，必须与后端 service.DefaultUpdateRepo 保持一致。
+// fork 之后这里的地址最容易漏改：设置页会一直去查上游的 release，
+// 自己打的 tag 看不到，表现为长期显示「已是最新」。
+export const DEFAULT_UPDATE_REPO = "sofs2005/chatgpt2api";
 const IMAGE_MODEL_VALUES = new Set<string>(IMAGE_MODEL_OPTIONS.map((option) => option.value));
 const IMAGE_TASK_MODEL_VALUES = new Set<ImageModel>(["auto", "gpt-image-2", "codex-gpt-image-2"]);
 const CHAT_MODEL_VALUES = new Set<ImageModel>([

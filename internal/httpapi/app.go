@@ -217,7 +217,10 @@ func logStartupSummary(logger *service.Logger, cfg *config.Store, pool *service.
 		}
 		attrs = append(attrs, "upstream_pool_healthy", healthy)
 	}
-	logger.Info("configuration loaded", attrs...)
+	// 走 Request 而非 Info：启动摘要要能穿透 CHATGPT2API_LOG_LEVELS 的过滤。
+	// 它是一次性的启动事实，不是可关掉的噪音；而排障的第一步恰恰是确认
+	// 生效配置，此时若因为日志级别被静默丢弃，等于把唯一的线索掐掉。
+	logger.Request("info", "configuration loaded", attrs...)
 }
 
 // storageBackendName 取存储后端的类型名；Info() 的 database_url 已脱敏，

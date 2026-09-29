@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"chatgpt2api/internal/backend"
+	"chatgpt2api/internal/config"
 	"chatgpt2api/internal/protocol"
 	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/storage"
@@ -4732,5 +4733,40 @@ func TestSettingsExposesMaskedEgressPoolStatus(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "secret") || strings.Contains(string(raw), "user:") {
 		t.Fatalf("exits leak credentials: %s", raw)
+	}
+}
+
+// 启动摘要必须穿透用户设置的日志级别。
+//
+// CHATGPT2API_LOG_LEVELS=error 时，warning/info 都会被 enabled() 过滤掉，
+// 而排障第一步恰恰是确认生效配置（代理走没走、clearance 开没开）。摘要若在
+// 这一步被静默丢弃，用户面对的就是「启动日志里什么配置都看不到」。
+func TestStartupSummarySurvivesErrorOnlyLogLevels(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("CHATGPT2API_LOG_LEVELS", "error")
+	logger, err := service.NewLogger(dataDir, func() []string { return []string{"error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+
+	cfg := &config.Store{DataDir: t.TempDir()}
+	logStartupSummary(logger, cfg, nil, nil)
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// StorageBackend() 会惰性打开 sqlite 句柄；不关掉的话 Windows 上
+	// TempDir 清理会因为文件被占用而失败。
+	if backend, err := cfg.StorageBackend(); err == nil {
+		if closer, ok := backend.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(dataDir, "logs", "server.log"))
+	if err != nil {
+		t.Fatalf("ReadFile(server.log) error = %v", err)
+	}
+	if !strings.Contains(string(data), "configuration loaded") {
+		t.Fatalf("startup summary missing under error-only levels: %q", string(data))
 	}
 }

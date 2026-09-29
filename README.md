@@ -86,7 +86,7 @@
 ### 1. 获取部署文件
 
 ```bash
-git clone [https://github.com/ZyphrZero/chatgpt2api.git](https://github.com/sofs2005/chatgpt2api)
+git clone https://github.com/sofs2005/chatgpt2api
 cd chatgpt2api
 cp .env.example .env
 ```

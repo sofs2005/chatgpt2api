@@ -31,6 +31,9 @@ archives:
       - README.md
       - .env.example
       - deploy/docker-compose.yml
+      - deploy/docker-compose.flaresolverr.yml
+      - deploy/docker-compose.warp.yml
+      - deploy/privoxy-warp.conf
 
 checksum:
   name_template: checksums.txt

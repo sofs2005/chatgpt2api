@@ -51,7 +51,7 @@
 - 支持 Docker / Docker Compose 部署。
 - 支持 SQLite、JSON 文件和 PostgreSQL 存储后端。
 - 支持全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理。
-- 支持 DockerHub 默认版本检查，以及非 Docker Release 构建的在线更新和回滚。
+- 支持 GitHub Release 版本检查，以及非 Docker Release 构建的在线更新和回滚。
 
 ### 管理端
 
@@ -102,13 +102,24 @@ CHATGPT2API_ADMIN_PASSWORD=change_me_please
 
 ### 2. 启动服务
 
+按需要的能力选一套 compose 栈（详见「上游 Cloudflare 降低风控」一节的对照表）：
+
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+# 基础：只有 app，出站行为与升级前一致
+docker compose --env-file .env -f deploy/docker-compose.yml up -d
+
+# 加 cf_clearance 主动兜底（不改变出口）
+docker compose --env-file .env -f deploy/docker-compose.flaresolverr.yml up -d
+
+# 换 WARP 出口 + cf_clearance 兜底
+docker compose --env-file .env -f deploy/docker-compose.warp.yml up -d
 ```
+
+> `--env-file .env` 建议始终带上。它把仓库根目录的 `.env` 同时用作 compose 插值与容器配置来源，避免「设了变量却没生效」。原因见下面的「使用自定义镜像」。
 
 默认 Compose 配置：
 
-- 镜像：`zyphrzero/chatgpt2api:latest`
+- 镜像：`ghcr.io/sofs2005/chatgpt2api:latest`
 - 端口：宿主机 `3000` -> 容器 `80`
 - 数据目录：`./data:/app/data`
 - 环境文件：`./.env:/app/.env`
@@ -124,14 +135,14 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CHATGPT2API_IMAGE` | `zyphrzero/chatgpt2api:latest` | 镜像地址；用自己构建的镜像时填 `ghcr.io/<owner>/chatgpt2api:dev` 或 `chatgpt2api:local` |
+| `CHATGPT2API_IMAGE` | `ghcr.io/sofs2005/chatgpt2api:latest` | 镜像地址；`dev` 标签由 dev 分支 CI 每次推送构建，比 `latest` 更新 |
 | `CHATGPT2API_PULL_POLICY` | `always` | 用本地构建的镜像时必须改为 `never`，否则会去远端找同名镜像 |
 | `CHATGPT2API_DATA_DIR` | `../data` | 数据目录，相对 compose 文件所在目录 |
 
-也可以不改文件，用 shell 环境变量前缀传入（优先级最高，同样不读 `../.env`）：
+`latest` 只在打 tag 发布时更新，`dev` 跟随 dev 分支。想用最新代码：
 
 ```bash
-CHATGPT2API_IMAGE=ghcr.io/yourname/chatgpt2api:dev docker compose -f deploy/docker-compose.yml up -d
+CHATGPT2API_IMAGE=ghcr.io/sofs2005/chatgpt2api:dev docker compose --env-file .env -f deploy/docker-compose.yml up -d
 ```
 
 > **不要在 `deploy/` 下再放一份 `.env`。** 除了会与根目录那份产生「改了没生效」的混淆，`.env` 还是容器内配置文件（`env_file` + bind mount）的来源：`deploy/.env` 一旦存在，容器会挂载到这份**不含账号与设置**的文件，数据看起来全丢。容器内的 env 路径已在 compose 里固定为 `../.env`，不需要也不应该覆盖。
@@ -153,6 +164,8 @@ http://localhost:3000
 ```bash
 docker compose -f deploy/docker-compose.yml logs -f app
 ```
+
+> `logs` / `down` 这类命令不带 `--env-file` 也能用：容器名是写死的，插值取默认值不影响操作。只有 `up` / `pull` / `config` 需要 `--env-file`。
 
 查看自动生成的管理员密码（需要在仓库根目录执行）：
 
@@ -220,7 +233,7 @@ con.commit()
 print(f"removed auth_users.json rows: {cur.rowcount}")
 con.close()
 PY
-docker compose -f deploy/docker-compose.yml up -d
+docker compose --env-file .env -f deploy/docker-compose.yml up -d
 ```
 
 </details>
@@ -257,17 +270,17 @@ sh deploy/docker-build-limited.sh build
 
 ### Docker 镜像升级
 
-Docker 部署的推荐升级方式：
+Docker 部署的推荐升级方式（`--env-file` 不能省，原因见「使用自定义镜像」）：
 
 ```bash
-docker compose -f deploy/docker-compose.yml pull
-docker compose -f deploy/docker-compose.yml up -d
+docker compose --env-file .env -f deploy/docker-compose.yml pull
+docker compose --env-file .env -f deploy/docker-compose.yml up -d
 ```
 
-默认 Compose 使用 GHCR 镜像。本仓库的镜像：
+本仓库的镜像：
 
 ```text
-ghcr.io/sofs2005/chatgpt2api:latest   # 正式发布
+ghcr.io/sofs2005/chatgpt2api:latest   # 正式发布，打 tag 时更新
 ghcr.io/sofs2005/chatgpt2api:dev      # dev 分支每次推送自动构建
 ```
 
@@ -280,10 +293,16 @@ ghcr.io/zyphrzero/chatgpt2api:latest
 
 ### 管理端版本检查
 
-设置页的“版本更新”卡片会按部署方式选择更新来源：
+设置页的“版本更新”卡片检查的是 **GitHub Release**（`update_repo` 配置的仓库，默认 `ZyphrZero/chatgpt2api`，请按你的 fork 改），只显示版本对比与发布时间。
 
-- Docker 镜像：默认匿名检查 DockerHub 公共镜像标签，升级方式是 `docker compose -f deploy/docker-compose.yml pull && docker compose -f deploy/docker-compose.yml up -d`。
-- Release 二进制：检查项目 GitHub Release，只有这种非 Docker 部署会显示“立即更新”并替换当前 `chatgpt2api` 二进制。
+> **Docker 部署不要点“立即更新”。** 镜像里的二进制同样是 `BuildType=release` 构建，因此按钮会照常出现；但容器内被替换的二进制在容器重建后会被镜像层覆盖，升级会静默回退。Docker 部署请用下面的 `pull` + `up -d`。
+
+Docker 部署的升级方式：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml pull
+docker compose --env-file .env -f deploy/docker-compose.yml up -d
+```
 
 Release 二进制在线更新流程：
 
@@ -297,11 +316,10 @@ Release 二进制在线更新流程：
 
 重要说明：
 
-- Docker 部署默认从 DockerHub 拉取镜像，不需要填写 GitHub Release 源或 GitHub Token。
-- Docker 容器内不会执行二进制替换；请用 `docker compose -f deploy/docker-compose.yml pull && docker compose -f deploy/docker-compose.yml up -d` 更新镜像。
-- 在线二进制替换只在非 Docker 的 `BuildType=release` 构建中开放。
+- 版本检查走 GitHub API，不需要填写 Docker 源；匿名调用有额度限制，403 时可在设置页填 `update_github_token`。
+- Docker 部署请用 `docker compose --env-file .env -f deploy/docker-compose.yml pull && docker compose --env-file .env -f deploy/docker-compose.yml up -d` 更新镜像，不要点“立即更新”（原因见上一节）。
 - 前端资源已嵌入 Release 二进制，在线更新只替换 `chatgpt2api` 这一个运行文件。
-- 检查更新访问 DockerHub / Release API 可通过 `CHATGPT2API_UPDATE_PROXY_URL` 配置代理；未设置时复用 `CHATGPT2API_PROXY`。
+- 检查更新访问 GitHub API 可通过 `CHATGPT2API_UPDATE_PROXY_URL` 配置代理；未设置时复用 `CHATGPT2API_PROXY`。
 - 正式 Release archive 只发布 Linux `amd64` / `arm64` 构建；Windows 和 macOS 不提供在线更新压缩包。
 
 ### 源码部署升级
@@ -329,7 +347,7 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 | `CHATGPT2API_REGISTRATION_ENABLED` | `false` | 是否开放登录页账号注册入口 |
 | `CHATGPT2API_BASE_URL` | 空 | 用于生成图片 URL 的外部访问地址 |
 | `CHATGPT2API_PROXY` | 空 | 全局代理，支持 `http`、`https`、`socks5`、`socks5h` |
-| `CHATGPT2API_UPDATE_PROXY_URL` | 空 | 检查更新访问 DockerHub / Release API 的代理；为空时复用全局代理 |
+| `CHATGPT2API_UPDATE_PROXY_URL` | 空 | 检查更新访问 GitHub API 的代理；为空时复用全局代理 |
 | `CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE` | `5` | 限流账号检查间隔，单位分钟 |
 | `CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS` | `300` | 图片任务超时时间，单位秒 |
 | `CHATGPT2API_IMAGE_MODEL_SLUG` | 空 | 官方生图链路发给上游的 model slug；留空表示 `auto`，由服务端自动路由到当前生图模型 |
@@ -504,7 +522,7 @@ bun run build
 - `go test ./...`
 - `bun install --frozen-lockfile`
 - `bun run build`
-- `docker compose -f deploy/docker-compose.yml config`
+- `docker compose -f deploy/docker-compose.yml config`（三套栈各校验一次）
 
 ### Release
 
@@ -516,14 +534,14 @@ bun run build
 4. GoReleaser 使用 `-tags=embed` 构建 Linux `amd64` / `arm64` 二进制。
 5. 生成 GitHub Release archive 和 `checksums.txt`。
 6. 使用 `deploy/Dockerfile.release` 构建多架构 Docker 镜像。
-7. 推送 DockerHub 镜像。
-8. 推送 GHCR 镜像。
+7. 推送 GHCR 镜像（`ghcr.io/<owner>/chatgpt2api`，owner 取自仓库，自动小写）。
+8. 若配置了 `DOCKERHUB_USERNAME` secret，同时推送 DockerHub 镜像；未配置时该步自动跳过。
 
 发布命令示例：
 
 ```bash
-git tag -a v1.0.0 -m "Release v1.0.0"
-git push origin v1.0.0
+git tag -a v1.6.0 -m "Release v1.6.0"
+git push origin v1.6.0
 ```
 
 Release 构建会注入：
@@ -535,21 +553,21 @@ Release 构建会注入：
 
 ### Docker 镜像标签
 
-默认发布到 DockerHub：
+正式发布（打 tag）推送 GHCR：
 
 ```text
-zyphrzero/chatgpt2api:<version>
-zyphrzero/chatgpt2api:latest
-zyphrzero/chatgpt2api:<major>.<minor>
+ghcr.io/<owner>/chatgpt2api:<version>
+ghcr.io/<owner>/chatgpt2api:latest
+ghcr.io/<owner>/chatgpt2api:<major>.<minor>
 ```
 
-同时发布到 GHCR：
+`dev` 分支每次推送由 CI 单独构建（见 `.github/workflows/ci.yml` 的 `build-docker-dev`）：
 
 ```text
-ghcr.io/zyphrzero/chatgpt2api:<version>
-ghcr.io/zyphrzero/chatgpt2api:latest
-ghcr.io/zyphrzero/chatgpt2api:<major>.<minor>
+ghcr.io/<owner>/chatgpt2api:dev
 ```
+
+`latest` 只在打 tag 时更新，`dev` 跟随 dev 分支，因此日常想用最新代码应该用 `:dev`。
 
 ## API 接入
 

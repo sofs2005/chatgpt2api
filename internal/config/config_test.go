@@ -945,3 +945,50 @@ func unsetLinuxDoEnv(t *testing.T) {
 		unsetEnv(t, key)
 	}
 }
+
+// 出口池地址在 GET 时脱敏为 "socks5://***@host:port"，管理端会把读到的整个
+// 配置原样提交回来。若照写，真实密码就被 "***" 静默覆盖，且不报任何错。
+func TestStoreUpdateKeepsUpstreamPoolWhenMaskedValueEchoedBack(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetEnv(t, "CHATGPT2API_UPSTREAM_POOL")
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	if _, err := store.Update(map[string]any{
+		"upstream_pool": "socks5://user:secret@10.0.0.1:1080,http://10.0.0.2:8080",
+	}); err != nil {
+		t.Fatalf("Update(real pool) error = %v", err)
+	}
+
+	// 模拟前端回写：GET 返回的是脱敏列表。
+	if _, err := store.Update(map[string]any{
+		"upstream_pool": "socks5://***@10.0.0.1:1080,http://10.0.0.2:8080",
+	}); err != nil {
+		t.Fatalf("Update(masked echo) error = %v", err)
+	}
+	pool := store.UpstreamPool()
+	if len(pool) != 2 || pool[0] != "socks5://user:secret@10.0.0.1:1080" {
+		t.Fatalf("UpstreamPool() = %#v, want the original credentials preserved", pool)
+	}
+
+	// 用户真正清空出口池时必须生效，不能被当成「掩码回写」吞掉。
+	if _, err := store.Update(map[string]any{"upstream_pool": ""}); err != nil {
+		t.Fatalf("Update(clear) error = %v", err)
+	}
+	if pool := store.UpstreamPool(); len(pool) != 0 {
+		t.Fatalf("UpstreamPool() = %#v, want an emptied pool", pool)
+	}
+
+	// 用户换成新的真实地址（不带掩码）也要生效。
+	if _, err := store.Update(map[string]any{
+		"upstream_pool": "socks5://other:pw@10.0.0.9:1080",
+	}); err != nil {
+		t.Fatalf("Update(new pool) error = %v", err)
+	}
+	if pool := store.UpstreamPool(); len(pool) != 1 || pool[0] != "socks5://other:pw@10.0.0.9:1080" {
+		t.Fatalf("UpstreamPool() = %#v, want the newly submitted pool", pool)
+	}
+}

@@ -369,6 +369,30 @@ func (s *Store) ClearanceTTLSeconds() int {
 	return value
 }
 
+// containsMaskedProxy 判断回写值里是否含脱敏掩码。
+//
+// 出口池地址按 MaskProxyURL 回显为 "scheme://***@host:port"，掩码只出现在
+// userinfo 段。真实地址里的 "***" 只会是普通字符，因此出现 "://***" 即判定为
+// 管理端回写的脱敏值，应丢弃而不是落库。
+func containsMaskedProxy(value any) bool {
+	return strings.Contains(strings.Join(proxyListValues(value), ","), "://***")
+}
+
+func proxyListValues(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, fmt.Sprint(item))
+		}
+		return out
+	default:
+		return []string{fmt.Sprint(value)}
+	}
+}
+
 // UpstreamPool 返回逗号分隔的多出口列表；空表示不使用出口池。
 func (s *Store) UpstreamPool() []string {
 	raw := strings.TrimSpace(fmt.Sprint(s.settingValue("upstream_pool", "")))
@@ -596,6 +620,12 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 			continue
 		}
 		if key == "update_github_token" && strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
+		// 出口池地址含凭据，GET 只回显脱敏形式。管理端把读到的配置原样提交回来时，
+		// 落库的会是 "socks5://***@host:port"，真实密码被静默覆盖。
+		// 与上面两个密钥字段同理，带掩码的回写一律丢弃，保留已存的值。
+		if key == "upstream_pool" && containsMaskedProxy(value) {
 			continue
 		}
 		next[key] = value

@@ -293,7 +293,11 @@ ghcr.io/zyphrzero/chatgpt2api:latest
 
 ### 管理端版本检查
 
+### 管理端版本检查
+
 设置页的“版本更新”卡片检查的是 **GitHub Release**（`update_repo` 配置的仓库，默认 `sofs2005/chatgpt2api`），只显示版本对比与发布时间。
+
+> **已有部署需要在设置页把「GitHub Release 源」改成 `sofs2005/chatgpt2api` 并保存（或直接改 `.env` 里的 `CHATGPT2API_UPDATE_REPO`）。** 旧版本默认查上游 `ZyphrZero/chatgpt2api`，只要在设置页保存过一次配置，该值就被写进了 `.env`；而 `.env` 里的值优先于代码默认值，改默认值不会覆盖它。不处理的症状是卡片「最新版本」一直显示 `0.3.0`（上游最后一个 release）、并判定无需更新，无论你之后打多少 tag 都不会变。
 
 > **Docker 部署不要点“立即更新”。** 镜像里的二进制同样是 `BuildType=release` 构建，因此按钮会照常出现；但容器内被替换的二进制在容器重建后会被镜像层覆盖，升级会静默回退。Docker 部署请用下面的 `pull` + `up -d`。
 

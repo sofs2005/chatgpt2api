@@ -37,3 +37,8 @@ git_cache/
 
 # Local worktrees
 .worktrees/
+
+# Browser automation artifacts (Playwright MCP captures, spec-workflow state)
+.playwright-mcp/
+.spec-workflow/
+login-redirect.png

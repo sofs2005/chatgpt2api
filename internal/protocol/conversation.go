@@ -337,6 +337,50 @@ const maxTransientImageStreamAttempts = 3
 // 池中账号可能全部被拦，必须有上限，否则换号会退化成无限循环。
 const maxCloudflareSwitchAttempts = 3
 
+// cloudflareRetryOutcome 是一次 Cloudflare 挑战拦截后的处置决定。
+type cloudflareRetryOutcome int
+
+const (
+	// cloudflareRetryGiveUp 表示重试预算已用尽，应把挑战错误如实上报。
+	cloudflareRetryGiveUp cloudflareRetryOutcome = iota
+	// cloudflareRetrySameAccount 表示换一条新连接重试同一个账号。
+	cloudflareRetrySameAccount
+	// cloudflareRetrySwitchAccount 表示换账号重试。
+	cloudflareRetrySwitchAccount
+)
+
+// cloudflareRetryState 跟踪 Cloudflare 挑战的重试预算。
+//
+// 处置顺序是「同号换连接 → 换号 → 放弃」：部分挑战是连接级/出口级的，
+// 同一账号换一条 TLS 连接就能过，而换号要消耗另一个账号的额度与信任度，
+// 成本更高，因此放在后面。只有同号换连接仍被拦，才认定挑战与账号身份绑定。
+type cloudflareRetryState struct {
+	// sameAccountTried 记录已经换过连接的账号，每个账号只换一次。
+	sameAccountTried map[string]struct{}
+	switchAttempts   int
+}
+
+func newCloudflareRetryState() *cloudflareRetryState {
+	return &cloudflareRetryState{sameAccountTried: map[string]struct{}{}}
+}
+
+// next 决定这次挑战该如何重试。
+// exhausted 用于告知调用方本次已选出被挑战的账号，需要把 token 加入排除集。
+func (s *cloudflareRetryState) next(token string) (outcome cloudflareRetryOutcome, exhausted bool) {
+	if s.sameAccountTried == nil {
+		s.sameAccountTried = map[string]struct{}{}
+	}
+	if _, tried := s.sameAccountTried[token]; !tried {
+		s.sameAccountTried[token] = struct{}{}
+		return cloudflareRetrySameAccount, false
+	}
+	if s.switchAttempts >= maxCloudflareSwitchAttempts {
+		return cloudflareRetryGiveUp, false
+	}
+	s.switchAttempts++
+	return cloudflareRetrySwitchAccount, true
+}
+
 // 对齐上游 _generate_single_image 的重试预算：
 // TLS 握手错误与连接超时（curl 28）都属于网络/代理抖动，应同账号递增等待后重试，
 // 而非立即耗尽重试次数或误把账号标记为不可用。
@@ -775,7 +819,7 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 	// cfRetryAttempts 限制 CF 换号重试的总次数。
 	// 池中账号可能全部被挑战拦截，此时排除集无法再缩小，
 	// 必须有次数上限，否则会退化成无限换号循环。
-	cfRetryAttempts := 0
+	cfRetry := newCloudflareRetryState()
 	session, hasSession := e.activeImageConversationSession(request)
 	preferredToken := ""
 	if hasSession {
@@ -945,21 +989,31 @@ func (e *Engine) runSingleImageOutput(ctx context.Context, out chan<- ImageOutpu
 			if !emittedForToken && IsTokenInvalidError(result.lastError) {
 				return true
 			}
-			// Cloudflare 挑战拦截：换账号重试。
-			// 挑战判定与该账号的 cookie 与浏览器指纹绑定，同账号重试通常无效，
-			// 因此把该账号加入排除集，并优先尝试另一个账号。
-			// 受 cfRetryAttempts 上限约束：池中账号可能全部被拦，届时不再换号，
-			// 让错误如实上报，而不是无限循环。
-			if !emittedForToken && util.IsCloudflareChallengeMessage(result.lastError) &&
-				cfRetryAttempts < maxCloudflareSwitchAttempts {
-				cfRetryAttempts++
-				if useSession {
+			// Cloudflare 挑战拦截：先在同账号上换一条新连接重试，再考虑换号。
+			if !emittedForToken && util.IsCloudflareChallengeMessage(result.lastError) {
+				outcome, exhausted := cfRetry.next(token)
+				switch outcome {
+				case cloudflareRetrySameAccount:
+					// 重建客户端即可：e.newImageClient(token) 每次都会新建
+					// backend.Client 与连接池，因此这条路径天然换掉被拦的连接；
+					// cf_clearance 兜底也会在下次请求命中挑战时重新求解。
 					e.invalidateImageConversationSession(request)
 					hasSession = false
-					preferredToken = ""
+					preferredToken = token
+					return true
+				case cloudflareRetrySwitchAccount:
+					if useSession {
+						e.invalidateImageConversationSession(request)
+						hasSession = false
+						preferredToken = ""
+					}
+					if exhausted {
+						cfExhaustedTokens[token] = struct{}{}
+					}
+					return true
+				default:
+					// 预算用尽：不再重试，让挑战错误如实上报。
 				}
-				cfExhaustedTokens[token] = struct{}{}
-				return true
 			}
 			// TLS 握手错误：同账号递增等待 min(2*n,10)s 后重试，避免网络抖动误伤账号。
 			if !emittedForToken && isTLSConnectionImageError(result.lastError) && tlsAttempts < maxImageTLSRetries {

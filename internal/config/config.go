@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt2api/internal/service"
 	"chatgpt2api/internal/storage"
 	"chatgpt2api/internal/util"
 )
@@ -53,6 +54,12 @@ var settingEnvKeys = map[string]string{
 	"image_account_schedule_mode":       "CHATGPT2API_IMAGE_ACCOUNT_SCHEDULE_MODE",
 	"image_model_slug":                  "CHATGPT2API_IMAGE_MODEL_SLUG",
 	"global_concurrent_limit":           "CHATGPT2API_GLOBAL_CONCURRENT_LIMIT",
+	"clearance_enabled":                 "CHATGPT2API_CLEARANCE_ENABLED",
+	"flaresolverr_url":                  "CHATGPT2API_FLARESOLVERR_URL",
+	"clearance_timeout_seconds":         "CHATGPT2API_CLEARANCE_TIMEOUT_SECONDS",
+	"clearance_ttl_seconds":             "CHATGPT2API_CLEARANCE_TTL_SECONDS",
+	"upstream_pool":                     "CHATGPT2API_UPSTREAM_POOL",
+	"upstream_pool_probe_seconds":       "CHATGPT2API_UPSTREAM_POOL_PROBE_SECONDS",
 }
 
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -332,6 +339,63 @@ func (s *Store) Proxy() string {
 	return strings.TrimSpace(fmt.Sprint(s.settingValue("proxy", "")))
 }
 
+// ClearanceEnabled 控制是否启用 FlareSolverr cf_clearance 兜底。
+// 默认关闭：它需要一个额外的浏览器容器，未部署时不应产生任何行为变化。
+func (s *Store) ClearanceEnabled() bool {
+	return util.ToBool(s.settingValue("clearance_enabled", false))
+}
+
+// FlareSolverrURL 是 FlareSolverr 服务地址，例如 http://flaresolverr:8191。
+func (s *Store) FlareSolverrURL() string {
+	return strings.TrimRight(strings.TrimSpace(fmt.Sprint(s.settingValue("flaresolverr_url", ""))), "/")
+}
+
+func (s *Store) ClearanceTimeoutSeconds() int {
+	value := intSetting(s.settingValue("clearance_timeout_seconds", 60), 60)
+	if value < 5 {
+		return 5
+	}
+	if value > 300 {
+		return 300
+	}
+	return value
+}
+
+func (s *Store) ClearanceTTLSeconds() int {
+	value := intSetting(s.settingValue("clearance_ttl_seconds", 3600), 3600)
+	if value < 60 {
+		return 60
+	}
+	return value
+}
+
+// UpstreamPool 返回逗号分隔的多出口列表；空表示不使用出口池。
+func (s *Store) UpstreamPool() []string {
+	raw := strings.TrimSpace(fmt.Sprint(s.settingValue("upstream_pool", "")))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func (s *Store) UpstreamPoolProbeSeconds() int {
+	value := intSetting(s.settingValue("upstream_pool_probe_seconds", 60), 60)
+	if value < 10 {
+		return 10
+	}
+	if value > 3600 {
+		return 3600
+	}
+	return value
+}
+
 func (s *Store) UpdateProxyURL() string {
 	if value := strings.TrimSpace(os.Getenv("CHATGPT2API_UPDATE_PROXY_URL")); value != "" {
 		return value
@@ -491,6 +555,14 @@ func (s *Store) Get() map[string]any {
 	data["log_levels"] = s.LogLevels()
 	data["proxy"] = s.Proxy()
 	data["base_url"] = s.BaseURL()
+	// flaresolverr_url 可能带内网主机名，但不含凭据，按普通配置回显；
+	// 出口池地址含账号密码，只回显脱敏后的列表。
+	data["clearance_enabled"] = s.ClearanceEnabled()
+	data["flaresolverr_url"] = s.FlareSolverrURL()
+	data["clearance_timeout_seconds"] = s.ClearanceTimeoutSeconds()
+	data["clearance_ttl_seconds"] = s.ClearanceTTLSeconds()
+	data["upstream_pool"] = service.MaskProxyList(s.UpstreamPool())
+	data["upstream_pool_probe_seconds"] = s.UpstreamPoolProbeSeconds()
 	data["registration_enabled"] = s.RegistrationEnabled()
 	linuxdo := s.LinuxDoOAuth()
 	data["linuxdo_enabled"] = linuxdo.Enabled

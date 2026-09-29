@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	// DefaultClientVersion / DefaultClientBuildNumber 是上游前端构建标识，
-	// 由 chatgpt.com 的前端产物决定，会随上游发版变化。
-	// 取值来源：真实浏览器抓包（最近一次 2026-09-20）。
-	// 上游若再次发版，这两个值需要重新抓取后同步，否则会与 PoW 配置中的
-	// data-build 混用新旧两个版本，构成可识别的身份不一致。
-	DefaultClientVersion     = "prod-51404fa88033510cc879b69b6499ac2cf384ae62"
-	DefaultClientBuildNumber = "11018478"
+	// DefaultClientVersion 是上游前端构建标识的兜底值。
+	//
+	// 真实取值由 refreshBuildIdentifiers 从上游首页的 data-build 解析得到：
+	// data-build 是构建自报的版本，服务端同时在线多个构建（边缘缓存不一致），
+	// 因此写死常量必然与本次请求实际命中的构建错开，构成可识别的身份不一致。
+	// 这里的常量只在解析失败时使用，不应作为长期真值。
+	DefaultClientVersion     = "prod-980a55fc7f96eb70ab707f04eca80e3f613c9ed1"
+	DefaultClientBuildNumber = "11447364"
 
 	browserUserAgent              = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 	browserSecCHUA                = `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`
@@ -73,6 +74,14 @@ type Client struct {
 	searchPollInterval         time.Duration
 	diagnostic                 func(stage string, attrs map[string]any)
 	textAttachmentCache        *TextAttachmentCache
+
+	// clearance 是 cf_clearance 兜底；nil 或未启用时行为与原来完全一致。
+	clearance *service.ClearanceService
+}
+
+// SetClearanceService 注入 cf_clearance 兜底服务；nil 表示关闭。
+func (c *Client) SetClearanceService(clearance *service.ClearanceService) {
+	c.clearance = clearance
 }
 
 type ChatRequirements struct {
@@ -106,6 +115,8 @@ func NewClient(accessToken string, lookup AccountLookup, proxy *service.ProxySer
 	c.initAccountCookies()
 	// 账号绑定了自己的代理时优先使用，使 cf_clearance 的签发 IP 与出口 IP 保持一致。
 	c.httpClient = proxy.BrowserHTTPClientForAccount(c.accountForFingerprint(), c.fp["impersonate"], 300*time.Second)
+	// cf_clearance 兜底随出口走，从 ProxyService 取用，避免装配层逐处传递。
+	c.clearance = proxy.Clearance()
 	return c
 }
 
@@ -421,13 +432,154 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	if err == nil && accountCookieURL {
 		c.rememberAccountCookies(resp)
 	}
-	return resp, err
+	if err != nil || !accountCookieURL || !isClearanceChallengeResponse(resp) {
+		return resp, err
+	}
+	return c.retryWithFreshClearance(req, resp)
+}
+
+// isClearanceChallengeResponse 判断响应是否是一次 Cloudflare 挑战拦截。
+//
+// 只凭状态码会把普通的业务 403 也当成挑战，白跑一次浏览器求解；因此优先采信
+// Cloudflare 自己的标记（cf-mitigated），没有标记时再回落到状态码。
+func isClearanceChallengeResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("cf-mitigated")), "challenge") {
+		return true
+	}
+	return util.IsCloudflareChallengeStatus(resp.StatusCode)
+}
+
+// retryWithFreshClearance 在命中 Cloudflare 挑战时，用该账号出口现取一份
+// cf_clearance，并以 FlareSolverr 实际使用的 UA 重放一次请求。
+//
+// 挑战判定绑定出口 IP 与浏览器指纹，所以这里**不换账号、不换出口**：换出口会
+// 让新拿到的 cf_clearance 当场失效。两处必须同时替换——
+//   - Cookie 头：注入新解出的 cf_clearance 等 CF 凭证；
+//   - User-Agent 与 Sec-Ch-Ua*：cf_clearance 绑定签发时的 UA，
+//     只回注 cookie 而沿用旧 UA 会被判为凭证盗用。
+//
+// 重放的请求体来自 req.GetBody，调用方负责构造；流式请求体不可重放时放弃重试。
+//
+// 注意这里覆盖的是**本次重放的请求头**，不写回账号持久指纹：FlareSolverr 的 UA
+// 是浏览器容器的实际版本，写回会让账号长期自报一个与 TLS 指纹（surf chrome145）
+// 不匹配的版本，把一次性修复变成长期撕裂。凭证也只持久化 cookie（见
+// rememberAccountCookies），UA 只在本次重放生效。
+func (c *Client) retryWithFreshClearance(req *http.Request, resp *http.Response) (*http.Response, error) {
+	if !c.clearance.Enabled() || req == nil {
+		return resp, nil
+	}
+	// 无 body（GET 等）可直接重放；有 body 但拿不到副本的（流式上传）放弃。
+	replayable := req.Body == nil || req.GetBody != nil
+	if !replayable {
+		return resp, nil
+	}
+	// 出口必须与请求实际使用的那个一致：cf_clearance 绑定签发 IP，
+	// 用别的出口求解等于拿到一张当场作废的凭证。
+	proxyURL := c.proxy.EgressProxy(service.AccountProxy(c.accountForFingerprint()))
+	ctx := req.Context()
+	bundle, err := c.clearance.Refresh(ctx, proxyURL)
+	if err != nil {
+		c.reportStage("clearance", false, map[string]any{"error": err})
+		return resp, nil
+	}
+	// 从这里开始原响应作废：先归还连接，再重放。
+	// 之后的失败必须返回错误而不是返回这个已关闭的响应，否则调用方会读到空 body。
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	_ = resp.Body.Close()
+
+	var body io.ReadCloser
+	if req.GetBody != nil {
+		body, err = req.GetBody()
+		if err != nil {
+			c.reportStage("clearance", false, map[string]any{"error": err})
+			return nil, upstreamTransportError("clearance", err)
+		}
+	}
+	retry, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), body)
+	if err != nil {
+		c.reportStage("clearance", false, map[string]any{"error": err})
+		return nil, upstreamTransportError("clearance", err)
+	}
+	retry.Header = req.Header.Clone()
+	if retry.Header == nil {
+		retry.Header = http.Header{}
+	}
+	for name, value := range clearanceRequestHeaders(bundle) {
+		retry.Header.Set(name, value)
+	}
+	applyClearanceCookies(retry, bundle)
+
+	// 这次重放不再触发二次兜底，避免与上游来回拉锯。
+	retryResp, retryErr := c.httpClient.Do(retry)
+	if retryErr != nil {
+		c.reportStage("clearance", false, map[string]any{"error": retryErr})
+		return nil, upstreamTransportError("clearance", retryErr)
+	}
+	c.rememberAccountCookies(retryResp)
+	c.reportStage("clearance", true, map[string]any{"status": retryResp.StatusCode})
+	return retryResp, nil
+}
+
+// applyClearanceCookies 把 CF 凭证写进请求的 Cookie 头，保留已有的其它 cookie。
+func applyClearanceCookies(req *http.Request, bundle service.ClearanceBundle) {
+	values := bundle.ClearanceCookieValues()
+	if len(values) == 0 {
+		return
+	}
+	if existing := req.Cookies(); len(existing) > 0 {
+		names := make([]string, 0, len(existing))
+		for _, cookie := range existing {
+			names = append(names, cookie.Name)
+		}
+		sort.Strings(names)
+		req.Header.Del("Cookie")
+		for _, name := range names {
+			if _, replaced := values[name]; replaced {
+				continue
+			}
+			for _, cookie := range existing {
+				if cookie.Name == name {
+					req.AddCookie(cookie)
+					break
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		req.AddCookie(&http.Cookie{Name: name, Value: values[name]})
+	}
 }
 
 type browserHeaderMetadata struct {
 	secCHUA         string
 	fullVersion     string
 	fullVersionList string
+}
+
+// clearanceRequestHeaders 生成与 clearance UA 自洽的请求头覆盖集。
+//
+// cf_clearance 绑定签发时的 User-Agent，因此重放时必须整套替换：
+// UA、Sec-Ch-Ua、Sec-Ch-Ua-Full-Version(-List) 以及由 UA 推导的平台版本。
+// 只改 UA 不改 Sec-Ch-Ua* 会留下「UA 说一个浏览器、客户端提示说另一个」的矛盾。
+func clearanceRequestHeaders(bundle service.ClearanceBundle) map[string]string {
+	headers := map[string]string{}
+	if bundle.UA == "" {
+		return headers
+	}
+	headers["User-Agent"] = bundle.UA
+	metadata := browserMetadataFromUserAgent(bundle.UA)
+	headers["Sec-Ch-Ua"] = metadata.secCHUA
+	headers["Sec-Ch-Ua-Full-Version"] = quoteHeaderValue(metadata.fullVersion)
+	headers["Sec-Ch-Ua-Full-Version-List"] = metadata.fullVersionList
+	return headers
 }
 
 func browserMetadataFromUserAgent(userAgent string) browserHeaderMetadata {
@@ -523,8 +675,10 @@ func (c *Client) headers(path string, extra map[string]string) map[string]string
 		"OAI-Language":                "zh-CN",
 		"OAI-Client-Version":          c.ClientVersion,
 		"OAI-Client-Build-Number":     c.ClientBuildNumber,
-		"X-OpenAI-Target-Path":        path,
-		"X-OpenAI-Target-Route":       path,
+		// 上游前端 Hc() 默认头里固定带这个标记，缺失即为可识别的客户端差异。
+		"x-openai-web-frontend": "core_web",
+		"X-OpenAI-Target-Path":  path,
+		"X-OpenAI-Target-Route": path,
 	}
 	if c.AccessToken != "" {
 		headers["Authorization"] = "Bearer " + c.AccessToken
@@ -580,7 +734,23 @@ func (c *Client) bootstrapOnce(ctx context.Context, attempt int) (error, bool) {
 	if len(c.powSources) == 0 {
 		c.powSources = []string{defaultPOWScript}
 	}
+	c.refreshBuildIdentifiers(string(data))
 	return nil, false
+}
+
+// refreshBuildIdentifiers 用本次 bootstrap 命中的构建对齐 OAI-Client-Version
+// 与 OAI-Client-Build-Number。
+//
+// 上游边缘同时在线多个构建（同一套请求头也可能命中不同构建），而 PoW 配置里的
+// data-build 取自同一份 HTML。若请求头仍用编译期常量，就会出现「头报旧构建、
+// 指纹报新构建」的矛盾，这是服务端可识别的信号，所以两者必须同步刷新。
+func (c *Client) refreshBuildIdentifiers(html string) {
+	if version := strings.TrimSpace(c.powDataBuild); version != "" {
+		c.ClientVersion = version
+	}
+	if build := parseWebBuildNumber(html); build != "" {
+		c.ClientBuildNumber = build
+	}
 }
 
 func (c *Client) getChatRequirements(ctx context.Context) (ChatRequirements, error) {

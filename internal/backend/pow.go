@@ -18,8 +18,22 @@ const defaultPOWScript = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 
 var (
 	scriptSrcRE = regexp.MustCompile(`(?is)<script[^>]+src=["']([^"']+)["']`)
+
+	// dataBuildRE 匹配 <html data-build="prod-<sha>">。
+	// 上游把构建号直接写在根元素上，这是 OAI-Client-Version 的真值来源。
+	dataBuildRE = regexp.MustCompile(`(?is)<html[^>]*data-build=["']([^"']*)["']`)
+
+	// webBuildNumberRE 匹配 statsig 载荷里的 web_build_number，即
+	// OAI-Client-Build-Number 的真值来源。它只出现在 HTML 内联脚本中，
+	// 且被 JSON 转义，因此两种引号形式都要覆盖。
+	webBuildNumberRE = regexp.MustCompile(`web_build_number\\?"?\s*:\s*([0-9]+)`)
 )
 
+// parsePOWResources 从 bootstrap 的 HTML 中提取 PoW 需要的脚本源与构建标识。
+//
+// dataBuild 同时用于 OAI-Client-Version 头与 PoW 配置数组，因此这两个位置
+// 必须取自同一份 HTML：上游边缘同时在线多个构建，若各取各的就会拼出
+// 「头说 A 版本、指纹说 B 版本」这种服务端可识别的矛盾身份。
 func parsePOWResources(html string) ([]string, string) {
 	matches := scriptSrcRE.FindAllStringSubmatch(html, -1)
 	sources := make([]string, 0, len(matches))
@@ -37,11 +51,20 @@ func parsePOWResources(html string) ([]string, string) {
 		sources = []string{defaultPOWScript}
 	}
 	if dataBuild == "" {
-		if match := regexp.MustCompile(`<html[^>]*data-build=["']([^"']*)["']`).FindStringSubmatch(html); len(match) > 1 {
+		if match := dataBuildRE.FindStringSubmatch(html); len(match) > 1 {
 			dataBuild = match[1]
 		}
 	}
 	return sources, dataBuild
+}
+
+// parseWebBuildNumber 从 bootstrap 的 HTML 中提取 statsig 的 web_build_number。
+// 找不到时返回空串，调用方应保留原有构建号而不是写入空值。
+func parseWebBuildNumber(html string) string {
+	if match := webBuildNumberRE.FindStringSubmatch(html); len(match) > 1 {
+		return match[1]
+	}
+	return ""
 }
 
 func buildLegacyRequirementsToken(userAgent string, scriptSources []string, dataBuild string) string {

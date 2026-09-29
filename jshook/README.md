@@ -13,6 +13,7 @@
 | --- | --- | --- |
 | 看完整技术结论 | [docs/ChatGPT-gpt-image-2-generation-pipeline-analysis.md](docs/ChatGPT-gpt-image-2-generation-pipeline-analysis.md) | 端到端理解 gpt-image-2 / ChatGPT Images 2.0 链路 |
 | 查端点和请求头 | [docs/api-endpoints.md](docs/api-endpoints.md) | 添加或修正后端 HTTP 调用、请求头、路由 |
+| 查 Sentinel 契约 | [docs/sentinel-chat-requirements.md](docs/sentinel-chat-requirements.md) | 单步 / 三步 chat-requirements 的字段契约与差异 |
 | 查认证生图 Schema | [docs/authenticated-api-schema.md](docs/authenticated-api-schema.md) | 实抓链路、PoW、Sentinel、Prepare、Generate、Download |
 | 查请求完成链路 | [docs/request-completion-flow.md](docs/request-completion-flow.md) | 前端 OV/mp 调用链、callsite_id、SSE 差异 |
 | 查 SSE 协议 | [docs/upstream-sse-conversation.md](docs/upstream-sse-conversation.md) | 解析 `/conversation` 和 `/f/conversation` 流式响应 |
@@ -41,6 +42,7 @@
 ### 协议与链路
 
 - [docs/api-endpoints.md](docs/api-endpoints.md): API 端点清单，包含匿名页面接口、登录态生图接口、文本聊天接口、下载接口、图片库接口、Remix 路由和请求头特征。
+- [docs/sentinel-chat-requirements.md](docs/sentinel-chat-requirements.md): Sentinel chat-requirements 契约，对比单步与三步端点、字段名差异、SDK 加载链路与未验证项。
 - [docs/request-completion-flow.md](docs/request-completion-flow.md): 图片生成请求完成链路，记录前端调用链、OV 参数、callsite_id、请求体构建、SSE 处理和并发/异步模式。
 - [docs/upstream-sse-conversation.md](docs/upstream-sse-conversation.md): 上游 Conversation SSE 协议说明，覆盖 patch 结构、消息 add、文本增量、图片工具成功、拒绝、moderation、marker、metadata 和结果判断。
 
@@ -87,6 +89,7 @@ jshook/
 │   ├── function-mapping.md
 │   ├── internal-codenames.md
 │   ├── request-completion-flow.md
+│   ├── sentinel-chat-requirements.md
 │   └── upstream-sse-conversation.md
 ├── scripts/
 │   ├── curl_cffi_request.py

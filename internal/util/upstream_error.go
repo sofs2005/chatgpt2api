@@ -27,6 +27,14 @@ func IsCloudflareChallengeBody(lower string) bool {
 		strings.Contains(lower, "cloudflare")
 }
 
+// IsCloudflareChallengeStatus 判断状态码是否属于 Cloudflare 挑战/拦截。
+//
+// 403 是挑战页的标准状态；429 在上游既表示限流也表示挑战，需要结合响应体
+// 才能区分，因此这里只覆盖确定属于挑战语义的状态码，调用方应再校验响应体。
+func IsCloudflareChallengeStatus(status int) bool {
+	return status == 403 || status == 503
+}
+
 // IsCloudflareChallengeMessage 判断错误文案是否表示 Cloudflare 挑战拦截。
 // 用于重试决策：挑战拦截可以靠换账号（换一套 cookie 与指纹）自愈。
 //

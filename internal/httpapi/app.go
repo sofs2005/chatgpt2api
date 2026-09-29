@@ -62,7 +62,9 @@ type App struct {
 	register      *service.RegisterService
 	update        *service.UpdateService
 	globalLimiter *service.GlobalLimiter
-	cancel        context.CancelFunc
+	// egressPool 是未绑定代理账号的出口池；为 nil 或未配置出口时行为与之前一致。
+	egressPool *service.EgressPool
+	cancel     context.CancelFunc
 }
 
 func NewApp() (*App, error) {
@@ -82,6 +84,25 @@ func NewApp() (*App, error) {
 		return nil, err
 	}
 	proxy := service.NewProxyService(cfg)
+	// cf_clearance 兜底默认关闭；未部署 FlareSolverr 时 Enabled() 为 false，
+	// 出站行为与之前完全一致。
+	clearance := service.NewClearanceService(cfg)
+	proxy.SetClearance(clearance)
+	// 出口池只服务于未绑定代理的账号；未配置 CHATGPT2API_UPSTREAM_POOL 时
+	// Current() 为空串，装配后的出口选择与引入出口池之前完全一致。
+	pool := service.NewEgressPool(cfg)
+	proxy.SetEgressPool(pool)
+	// 切换出口后旧出口的 cf_clearance 必然失效（凭证绑定签发 IP），
+	// 必须显式丢弃：留着它只会在下次切回时拿着废凭证去撞一次 403。
+	pool.SetOnChange(func(previous, current string) {
+		clearance.Invalidate(previous, service.ClearanceTargetHost)
+		logger.Warning("upstream egress switched",
+			"from", service.MaskProxyURL(previous),
+			"to", service.MaskProxyURL(current))
+	})
+	// 探测循环与 App 同生命周期：必须活到 Close()，不能在这里 defer，
+	// 否则 NewApp 一返回就停掉，池内出口再也不会被探活。
+	pool.Start()
 	accounts := service.NewAccountService(storageBackend, cfg, proxy, logs)
 	auth := service.NewAuthService(storageBackend)
 	billing := service.NewBillingService(storageBackend, cfg)
@@ -100,7 +121,7 @@ func NewApp() (*App, error) {
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	imageSessions := service.NewImageConversationSessionService(filepath.Join(cfg.DataDir, "image_conversation_sessions.json"), storageBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger, ImageConversationSessions: imageSessions}
-	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), imageSessions: imageSessions, cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), globalLimiter: service.NewGlobalLimiter(cfg.GlobalConcurrentLimit()), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), imageSessions: imageSessions, cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), globalLimiter: service.NewGlobalLimiter(cfg.GlobalConcurrentLimit()), egressPool: pool, cancel: cancel}
 	app.editableFiles = service.NewEditableFileTaskService(documentStore, cfg.DataDir, func(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (service.EditableFileRunResult, error) {
 		if app.engine == nil {
 			return service.EditableFileRunResult{}, fmt.Errorf("editable file engine is not configured")
@@ -202,6 +223,9 @@ func newUpdateService(cfg *config.Store) *service.UpdateService {
 func (a *App) Close() {
 	if a.cancel != nil {
 		a.cancel()
+	}
+	if a.egressPool != nil {
+		a.egressPool.Stop()
 	}
 	if a.logger != nil {
 		_ = a.logger.Close()
@@ -701,7 +725,17 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		util.WriteJSON(w, http.StatusOK, map[string]any{"config": a.config.Get()})
+		payload := a.config.Get()
+		// 出口池状态含运行时健康度，不在配置里，单独附带；URL 已脱敏。
+		if a.egressPool != nil {
+			payload["upstream_pool_status"] = a.egressPool.Status()
+		}
+		if a.proxy != nil {
+			if clearance := a.proxy.Clearance(); clearance != nil {
+				payload["clearance_enabled"] = clearance.Enabled()
+			}
+		}
+		util.WriteJSON(w, http.StatusOK, map[string]any{"config": payload})
 	case http.MethodPost:
 		body, err := readJSONMap(r)
 		if err != nil {

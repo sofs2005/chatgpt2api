@@ -36,10 +36,47 @@ const BrowserAcceptLanguage = "zh-CN,zh;q=0.9,en;q=0.8"
 
 type ProxyService struct {
 	config ProxyConfig
+	// clearance 是 cf_clearance 兜底。它与出口强相关（凭证绑定签发 IP），
+	// 因此由出口的持有者 ProxyService 一并管理，避免两处各自维护出口视图。
+	clearance *ClearanceService
+	// pool 是未绑定代理账号的出口池；nil 或未配置时回落到全局代理。
+	pool *EgressPool
 }
 
 func NewProxyService(config ProxyConfig) *ProxyService {
 	return &ProxyService{config: config}
+}
+
+// SetClearance 挂上 cf_clearance 兜底服务；nil 表示关闭。
+func (s *ProxyService) SetClearance(clearance *ClearanceService) {
+	if s == nil {
+		return
+	}
+	s.clearance = clearance
+}
+
+// Clearance 返回已挂载的 cf_clearance 兜底服务，可能为 nil。
+func (s *ProxyService) Clearance() *ClearanceService {
+	if s == nil {
+		return nil
+	}
+	return s.clearance
+}
+
+// SetEgressPool 挂上出口池；nil 表示不使用。
+func (s *ProxyService) SetEgressPool(pool *EgressPool) {
+	if s == nil {
+		return
+	}
+	s.pool = pool
+}
+
+// EgressPool 返回已挂载的出口池，可能为 nil。
+func (s *ProxyService) EgressPool() *EgressPool {
+	if s == nil {
+		return nil
+	}
+	return s.pool
 }
 
 func HTTPClientForProxy(proxy string, timeout time.Duration) *http.Client {
@@ -63,13 +100,34 @@ func AccountProxy(account map[string]any) string {
 }
 
 // BrowserHTTPClientForProxy 用显式代理构建浏览器指纹 client。
+//
 // proxy 为空（账号未绑定）时回落到全局代理，保持既有部署行为不变。
+// 出口池的介入统一在 EgressProxy 里完成，这里只处理显式取值的回落。
 func (s *ProxyService) BrowserHTTPClientForProxy(proxy, profile string, timeout time.Duration) *http.Client {
-	proxy = strings.TrimSpace(proxy)
-	if proxy == "" && s != nil && s.config != nil {
-		proxy = s.config.Proxy()
+	return browserHTTPClientForProfile(s.EgressProxy(proxy), profile, timeout)
+}
+
+// EgressProxy 解析一次请求实际应当使用的出口。
+//
+// 优先级：账号绑定代理 > 出口池当前出口 > 全局代理。
+// 账号绑定代理最高是因为 cf_clearance 与签发 IP 强绑定：池子替一个已绑定
+// 出口的账号做故障转移，会当场作废它的凭证，反而放大风控信号。
+//
+// 这个方法同时是账号出口的唯一解析入口：backend 要用同一个出口去取
+// cf_clearance（两者必须一致），因此两处都调用它而不是各自拼装。
+func (s *ProxyService) EgressProxy(accountProxy string) string {
+	if trimmed := strings.TrimSpace(accountProxy); trimmed != "" {
+		return trimmed
 	}
-	return browserHTTPClientForProfile(proxy, profile, timeout)
+	if s != nil && s.pool != nil {
+		if current := s.pool.Current(); current != "" {
+			return current
+		}
+	}
+	if s != nil && s.config != nil {
+		return s.config.Proxy()
+	}
+	return ""
 }
 
 // BrowserHTTPClientForAccount 为账号构建浏览器指纹 client。

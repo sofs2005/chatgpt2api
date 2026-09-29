@@ -1,0 +1,103 @@
+# 降 CF 风控部署：WARP 出口 + cf_clearance 主动兜底。
+#
+# 与 docker-compose.yml 的区别：
+#   1. app 的上游流量改走 privoxy → WARP，不再用数据中心 IP 直连 chatgpt.com；
+#   2. 新增 flaresolverr，挑战命中时由真实无头 Chrome 代打取 cf_clearance。
+#
+# 用法（在 deploy/ 目录下）：
+#   docker compose -f docker-compose.warp.yml up -d
+#
+# 前置：.env 里至少要有
+#   CHATGPT2API_PROXY=http://privoxy:8118
+#   CHATGPT2API_CLEARANCE_ENABLED=true
+#   CHATGPT2API_FLARESOLVERR_URL=http://flaresolverr:8191
+#
+# 一致性约束：cf_clearance 绑定签发时的出口 IP 与 UA。FlareSolverr 必须与使用该
+# 凭证的账号同出口，否则凭证当场作废。因此两者共用 privoxy 这一个出口，
+# 且 ClearanceService 会把账号出口作为 proxy 参数显式传给 FlareSolverr。
+services:
+  # Cloudflare WARP：把出口换成 Cloudflare 自己的边缘网络，避开数据中心 IP 画像。
+  warp-proxy:
+    image: caomingjun/warp:latest
+    container_name: chatgpt2api-warp
+    restart: unless-stopped
+    # 恢复被 runc 移除的规则，否则 WARP 需要的内核设备节点不可用。
+    device_cgroup_rules:
+      - 'c 10:200 rwm'
+    environment:
+      - WARP_SLEEP=2
+      # 注册结果持久化在下面的 volume 里，避免每次重启都重新注册设备。
+    cap_add:
+      - MKNOD
+      - AUDIT_WRITE
+      # WARP 要创建网络接口，缺 NET_ADMIN 起不来。
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ${CHATGPT2API_WARP_DATA_DIR:-../data/warp}:/var/lib/cloudflare-warp
+    # 端口不对宿主机暴露：只有同网络的 privoxy 需要访问。
+    # 镜像自带 HEALTHCHECK（探测 warp=on），此处不再覆盖。
+
+  # SOCKS5 → HTTP 协议转换，并只把 OpenAI 系域名路由进 WARP。
+  privoxy:
+    image: vimagick/privoxy:latest
+    container_name: chatgpt2api-privoxy
+    restart: unless-stopped
+    depends_on:
+      warp-proxy:
+        condition: service_healthy
+    volumes:
+      - ./privoxy-warp.conf:/etc/privoxy/config:ro
+    # 存活探针：镜像为 alpine，无 curl/nc，用 busybox 的 pidof 确认进程在跑。
+    # 这是 liveness 而非 readiness，仅用于让 app 的启动顺序有依据。
+    healthcheck:
+      test: ["CMD-SHELL", "pidof privoxy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # cf_clearance 兜底：挑战命中时用真实无头 Chrome 过一次，取回 cookie 与 UA。
+  # 未配置 CHATGPT2API_FLARESOLVERR_URL 时后端不会调用它，可以一直挂着。
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: chatgpt2api-flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=info
+      # 容器默认出口也走 WARP；单个请求若指定了 proxy，会被请求级参数覆盖。
+      - PROXY_URL=http://privoxy:8118
+      - TZ=Asia/Shanghai
+    # 浏览器很吃内存，共享内存给足，否则 Chrome 会随机崩。
+    shm_size: 1gb
+    # 镜像自带 curl（见上游 Dockerfile），/health 返回 {"status":"ok"}。
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 5 http://127.0.0.1:8191/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  app:
+    image: ${CHATGPT2API_IMAGE:-zyphrzero/chatgpt2api:latest}
+    pull_policy: ${CHATGPT2API_PULL_POLICY:-always}
+    container_name: chatgpt2api
+    restart: unless-stopped
+    depends_on:
+      privoxy:
+        condition: service_healthy
+      flaresolverr:
+        condition: service_started
+    ports:
+      - "3000:80"
+    env_file:
+      - ${CHATGPT2API_ENV_FILE:-../.env}
+    # 出口指向 privoxy 而非 WARP 的 SOCKS5：Go 侧需要 HTTP 代理，
+    # 由 privoxy 完成协议转换与按域名分流。
+    environment:
+      - CHATGPT2API_PROXY=${CHATGPT2API_PROXY:-http://privoxy:8118}
+      - CHATGPT2API_FLARESOLVERR_URL=${CHATGPT2API_FLARESOLVERR_URL:-http://flaresolverr:8191}
+    volumes:
+      - ${CHATGPT2API_DATA_DIR:-../data}:/app/data
+      - ${CHATGPT2API_ENV_FILE:-../.env}:/app/.env

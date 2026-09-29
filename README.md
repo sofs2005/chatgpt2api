@@ -114,6 +114,27 @@ docker compose -f deploy/docker-compose.yml up -d
 - 环境文件：`./.env:/app/.env`
 - 重启策略：`restart: unless-stopped`
 
+#### 使用自定义镜像
+
+Compose 只从**配置文件所在目录**（即 `deploy/`）查找 `.env` 来替换 compose 文件里的 `${...}`，**不读 `env_file:` 指向的 `../.env`**。因此设了下列变量却不生效时，先检查是否漏了 `--env-file`：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml up -d
+```
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CHATGPT2API_IMAGE` | `zyphrzero/chatgpt2api:latest` | 镜像地址；用自己构建的镜像时填 `ghcr.io/<owner>/chatgpt2api:dev` 或 `chatgpt2api:local` |
+| `CHATGPT2API_PULL_POLICY` | `always` | 用本地构建的镜像时必须改为 `never`，否则会去远端找同名镜像 |
+| `CHATGPT2API_ENV_FILE` | `../.env` | 注入容器的 env 文件，相对 compose 文件所在目录 |
+| `CHATGPT2API_DATA_DIR` | `../data` | 数据目录，相对 compose 文件所在目录 |
+
+验证实际生效的镜像：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml config | grep -A 2 "image:"
+```
+
 访问：
 
 ```text
@@ -337,8 +358,13 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 一键拉起（WARP + Privoxy + FlareSolverr + app）：
 
 ```bash
-docker compose -f deploy/docker-compose.warp.yml up -d
+docker compose --env-file .env -f deploy/docker-compose.warp.yml up -d
 ```
+
+两个容易踩的前提：
+
+- **`--env-file` 不能省**（原因见上一节的「使用自定义镜像」）。漏掉时 WARP 栈的默认注入值会被 compose 文件里的默认值顶替，表现为 clearance 静默不生效。
+- **`.env` 里不要留空值行**。`.env` 是 bind mount 进容器的文件，其中 `CHATGPT2API_PROXY=`、`CHATGPT2API_CLEARANCE_ENABLED=false` 这类行会**压掉** compose `environment:` 段的注入值。用这套栈时应把这三行改成实际值（`http://privoxy:8118` / `true` / `http://flaresolverr:8191`），或直接删除。启动日志的 `configuration loaded` 一行会打印实际生效值。
 
 ### 存储后端
 

@@ -95,7 +95,10 @@ services:
     ports:
       - "3000:80"
     env_file:
-      - ${CHATGPT2API_ENV_FILE:-../.env}
+      # 注入容器的配置文件，路径相对本文件所在目录。固定为 ../.env，
+      # 理由与 docker-compose.yml 相同：做成可覆盖的插值变量后，在 deploy/
+      # 下放一份 .env 会连带改掉它，容器会挂载到一份空白配置。
+      - ../.env
     # 出口指向 privoxy 而非 WARP 的 SOCKS5：Go 侧需要 HTTP 代理，
     # 由 privoxy 完成协议转换与按域名分流。
     environment:
@@ -106,4 +109,4 @@ services:
       - CHATGPT2API_FLARESOLVERR_URL=${CHATGPT2API_FLARESOLVERR_URL:-http://flaresolverr:8191}
     volumes:
       - ${CHATGPT2API_DATA_DIR:-../data}:/app/data
-      - ${CHATGPT2API_ENV_FILE:-../.env}:/app/.env
+      - ../.env:/app/.env

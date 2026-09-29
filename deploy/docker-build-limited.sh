@@ -216,9 +216,11 @@ docker buildx build \
   "$repo_root"
 
 if [ "$command" = "up" ]; then
+  # CHATGPT2API_IMAGE / PULL_POLICY 在这里作为 shell 变量传入：它们只参与
+  # compose 插值，不注入容器，因此不走 --env-file 也能生效（shell 环境变量
+  # 优先级最高）。env_file 已在 compose 里固定为 ../.env，无需再传。
   CHATGPT2API_DATA_DIR="$repo_root/data" \
-  CHATGPT2API_ENV_FILE="$repo_root/.env" \
   CHATGPT2API_IMAGE="$CHATGPT2API_LOCAL_IMAGE" \
   CHATGPT2API_PULL_POLICY=never \
-  docker compose --env-file "$repo_root/.env" -f "$repo_root/deploy/docker-compose.yml" up -d --no-build
+  docker compose -f "$repo_root/deploy/docker-compose.yml" up -d --no-build
 fi

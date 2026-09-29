@@ -116,7 +116,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 #### 使用自定义镜像
 
-Compose 只从**配置文件所在目录**（即 `deploy/`）查找 `.env` 来替换 compose 文件里的 `${...}`，**不读 `env_file:` 指向的 `../.env`**。因此设了下列变量却不生效时，先检查是否漏了 `--env-file`：
+Compose 只从**配置文件所在目录**（即 `deploy/`）查找 `.env` 来替换 compose 文件里的 `${...}`，**不读 `env_file:` 指向的 `../.env`**。请把这类变量直接放在仓库根目录的 `.env` 里，并显式传给 `--env-file`：
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.yml up -d
@@ -126,8 +126,15 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d
 | --- | --- | --- |
 | `CHATGPT2API_IMAGE` | `zyphrzero/chatgpt2api:latest` | 镜像地址；用自己构建的镜像时填 `ghcr.io/<owner>/chatgpt2api:dev` 或 `chatgpt2api:local` |
 | `CHATGPT2API_PULL_POLICY` | `always` | 用本地构建的镜像时必须改为 `never`，否则会去远端找同名镜像 |
-| `CHATGPT2API_ENV_FILE` | `../.env` | 注入容器的 env 文件，相对 compose 文件所在目录 |
 | `CHATGPT2API_DATA_DIR` | `../data` | 数据目录，相对 compose 文件所在目录 |
+
+也可以不改文件，用 shell 环境变量前缀传入（优先级最高，同样不读 `../.env`）：
+
+```bash
+CHATGPT2API_IMAGE=ghcr.io/yourname/chatgpt2api:dev docker compose -f deploy/docker-compose.yml up -d
+```
+
+> **不要在 `deploy/` 下再放一份 `.env`。** 除了会与根目录那份产生「改了没生效」的混淆，`.env` 还是容器内配置文件（`env_file` + bind mount）的来源：`deploy/.env` 一旦存在，容器会挂载到这份**不含账号与设置**的文件，数据看起来全丢。容器内的 env 路径已在 compose 里固定为 `../.env`，不需要也不应该覆盖。
 
 验证实际生效的镜像：
 

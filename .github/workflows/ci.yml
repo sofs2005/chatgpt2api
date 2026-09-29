@@ -75,9 +75,11 @@ jobs:
           test ! -e docker-compose.build.yml
           test ! -e docker-compose.local.yml
           test ! -e .goreleaser.simple.yaml
-          CHATGPT2API_ENV_FILE="$PWD/.env.example" \
-          CHATGPT2API_DATA_DIR="$PWD/data" \
+          # compose 的 env_file 固定为 ../.env，仓库里没有该文件，
+          # 这里用 .env.example 临时顶替，只为让 config 能解析通过。
+          cp .env.example .env
           docker compose -f deploy/docker-compose.yml config >/dev/null
+          rm -f .env
 
   build-docker-dev:
     needs: [test]

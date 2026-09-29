@@ -7,7 +7,12 @@ services:
     ports:
       - "3000:80"
     env_file:
-      - ${CHATGPT2API_ENV_FILE:-../.env}
+      # 注入容器的配置文件，路径相对本文件所在目录。
+      # 这里刻意不写成可覆盖的 ${CHATGPT2API_ENV_FILE:-...}：该变量同时是
+      # compose 的插值来源，在 deploy/ 下放一份 .env 就会把它一并改掉，
+      # 容器随即挂载到一份不含账号与设置的空白 env，表现为「数据全丢」。
+      # compose 自己的变量请在 ../.env 里用 --env-file 传入（见 README）。
+      - ../.env
     volumes:
       - ${CHATGPT2API_DATA_DIR:-../data}:/app/data
-      - ${CHATGPT2API_ENV_FILE:-../.env}:/app/.env
+      - ../.env:/app/.env

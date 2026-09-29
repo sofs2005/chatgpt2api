@@ -4665,3 +4665,72 @@ func TestStartImageSessionCleanerRemovesExpiredSessions(t *testing.T) {
 	}
 	t.Fatal("expired session survived; cleaner is not wired or not running")
 }
+
+// 后台保存并发上限后必须立刻生效：限流器只在 NewApp 时构造一次，
+// 不重新接线的话新值要等到下次重启，用户看到的是「保存了但没反应」。
+func TestSettingsUpdateAppliesGlobalConcurrentLimitImmediately(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"global_concurrent_limit":1}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("settings update status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release, err := app.globalLimiter.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("first Acquire() error = %v", err)
+	}
+	defer release()
+
+	// 上限为 1 且槽位已被占用，第二次 Acquire 必须阻塞。
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := app.globalLimiter.Acquire(ctx)
+		blocked <- err
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("second Acquire() returned immediately; the new limit was not applied")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// P2a 的可观测性：出口池健康度必须能从设置接口读到，且凭据必须已脱敏。
+func TestSettingsExposesMaskedEgressPoolStatus(t *testing.T) {
+	t.Setenv("CHATGPT2API_UPSTREAM_POOL", "socks5://user:secret@10.0.0.1:1080,http://10.0.0.2:8080")
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("settings status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("settings json: %v", err)
+	}
+	config := util.StringMap(payload["config"])
+	status := util.StringMap(config["upstream_pool_status"])
+	if status == nil {
+		t.Fatalf("upstream_pool_status missing from %#v", config)
+	}
+	if got := util.Clean(status["current"]); got != "socks5://***@10.0.0.1:1080" {
+		t.Fatalf("current = %q, want the masked form", got)
+	}
+	raw, err := json.Marshal(status["exits"])
+	if err != nil {
+		t.Fatalf("marshal exits: %v", err)
+	}
+	if strings.Contains(string(raw), "secret") || strings.Contains(string(raw), "user:") {
+		t.Fatalf("exits leak credentials: %s", raw)
+	}
+}

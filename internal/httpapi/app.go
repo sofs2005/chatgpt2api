@@ -747,6 +747,9 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// 限流器在 NewApp 时用当时的配置构造一次；后台改完并发上限必须立即生效，
+		// 否则新值要等到下次重启才起作用，用户看到的是「保存了但没反应」。
+		a.globalLimiter.SetLimit(a.config.GlobalConcurrentLimit())
 		a.update = newUpdateService(a.config)
 		util.WriteJSON(w, http.StatusOK, map[string]any{"config": updated})
 	default:

@@ -1660,7 +1660,7 @@ func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string
 		return nil, err
 	}
 	init, err := remote.doJSON(http.MethodPost, "/backend-api/conversation/init", map[string]any{
-		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": util.OutboundTimeZoneOffsetMinutes(),
+		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": util.OutboundTimeZoneOffsetMinutes(time.Now()),
 	}, nil)
 	if err != nil {
 		return nil, err

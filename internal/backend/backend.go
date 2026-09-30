@@ -661,7 +661,7 @@ func (c *Client) headers(path string, extra map[string]string) map[string]string
 		"User-Agent":                  c.userAgent,
 		"Origin":                      c.BaseURL,
 		"Referer":                     c.BaseURL + "/",
-		"Accept-Language":             util.WebAcceptLanguage,
+		"Accept-Language":             util.OutboundAcceptLanguage,
 		"Cache-Control":               "no-cache",
 		"Pragma":                      "no-cache",
 		"Priority":                    "u=1, i",

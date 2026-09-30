@@ -2,6 +2,13 @@
 
 > 更新: 2026-05-07 — 已通过实抓验证修正
 > 标记: ✅ 已验证 | 🔶 推测 | ❌ 已证伪
+>
+> 身份字段说明（2026-09-30）：本文档中的 `timezone` / `timezone_offset_min` /
+> `Accept-Language` 已改写为 `America/Los_Angeles` + `-420`（PDT），与后端
+> `util.OutboundTimeZone*` 当前发出的身份一致。原始实抓（2026-05-07）记录的是
+> `Asia/Shanghai` + `-480`，即当时的客户端身份。**字段名与结构仍来自实抓，
+> 但这两个取值未经重新抓包确认上游是否接受**——如需据此改协议代码，先按
+> `AGENTS.md` 的要求重新抓一份。
 
 ## 一、页面加载时触发的 API (匿名用户)
 
@@ -64,8 +71,8 @@
   "parent_message_id": "<uuid>",
   "model": "gpt-5-5",
   "client_prepare_state": "success",
-  "timezone_offset_min": -480,
-  "timezone": "Asia/Shanghai",
+  "timezone_offset_min": -420,
+  "timezone": "America/Los_Angeles",
   "conversation_mode": { "kind": "primary_assistant" },
   "system_hints": ["picture_v2"],
   "partial_query": {
@@ -122,8 +129,8 @@ OAI-Client-Build-Number: ...
   "parent_message_id": "<uuid>",
   "model": "gpt-5-5",
   "client_prepare_state": "sent",
-  "timezone_offset_min": -480,
-  "timezone": "Asia/Shanghai",
+  "timezone_offset_min": -420,
+  "timezone": "America/Los_Angeles",
   "conversation_mode": { "kind": "primary_assistant" },
   "system_hints": ["picture_v2"],
   "supports_buffering": true,
@@ -161,8 +168,8 @@ OAI-Client-Build-Number: ...
     }
   }],
   "model": "auto",
-  "timezone": "Asia/Shanghai",
-  "timezone_offset_min": -480
+  "timezone": "America/Los_Angeles",
+  "timezone_offset_min": -420
 }
 ```
 

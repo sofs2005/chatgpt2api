@@ -133,29 +133,45 @@ func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) 
 
 // PoW 载荷中的语言与时间必须与请求其余部分保持同一身份。
 //
-// 请求体用 util.OutboundTimeZoneName / util.OutboundTimeZoneOffsetMinutes()，
+// 请求体用 util.OutboundTimeZoneName / util.OutboundTimeZoneOffsetMinutes(now)，
 // 请求头用 util.OutboundLocaleTag / util.OutboundAcceptLanguage；此处三者同源。
-// 若任何一处回落到别的语言或时区，同一份身份就会自报不同的语言与时区，
-// 构成可识别的矛盾信号。
+// 若任何一处回落到别的语言或时区（哪怕是偏移量写死导致的换季错位），
+// 同一份身份就会自报不同的语言与时区，构成可识别的矛盾信号。
 const (
 	powLocaleTag  = util.OutboundLocaleTag
 	powLocaleList = util.OutboundLocaleList
 )
 
-// outboundTimezoneOffsetMinutes 返回发往上游的 timezone_offset_min 取值。
+// outboundTimezoneOffsetMinutes 返回当前时刻发往上游的 UTC 偏移（分钟）。
+//
+// 必须按时刻算而不是写死：太平洋时区换季时会从 -480 变成 -420，
+// 写死一个值会让「timezone 名」与「偏移量」在换季后互相矛盾。
 func outboundTimezoneOffsetMinutes() int {
-	return util.OutboundTimeZoneOffsetMinutes()
+	return util.OutboundTimeZoneOffsetMinutes(time.Now())
 }
 
 // powProcessStart 是 PoW 载荷中 performance.now 近似的单调基准。
 var powProcessStart = time.Now()
 
-// powLocalTimeString 生成与请求体 timezone 一致的本地时间字符串。
-//
-// 格式对齐浏览器 Date.toString()：中国标准时间没有夏令时，全年恒定 GMT+0800。
+// powLocalTimeString 生成与请求时区一致的本地时间字符串。
 func powLocalTimeString(now time.Time) string {
-	local := now.In(util.OutboundTimeZone())
-	return local.Format("Mon Jan 02 2006 15:04:05") + " GMT+0800 (中国标准时间)"
+	local := now.In(util.PacificTimeZone(now))
+	_, offset := local.Zone()
+	label := "Pacific Standard Time"
+	if offset != -8*3600 {
+		label = "Pacific Daylight Time"
+	}
+	return local.Format("Mon Jan 02 2006 15:04:05") + " " + formatGMTOffset(offset) + " (" + label + ")"
+}
+
+// formatGMTOffset 把秒级偏移格式化成 "GMT-0700" 这样的字符串。
+func formatGMTOffset(offsetSeconds int) string {
+	sign := "+"
+	if offsetSeconds < 0 {
+		sign = "-"
+		offsetSeconds = -offsetSeconds
+	}
+	return fmt.Sprintf("GMT%s%02d%02d", sign, offsetSeconds/3600, (offsetSeconds%3600)/60)
 }
 
 // powNavigatorKeys 构造 navigator 探针池，使 hardwareConcurrency 探针的取值

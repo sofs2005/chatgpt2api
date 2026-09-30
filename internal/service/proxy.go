@@ -25,8 +25,8 @@ type ProxyConfig interface {
 
 // BrowserAcceptLanguage 是出站请求统一的 Accept-Language。
 //
-// 取值来自 util.OutboundAcceptLanguage，与请求体的身份时区同源：两者必须
-// 指向同一地区，否则同一份身份会自报「中文语言配美国时区」这类跨地区组合。
+// 取值来自 util.OutboundAcceptLanguage，与请求体的身份时区同源：
+// 太平洋时区配 en-US，否则同一份身份会自报「美国时区 + 中文语言」。
 //
 // surf 的 Impersonate() 会把 Accept-Language 硬编码成 en-US，且它的请求中间件
 // 优先级为 0，晚于调用方设置的头。因此这里在更高优先级上再写回统一值，

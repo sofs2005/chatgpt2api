@@ -30,6 +30,8 @@ export const detailLabels: Record<string, string> = {
   added: "新增",
   skipped: "跳过",
   removed: "删除",
+  updated: "更新",
+  token_previews: "账号标识",
   upstream_account_name: "上游账号",
   upstream_account_names: "上游账号列表",
   event_kind: "事件类型",

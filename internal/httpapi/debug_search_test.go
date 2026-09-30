@@ -92,7 +92,7 @@ func TestHandleDebugSearchReturnsPayloadAndLogsFailure(t *testing.T) {
 		t.Fatalf("missing error body = %#v", body)
 	}
 
-	logs := app.logs.Search(service.LogQuery{Module: "debug", Summary: "Search 调试", Limit: 10})
+	logs := app.logs.Search(service.LogQuery{Module: "调试", Summary: "Search 调试", Limit: 10})
 	if len(logs) == 0 {
 		t.Fatalf("expected debug search log entry, got %#v", app.logs.Search(service.LogQuery{Limit: 10}))
 	}

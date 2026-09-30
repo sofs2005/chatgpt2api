@@ -496,7 +496,7 @@ func TestCreationTaskFailureWritesCallLog(t *testing.T) {
 	if detail["endpoint"] != "/api/creation-tasks/image-generations" ||
 		detail["path"] != "/api/creation-tasks/image-generations" ||
 		detail["method"] != http.MethodPost ||
-		detail["module"] != "creation-tasks" ||
+		detail["module"] != "创建任务" ||
 		detail["outcome"] != "failed" {
 		t.Fatalf("unexpected log detail: %#v", detail)
 	}

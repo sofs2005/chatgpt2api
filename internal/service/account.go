@@ -319,13 +319,29 @@ func (s *AccountService) addAccounts(tokens []string, deviceID string) map[strin
 	_ = s.saveLocked()
 	items := publicAccounts(s.items)
 	s.mu.Unlock()
-	s.logs.Add(fmt.Sprintf("新增 %d 个账号，跳过 %d 个", added, skipped), map[string]any{
+	return map[string]any{"added": added, "skipped": skipped, "items": items}
+}
+
+// LogBatchImport records an account batch that arrived from a background
+// import (CPA pool / Sub2API server). Those callers have no HTTP request, so
+// they cannot use the handler-level log helper; the summary is what tells the
+// operator how many accounts an import actually landed. Registration is
+// deliberately excluded: it has its own per-run log and would flood the list.
+func (s *AccountService) LogBatchImport(source string, added, skipped int) {
+	if s == nil || s.logs == nil || added <= 0 {
+		return
+	}
+	detail := map[string]any{
 		"module":         "accounts",
 		"operation_type": "新增",
+		"event_kind":     EventKindBusiness,
 		"added":          added,
 		"skipped":        skipped,
-	})
-	return map[string]any{"added": added, "skipped": skipped, "items": items}
+	}
+	if source = util.Clean(source); source != "" {
+		detail["source"] = source
+	}
+	_ = s.logs.Add(fmt.Sprintf("新增 %d 个账号，跳过 %d 个", added, skipped), detail)
 }
 
 func firstCookieInput(inputs []string) string {
@@ -494,13 +510,6 @@ func (s *AccountService) DeleteAccounts(tokens []string) map[string]any {
 	}
 	items := publicAccounts(s.items)
 	s.mu.Unlock()
-	if removed > 0 {
-		s.logs.Add(fmt.Sprintf("删除 %d 个账号", removed), map[string]any{
-			"module":         "accounts",
-			"operation_type": "删除",
-			"removed":        removed,
-		})
-	}
 	return map[string]any{"removed": removed, "items": items}
 }
 

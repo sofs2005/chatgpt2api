@@ -672,11 +672,14 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	identity, token, err := a.auth.LoginPassword(util.Clean(body["username"]), util.Clean(body["password"]))
+	username := util.Clean(body["username"])
+	identity, token, err := a.auth.LoginPassword(username, util.Clean(body["password"]))
 	if err != nil {
+		a.logAuthEvent(r, nil, "登录失败", username, "", err.Error())
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.logAuthEvent(r, identity, "登录成功", username, identity.Provider, "")
 	setAuthSessionCookie(w, r, token)
 	a.writeLoginResponse(w, *identity, token)
 }
@@ -704,9 +707,11 @@ func (a *App) handleAccountRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, token, err := a.auth.RegisterPasswordUser(util.Clean(body["username"]), util.Clean(body["password"]), util.Clean(body["name"]))
 	if err != nil {
+		a.logAuthEvent(r, nil, "注册失败", util.Clean(body["username"]), "", err.Error())
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.logAuthEvent(r, identity, "注册成功", util.Clean(body["username"]), identity.Provider, "")
 	setAuthSessionCookie(w, r, token)
 	a.writeLoginResponse(w, *identity, token)
 }
@@ -1775,6 +1780,101 @@ func addIdentityLogDetail(detail map[string]any, identity service.Identity) {
 	if provider := util.Clean(identity.Provider); provider != "" {
 		detail["provider"] = provider
 	}
+}
+
+// logAccountMutation records an admin account add/remove as a single business
+// event. The service layer cannot see the request identity or timing, so the
+// handler writes this instead and marks the request as business-logged to keep
+// the generic audit middleware from writing a second, path-shaped duplicate.
+func (a *App) logAccountMutation(r *http.Request, identity service.Identity, operation, summary string, extra map[string]any) {
+	if a == nil || a.logs == nil || r == nil {
+		return
+	}
+	started := requestStartTime(r.Context(), time.Now())
+	detail := map[string]any{
+		"method":         strings.ToUpper(strings.TrimSpace(r.Method)),
+		"path":           r.URL.Path,
+		"module":         "accounts",
+		"operation_type": operation,
+		"status":         http.StatusOK,
+		"outcome":        "success",
+		"log_level":      "info",
+		"event_kind":     service.EventKindBusiness,
+		"duration_ms":    time.Since(started).Milliseconds(),
+		"ip_address":     clientIP(r),
+		"user_agent":     r.UserAgent(),
+	}
+	for key, value := range extra {
+		detail[key] = value
+	}
+	addIdentityLogDetail(detail, identity)
+	if name := identityDisplayName(identity); name != "" {
+		detail["username"] = name
+	}
+	markRequestBusinessLogged(r)
+	if err := a.logs.Add(summary, detail); err != nil && a.logger != nil {
+		a.logger.Error("create account log failed", "error", err, "path", r.URL.Path, "method", r.Method)
+	}
+}
+
+// logAuthEvent records a login/registration outcome. These are security-relevant
+// events, so they get a business log with the attempted account name instead of
+// only the middleware's "POST /auth/login" audit line.
+func (a *App) logAuthEvent(r *http.Request, identity *service.Identity, summary, username, provider, errText string) {
+	if a == nil || a.logs == nil || r == nil {
+		return
+	}
+	status := http.StatusOK
+	outcome := "success"
+	level := "info"
+	if errText != "" {
+		status = http.StatusBadRequest
+		outcome = "failed"
+		level = "warning"
+	}
+	started := requestStartTime(r.Context(), time.Now())
+	// Only the three auth endpoints reach here, so the path is enough to tell a
+	// registration apart from a sign-in for the operation_type filter.
+	operation := "登录"
+	if strings.Contains(r.URL.Path, "register") {
+		operation = "注册"
+	}
+	detail := map[string]any{
+		"method":         strings.ToUpper(strings.TrimSpace(r.Method)),
+		"path":           r.URL.Path,
+		"module":         inferAuditModule(r.URL.Path),
+		"status":         status,
+		"outcome":        outcome,
+		"log_level":      level,
+		"event_kind":     service.EventKindBusiness,
+		"duration_ms":    time.Since(started).Milliseconds(),
+		"ip_address":     clientIP(r),
+		"user_agent":     r.UserAgent(),
+		"operation_type": operation,
+	}
+	if provider != "" {
+		detail["provider"] = provider
+	}
+	if identity != nil {
+		addIdentityLogDetail(detail, *identity)
+	}
+	if name := firstNonEmpty(util.Clean(username), identityDisplayNameOrEmpty(identity)); name != "" {
+		detail["username"] = name
+	}
+	if errText != "" {
+		detail["error"] = errText
+	}
+	markRequestBusinessLogged(r)
+	if err := a.logs.Add(summary, detail); err != nil && a.logger != nil {
+		a.logger.Error("create auth log failed", "error", err, "path", r.URL.Path, "method", r.Method)
+	}
+}
+
+func identityDisplayNameOrEmpty(identity *service.Identity) string {
+	if identity == nil {
+		return ""
+	}
+	return identityDisplayName(*identity)
 }
 
 func payloadAuditCapture(payload map[string]any) auditRequestCapture {

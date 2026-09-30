@@ -401,16 +401,41 @@ func logLevelForStatus(status int) string {
 	}
 }
 
+// auditModuleLabels maps the URL's second segment to the label shown in the
+// admin log list. The raw segment ("accounts", "admin") is what the path
+// contains, but the log list is read by operators, so it gets Chinese labels.
+var auditModuleLabels = map[string]string{
+	"accounts":       "账号",
+	"auth":           "认证",
+	"admin":          "管理",
+	"settings":       "设置",
+	"images":         "图片",
+	"logs":           "日志",
+	"profile":        "个人",
+	"creation-tasks": "创建任务",
+	"cpa":            "CPA",
+	"sub2api":        "Sub2API",
+	"register":       "注册",
+	"proxy":          "代理",
+	"debug":          "调试",
+	"announcements":  "公告",
+	"storage":        "存储",
+}
+
 func inferAuditModule(path string) string {
 	trimmed := strings.Trim(strings.TrimSpace(path), "/")
 	if trimmed == "" {
 		return "system"
 	}
 	parts := strings.Split(trimmed, "/")
+	segment := parts[0]
 	if len(parts) >= 2 {
-		return parts[1]
+		segment = parts[1]
 	}
-	return parts[0]
+	if label, ok := auditModuleLabels[segment]; ok {
+		return label
+	}
+	return segment
 }
 
 func clientIP(r *http.Request) string {

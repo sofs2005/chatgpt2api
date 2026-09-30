@@ -1163,6 +1163,16 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		added := util.ToInt(result["added"], 0)
+		skipped := util.ToInt(result["skipped"], 0)
+		updated := util.ToInt(result["updated"], 0)
+		if added > 0 || skipped > 0 || updated > 0 {
+			a.logAccountMutation(r, identity, "新增", fmt.Sprintf("新增 %d 个账号，更新 %d 个，跳过 %d 个", added, updated, skipped), map[string]any{
+				"added":   added,
+				"skipped": skipped,
+				"updated": updated,
+			})
+		}
 		delete(result, "tokens")
 		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)
@@ -1179,6 +1189,15 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			if key == "refreshed" || key == "errors" || key == "items" {
 				result[key] = value
 			}
+		}
+		added := util.ToInt(result["added"], 0)
+		skipped := util.ToInt(result["skipped"], 0)
+		if added > 0 || skipped > 0 {
+			a.logAccountMutation(r, identity, "新增", fmt.Sprintf("新增 %d 个账号，跳过 %d 个", added, skipped), map[string]any{
+				"added":          added,
+				"skipped":        skipped,
+				"token_previews": accountTokenPreviews(tokens),
+			})
 		}
 		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)
@@ -1198,6 +1217,12 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result := a.accounts.DeleteAccounts(tokens)
+		if removed := util.ToInt(result["removed"], 0); removed > 0 {
+			a.logAccountMutation(r, identity, "删除", fmt.Sprintf("删除 %d 个账号", removed), map[string]any{
+				"removed":        removed,
+				"token_previews": accountTokenPreviews(tokens),
+			})
+		}
 		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts/refresh" && r.Method == http.MethodPost:
@@ -1311,6 +1336,30 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// accountTokenPreviews renders account identifiers for the log detail without
+// storing the token itself. AnonymizeToken keeps them stable and comparable
+// across log entries while remaining non-reversible.
+func accountTokenPreviews(tokens []string) []string {
+	const maxPreviews = 20
+	previews := make([]string, 0, min(len(tokens), maxPreviews))
+	seen := map[string]struct{}{}
+	for _, token := range tokens {
+		cleaned := util.Clean(token)
+		if cleaned == "" {
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		previews = append(previews, util.AnonymizeToken(cleaned))
+		if len(previews) >= maxPreviews {
+			break
+		}
+	}
+	return previews
 }
 
 func (a *App) accountItemsForIdentity(identity service.Identity) []map[string]any {
@@ -1571,6 +1620,9 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 			util.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// The poll handler in app.go already wrote a business log for this call;
+		// suppress the middleware's path-shaped audit duplicate.
+		markRequestBusinessLogged(r)
 		util.WriteJSON(w, http.StatusOK, task)
 		return
 	}

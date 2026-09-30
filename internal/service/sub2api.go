@@ -282,6 +282,7 @@ func (s *Sub2APIService) runImport(serverID string, server map[string]any, ids [
 		return
 	}
 	add := s.accounts.AddAccounts(tokens)
+	s.accounts.LogBatchImport("Sub2API 导入", util.ToInt(add["added"], 0), util.ToInt(add["skipped"], 0))
 	refresh := s.accounts.RefreshAccounts(context.Background(), tokens)
 	current := s.config.GetImportJob(serverID)
 	s.updateJob(serverID, map[string]any{"status": "completed", "completed": len(ids), "added": util.ToInt(add["added"], 0), "skipped": util.ToInt(add["skipped"], 0), "refreshed": util.ToInt(refresh["refreshed"], 0), "failed": len(anyList(current["errors"]))})

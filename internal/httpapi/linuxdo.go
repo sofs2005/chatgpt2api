@@ -107,19 +107,19 @@ func (a *App) handleLinuxDoOAuthCallback(w http.ResponseWriter, r *http.Request)
 	frontendCallback := sanitizeFrontendCallbackURL(cfg.FrontendRedirectURL)
 
 	if providerErr := strings.TrimSpace(r.URL.Query().Get("error")); providerErr != "" {
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "provider_error", providerErr, r.URL.Query().Get("error_description"))
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "provider_error", providerErr, r.URL.Query().Get("error_description"))
 		return
 	}
 
 	if !cfg.Ready() {
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "config_error", "Linuxdo login is not configured", "")
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "config_error", "Linuxdo login is not configured", "")
 		return
 	}
 
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
 	if code == "" || state == "" {
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "missing_params", "missing code/state", "")
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "missing_params", "missing code/state", "")
 		return
 	}
 
@@ -132,7 +132,7 @@ func (a *App) handleLinuxDoOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	expectedState, err := readLinuxDoCookieDecoded(r, linuxDoOAuthStateCookieName)
 	if err != nil || expectedState == "" || state != expectedState {
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "invalid_state", "invalid oauth state", "")
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "invalid_state", "invalid oauth state", "")
 		return
 	}
 
@@ -146,19 +146,19 @@ func (a *App) handleLinuxDoOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if cfg.UsePKCE {
 		codeVerifier, _ = readLinuxDoCookieDecoded(r, linuxDoOAuthVerifierCookie)
 		if codeVerifier == "" {
-			redirectLinuxDoOAuthError(w, r, frontendCallback, "missing_verifier", "missing pkce verifier", "")
+			a.redirectLinuxDoOAuthError(w, r, frontendCallback, "missing_verifier", "missing pkce verifier", "")
 			return
 		}
 	}
 
 	token, err := linuxDoExchangeCode(r.Context(), a.proxy.HTTPClient(30*time.Second), cfg, code, codeVerifier)
 	if err != nil {
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "token_exchange_failed", "failed to exchange oauth code", singleLine(err.Error()))
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "token_exchange_failed", "failed to exchange oauth code", singleLine(err.Error()))
 		return
 	}
 	userInfo, err := linuxDoFetchUserInfo(r.Context(), a.proxy.HTTPClient(30*time.Second), cfg, token)
 	if err != nil {
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "userinfo_failed", "failed to fetch user info", singleLine(err.Error()))
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "userinfo_failed", "failed to fetch user info", singleLine(err.Error()))
 		return
 	}
 
@@ -171,14 +171,14 @@ func (a *App) handleLinuxDoOAuthCallback(w http.ResponseWriter, r *http.Request)
 	}, a.config.RegistrationEnabled())
 	if err != nil {
 		if errors.Is(err, service.ErrAuthUserCreationDisabled) {
-			redirectLinuxDoOAuthError(w, r, frontendCallback, "registration_disabled", "已关闭注册通道", "")
+			a.redirectLinuxDoOAuthError(w, r, frontendCallback, "registration_disabled", "已关闭注册通道", "")
 			return
 		}
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "login_failed", "failed to create local session", "")
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "login_failed", "failed to create local session", "")
 		return
 	}
 	if !util.ToBool(sessionItem["enabled"]) {
-		redirectLinuxDoOAuthError(w, r, frontendCallback, "account_disabled", "account is disabled", "")
+		a.redirectLinuxDoOAuthError(w, r, frontendCallback, "account_disabled", "account is disabled", "")
 		return
 	}
 
@@ -189,6 +189,7 @@ func (a *App) handleLinuxDoOAuthCallback(w http.ResponseWriter, r *http.Request)
 	fragment.Set("name", userInfo.Username)
 	fragment.Set("version", version.Get())
 	fragment.Set("redirect", redirectTo)
+	a.logAuthEvent(r, nil, "LinuxDo 登录成功", userInfo.Username, service.AuthProviderLinuxDo, "")
 	setAuthSessionCookie(w, r, rawSessionKey)
 	redirectWithFragment(w, r, frontendCallback, fragment)
 }
@@ -480,7 +481,11 @@ func int64FromAny(value any) int64 {
 	}
 }
 
-func redirectLinuxDoOAuthError(w http.ResponseWriter, r *http.Request, frontendCallback string, code string, message string, description string) {
+// redirectLinuxDoOAuthError funnels every LinuxDo callback failure through one
+// place, so the security-relevant "who failed to sign in, and why" record is
+// written for all of them instead of only the branches someone remembered.
+func (a *App) redirectLinuxDoOAuthError(w http.ResponseWriter, r *http.Request, frontendCallback string, code string, message string, description string) {
+	a.logAuthEvent(r, nil, "LinuxDo 登录失败", "", service.AuthProviderLinuxDo, firstNonEmpty(singleLine(description), message, code))
 	fragment := url.Values{}
 	fragment.Set("error", truncateFragmentValue(code))
 	if strings.TrimSpace(message) != "" {

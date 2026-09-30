@@ -248,6 +248,7 @@ func (s *CPAImportService) runImport(poolID string, pool map[string]any, names [
 		return
 	}
 	add := s.accounts.AddAccounts(tokens)
+	s.accounts.LogBatchImport("CPA 池导入", util.ToInt(add["added"], 0), util.ToInt(add["skipped"], 0))
 	refresh := s.accounts.RefreshAccounts(context.Background(), tokens)
 	current := s.config.GetImportJob(poolID)
 	s.updateJob(poolID, map[string]any{"status": "completed", "completed": len(names), "added": util.ToInt(add["added"], 0), "skipped": util.ToInt(add["skipped"], 0), "refreshed": util.ToInt(refresh["refreshed"], 0), "failed": len(anyList(current["errors"]))})

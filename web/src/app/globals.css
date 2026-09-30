@@ -182,6 +182,27 @@
 }
 
 @layer utilities {
+  /* 固定在最右侧的操作列。
+     表格列数多、实际宽度超过容器时，最后一列会被推到横向滚动区外，
+     看起来像「按钮被删了」。钉住之后无论滚动到哪都可见。
+     底色必须不透明，否则横向滚动时下面的列会透出来：
+     表头与单元格分别对齐各自的真实底色（表头是 bg-muted/55 叠在卡片渐变上）。 */
+  .sticky-col-head {
+    position: sticky;
+    right: 0;
+    background: color-mix(in srgb, var(--muted) 55%, var(--card));
+  }
+
+  .sticky-col-cell {
+    position: sticky;
+    right: 0;
+    background: var(--surface-card-gradient);
+  }
+
+  tr:hover .sticky-col-cell {
+    background: color-mix(in srgb, var(--muted) 50%, var(--card));
+  }
+
   .brand-card-shadow {
     box-shadow: var(--shadow-brand);
   }

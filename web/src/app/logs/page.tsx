@@ -480,7 +480,9 @@ function LogsContent() {
                   <TableHead>耗时</TableHead>
                   <TableHead>摘要</TableHead>
                   <TableHead>诊断</TableHead>
-                  <TableHead className="w-28">详情</TableHead>
+                  {/* 操作列钉在右侧：表格共 9 列，实际宽度会超过容器，
+                      不钉住就会被推到横向滚动区外，看起来像「按钮没了」。 */}
+                  <TableHead className="sticky-col-head z-20 w-28 border-l border-border">详情</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -520,7 +522,7 @@ function LogsContent() {
                           })()}
                         </div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="sticky-col-cell border-l border-border">
                         <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => openDetail(item)}>
                           查看详情
                         </Button>

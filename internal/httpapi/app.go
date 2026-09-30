@@ -173,7 +173,7 @@ func NewApp() (*App, error) {
 		app.logCall(ctx, identity, "续轮询", http.MethodPost, "/api/creation-tasks/resume-poll", util.ImageModelAuto, start, "success", http.StatusOK, "", urls, auditRequestCapture{})
 		return data, nil
 	})
-	accounts.StartLimitedWatcher(ctx, time.Duration(cfg.RefreshAccountIntervalMinute())*time.Minute)
+	accounts.StartAccountRefreshWatcher(ctx, time.Duration(cfg.RefreshAccountIntervalMinute())*time.Minute)
 	logs.StartRetentionCleaner(ctx, cfg.LogRetentionDays, 24*time.Hour, logger)
 	app.startImageSessionCleaner(ctx, logger)
 	_, _ = app.images.CleanupStorage(service.ImageStorageCleanupOptions{

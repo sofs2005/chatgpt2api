@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1590,7 +1591,7 @@ func TestApplyAccountErrorMessageIgnoresBootstrapFailures(t *testing.T) {
 	}
 }
 
-func TestStartLimitedWatcherSkipsAccountBeforeRestoreTime(t *testing.T) {
+func TestStartAccountRefreshWatcherSkipsAccountBeforeRestoreTime(t *testing.T) {
 	var mu sync.Mutex
 	meCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1634,14 +1635,14 @@ func TestStartLimitedWatcherSkipsAccountBeforeRestoreTime(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	accounts.StartLimitedWatcher(ctx, 20*time.Millisecond)
+	accounts.StartAccountRefreshWatcher(ctx, 20*time.Millisecond)
 	time.Sleep(80 * time.Millisecond)
 
 	mu.Lock()
 	got := meCalls
 	mu.Unlock()
 	if got != 0 {
-		t.Fatalf("limited watcher refreshed account before restore time: /backend-api/me calls = %d, want 0", got)
+		t.Fatalf("refresh watcher refreshed account before restore time: /backend-api/me calls = %d, want 0", got)
 	}
 }
 
@@ -3014,6 +3015,103 @@ func TestUpdateAccountDoesNotWriteLog(t *testing.T) {
 		if summary == "更新账号" {
 			t.Fatalf("UpdateAccount() wrote a %q log; account status churn must stay out of the log list", summary)
 		}
+	}
+}
+
+// testJWT 造一个只有 payload 有意义的三段式 token，用来验证基于 exp 的过期判定。
+func testJWT(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"none"}`)) + "." + enc(raw) + ".sig"
+}
+
+func TestDecodeAccessTokenExpiry(t *testing.T) {
+	token := testJWT(t, map[string]any{"exp": 1785334952})
+	got, ok := DecodeAccessTokenExpiry(token)
+	if !ok {
+		t.Fatal("DecodeAccessTokenExpiry() did not parse a well-formed JWT exp")
+	}
+	if want := time.Unix(1785334952, 0); !got.Equal(want) {
+		t.Fatalf("DecodeAccessTokenExpiry() = %s, want %s", got, want)
+	}
+
+	for name, bad := range map[string]string{
+		"empty":         "",
+		"not a jwt":     "opaque-token-value",
+		"payload junk":  "aaa.!!!not-base64!!!.ccc",
+		"no exp claim":  testJWT(t, map[string]any{"sub": "user-1"}),
+		"exp not a num": testJWT(t, map[string]any{"exp": "soon"}),
+	} {
+		if _, ok := DecodeAccessTokenExpiry(bad); ok {
+			t.Fatalf("DecodeAccessTokenExpiry(%s) reported ok; unparseable tokens must fall back to message matching", name)
+		}
+	}
+}
+
+// 上游把「过期」改报成 401 Could not parse your authentication token 之后，
+// 三个分类器曾经全部落空，账号既不刷新也不改状态。这条串必须被认出来。
+func TestIsAccountTokenExpiredErrorMessageMatchesUpstreamRephrasing(t *testing.T) {
+	message := "/backend-api/me failed: HTTP 401, body=Could not parse your authentication token. Please try signing in again."
+	if !IsAccountTokenExpiredErrorMessage(message) {
+		t.Fatal("IsAccountTokenExpiredErrorMessage() missed the 401 could-not-parse wording")
+	}
+}
+
+func TestListRefreshableTokensIncludesExpiredToken(t *testing.T) {
+	accounts := newTestAccountService(t)
+	expired := testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+	valid := testJWT(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	accounts.AddAccounts([]string{expired, valid, "opaque-token-value"})
+	accounts.UpdateAccount(expired, map[string]any{"status": "正常", "session_token": "session-expired"})
+	accounts.UpdateAccount(valid, map[string]any{"status": "正常", "session_token": "session-valid"})
+	// 不透明 token 解不出 exp，只能靠文案匹配兜底，后台轮询不该凭猜测去刷它。
+	accounts.UpdateAccount("opaque-token-value", map[string]any{"status": "正常", "session_token": "session-opaque"})
+
+	got := accounts.listRefreshableTokens(time.Now())
+	if len(got) != 1 || got[0] != expired {
+		t.Fatalf("listRefreshableTokens() = %#v, want only the expired token", got)
+	}
+}
+
+// 没有 session_token 就续不了，后台轮询不该对它发无谓的请求。
+func TestListRefreshableTokensSkipsExpiredTokenWithoutSession(t *testing.T) {
+	accounts := newTestAccountService(t)
+	expired := testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+	accounts.AddAccounts([]string{expired})
+	accounts.UpdateAccount(expired, map[string]any{"status": "正常"})
+
+	if got := accounts.listRefreshableTokens(time.Now()); len(got) != 0 {
+		t.Fatalf("listRefreshableTokens() = %#v, want none for an unrefreshable expired token", got)
+	}
+}
+
+// 提前量内即将过期的 token 也应被续期，避免「判定有效但请求发出时刚好过期」。
+func TestListRefreshableTokensIncludesTokenInsideSkew(t *testing.T) {
+	accounts := newTestAccountService(t)
+	soon := testJWT(t, map[string]any{"exp": time.Now().Add(time.Minute).Unix()})
+	accounts.AddAccounts([]string{soon})
+	accounts.UpdateAccount(soon, map[string]any{"status": "正常", "session_token": "session-soon"})
+
+	got := accounts.listRefreshableTokens(time.Now())
+	if len(got) != 1 || got[0] != soon {
+		t.Fatalf("listRefreshableTokens() = %#v, want the token expiring inside the skew", got)
+	}
+}
+
+// 续期失败后账号会被写成异常。session_token 已死时再试也不会成功，
+// 后台轮询必须停手，否则每轮都拿一个注定失败的账号去打上游。
+func TestListRefreshableTokensSkipsExpiredTokenAlreadyMarkedAbnormal(t *testing.T) {
+	accounts := newTestAccountService(t)
+	expired := testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+	accounts.AddAccounts([]string{expired})
+	accounts.UpdateAccount(expired, map[string]any{"status": "异常", "session_token": "session-dead"})
+
+	if got := accounts.listRefreshableTokens(time.Now()); len(got) != 0 {
+		t.Fatalf("listRefreshableTokens() = %#v, want none for an already-failed refresh", got)
 	}
 }
 

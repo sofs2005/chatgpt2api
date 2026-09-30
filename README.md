@@ -352,7 +352,7 @@ go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o
 | `CHATGPT2API_BASE_URL` | 空 | 用于生成图片 URL 的外部访问地址 |
 | `CHATGPT2API_PROXY` | 空 | 全局代理，支持 `http`、`https`、`socks5`、`socks5h` |
 | `CHATGPT2API_UPDATE_PROXY_URL` | 空 | 检查更新访问 GitHub API 的代理；为空时复用全局代理 |
-| `CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE` | `5` | 限流账号检查间隔，单位分钟 |
+| `CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE` | `5` | 后台账号刷新轮询间隔，单位分钟；负责限流恢复检查与 access_token 过期续期 |
 | `CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS` | `300` | 图片任务超时时间，单位秒 |
 | `CHATGPT2API_IMAGE_MODEL_SLUG` | 空 | 官方生图链路发给上游的 model slug；留空表示 `auto`，由服务端自动路由到当前生图模型 |
 | `CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT` | `0` | 普通用户默认创作并发额度；图片生成/编辑按请求张数计入，聊天任务按 1 个计入；`0` 表示不限制 |

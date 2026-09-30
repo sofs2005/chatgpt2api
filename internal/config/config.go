@@ -192,6 +192,11 @@ func (s *Store) RegistrationEnabled() bool {
 	return util.ToBool(s.settingValue("registration_enabled", false))
 }
 
+// RefreshAccountIntervalMinute 是后台账号刷新轮询的间隔（分钟）。
+//
+// 轮询负责两类账号的主动续期：限流已到恢复时间的，以及 access_token 已过期的
+// （按 token 自带的 exp 判定）。后者不依赖上游返回什么错误文案，所以这个间隔
+// 实际决定了「token 过期到被续上」的最长延迟。
 func (s *Store) RefreshAccountIntervalMinute() int {
 	return intSetting(s.settingValue("refresh_account_interval_minute", 5), 5)
 }

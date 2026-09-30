@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -199,22 +200,58 @@ func (s *AccountService) ListLimitedTokens() []string {
 	return out
 }
 
-func (s *AccountService) listRefreshableLimitedTokens(now time.Time) []string {
+// listRefreshableTokens 挑出后台轮询该主动刷新的账号。
+//
+// 两类，缺一不可：
+//   - 限流且已到恢复时间：原有职责，刷新以确认额度是否真的恢复；
+//   - access_token 已过期（由 token 自带的 exp 判定）且有 session_token：
+//     续期不能只靠上游报错文案——上游换个措辞，匹配就落空，账号既不刷新
+//     也不改状态，自动续期静默失效（2026-09 就发生过一次）。exp 是签发时钉死
+//     的绝对时间，比错误文案可靠。
+func (s *AccountService) listRefreshableTokens(now time.Time) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []string
 	for _, item := range s.items {
-		if !accountEnabledValue(item) || util.Clean(item["status"]) != "限流" {
+		if !accountEnabledValue(item) {
 			continue
 		}
-		if restoreAt, ok := parseAccountRestoreAt(item["restore_at"]); ok && restoreAt.After(now) {
+		token := util.Clean(item["access_token"])
+		if token == "" {
 			continue
 		}
-		if token := util.Clean(item["access_token"]); token != "" {
+		if s.refreshableLimitedLocked(item, now) || refreshableExpiredToken(item, token, now) {
 			out = append(out, token)
 		}
 	}
 	return out
+}
+
+func (s *AccountService) refreshableLimitedLocked(item map[string]any, now time.Time) bool {
+	if util.Clean(item["status"]) != "限流" {
+		return false
+	}
+	if restoreAt, ok := parseAccountRestoreAt(item["restore_at"]); ok && restoreAt.After(now) {
+		return false
+	}
+	return true
+}
+
+// refreshableExpiredToken 判断账号是否属于「token 已过期但还能续」。
+//
+// 两个排除条件：
+//   - 没有 session_token：续不了，交给错误文案路径去标异常/移除；
+//   - 状态已经是异常：说明续期试过并且失败了（refreshAccountViaSessionAsync
+//     失败即写异常）。session_token 已死的情况下再试也不会成功，不做无谓重试；
+//     重新导入一份可用的 session 会把状态改回正常，届时自然恢复轮询。
+func refreshableExpiredToken(item map[string]any, token string, now time.Time) bool {
+	if util.Clean(item["session_token"]) == "" {
+		return false
+	}
+	if util.Clean(item["status"]) == "异常" {
+		return false
+	}
+	return tokenExpired(token, now, tokenExpirySkew)
 }
 
 func (s *AccountService) AddAccounts(tokens []string) map[string]any {
@@ -630,6 +667,108 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 
 const MaxTokenSwitchAttempts = 5
 
+// tokenExpirySkew 是判定 access_token 过期时预留的提前量。
+//
+// 续期是异步的（刷新 token → 回写账号），留一点余量避免「判定为有效、但请求
+// 发出的瞬间刚好过期」这种边缘情况。
+const tokenExpirySkew = 5 * time.Minute
+
+// tokenExpired 判断 access_token 是否已过期（可附带提前量）。
+//
+// 只看 token 自带的 exp 声明：这是签发时就钉死的绝对时间戳，不随账号记录变化，
+// 因此拿它和当前时间比较即可，完全不依赖上游返回什么错误文案。
+// 解不出 payload 或没有 exp（非 JWT、被截断、老格式）时返回 false——此时必须
+// 退回文案匹配，不能凭「解不出」就当成过期去刷。
+func tokenExpired(accessToken string, now time.Time, skew time.Duration) bool {
+	expiresAt, ok := DecodeAccessTokenExpiry(accessToken)
+	if !ok {
+		return false
+	}
+	return now.Add(skew).After(expiresAt)
+}
+
+// DecodeAccessTokenExpiry 解析 access_token 的 exp 声明（Unix 秒）。
+//
+// 非 JWT 或 payload 不可解时返回 ok=false，调用方据此退回文案匹配。
+func DecodeAccessTokenExpiry(accessToken string) (time.Time, bool) {
+	payload := decodeAccessTokenPayload(accessToken)
+	exp, ok := payload["exp"]
+	if !ok {
+		return time.Time{}, false
+	}
+	seconds, ok := expSeconds(exp)
+	if !ok || seconds <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0), true
+}
+
+// expSeconds 把 JWT 的 exp 声明归一化成 Unix 秒。
+//
+// 标准是 JSON 数字，但经不同 JSON 解析路径可能落到 float64 / json.Number / 字符串，
+// 这里统一处理，避免因为类型差异把有效 token 判成「解不出」。
+func expSeconds(value any) (int64, bool) {
+	switch x := value.(type) {
+	case float64:
+		return int64(x), true
+	case int64:
+		return x, true
+	case int:
+		return int64(x), true
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return n, true
+		}
+	case string:
+		if n, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// AccountTokenExpired 判断已入库账号的 access_token 是否已过期。
+func (s *AccountService) AccountTokenExpired(accessToken string, now time.Time) bool {
+	account := s.GetAccount(accessToken)
+	if account == nil {
+		return false
+	}
+	return tokenExpired(util.Clean(account["access_token"]), now, tokenExpirySkew)
+}
+
+// HandleTokenExpiredOnRequest 在实时请求撞上「token 过期」时同步续期。
+func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newToken string, shouldRetry bool) {
+	if !s.markTokenRefreshing(expiredToken) {
+		return "", false
+	}
+	return "", true
+}
+
+// markTokenRefreshing 把账号标记成「刷新中」并投递一次异步续期。
+//
+// 与 ApplyAccountErrorMessage 里「过期待刷新 + RefreshAccounts 串行第二段」那条
+// 路径的区别：这里不先发一次注定失败的 /backend-api/me，直接标记并续期。
+// 两条路径共用的前置只有一条——没有 session_token 就不动它。
+//
+// 状态写「刷新中」而不是「过期待刷新」是有意的：后者只由
+// ApplyAccountErrorMessage 设置，并且依赖 RefreshAccounts 第二段去续期，
+// 两条路径不能互相踩。
+func (s *AccountService) markTokenRefreshing(accessToken string) bool {
+	account := s.GetAccount(accessToken)
+	if account == nil {
+		return false
+	}
+	sessionToken := util.Clean(account["session_token"])
+	if sessionToken == "" {
+		return false
+	}
+	if s.UpdateAccount(accessToken, map[string]any{"status": "刷新中"}) == nil {
+		return false
+	}
+	s.refreshAccountViaSessionAsync(accessToken, sessionToken)
+	return true
+}
+
 func (s *AccountService) GetTextAccessToken() string {
 	lease, err := s.AcquireTextAccessToken(nil)
 	if err != nil {
@@ -671,23 +810,6 @@ func (s *AccountService) AcquireTextAccessToken(exhaustedTokens map[string]struc
 		return AccountLease{}, fmt.Errorf("no available text account")
 	}
 	return s.selectTextLeaseLocked(candidates, freeTokens)
-}
-
-func (s *AccountService) HandleTokenExpiredOnRequest(expiredToken string) (newToken string, shouldRetry bool) {
-	account := s.GetAccount(expiredToken)
-	if account == nil {
-		return "", false
-	}
-
-	sessionToken := util.Clean(account["session_token"])
-	if sessionToken == "" {
-		return "", false
-	}
-	if s.UpdateAccount(expiredToken, map[string]any{"status": "刷新中"}) == nil {
-		return "", false
-	}
-	s.refreshAccountViaSessionAsync(expiredToken, sessionToken)
-	return "", true
 }
 
 func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken string) {
@@ -1862,7 +1984,13 @@ func (s *AccountService) bootstrapRemoteOnce(ctx context.Context, client *http.C
 	return sessionCookies, resp.StatusCode, nil
 }
 
-func (s *AccountService) StartLimitedWatcher(ctx context.Context, interval time.Duration) {
+// StartAccountRefreshWatcher 起一个周期任务，主动续期「限流已到恢复时间」与
+// 「access_token 已过期」的账号。
+//
+// 名字不再叫 LimitedWatcher：它早就不只管限流账号了，过期续期才是更关键的一半。
+// 续期必须由这里兜底，因为实时请求那条路径要先撞上一次上游错误才触发，
+// 而错误文案一变就整条失效。
+func (s *AccountService) StartAccountRefreshWatcher(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
@@ -1874,14 +2002,30 @@ func (s *AccountService) StartLimitedWatcher(ctx context.Context, interval time.
 			case <-ctx.Done():
 				return
 			case <-timer.C:
-				tokens := s.listRefreshableLimitedTokens(time.Now())
-				if len(tokens) > 0 {
-					s.RefreshAccounts(ctx, tokens)
-				}
+				s.refreshDueAccounts(ctx, time.Now())
 				timer.Reset(interval)
 			}
 		}
 	}()
+}
+
+// refreshDueAccounts 刷新本轮到期的账号。
+//
+// 已过期的账号直接标记并续期，不再走 RefreshAccounts：那条路会先请求
+// /backend-api/me，而 token 已过期时这个请求注定失败，白白多一次上游调用，
+// 还会把失败记进刷新结果。限流账号仍走原路——它需要真的探一次额度。
+func (s *AccountService) refreshDueAccounts(ctx context.Context, now time.Time) {
+	var limited []string
+	for _, token := range s.listRefreshableTokens(now) {
+		if s.AccountTokenExpired(token, now) {
+			s.markTokenRefreshing(token)
+			continue
+		}
+		limited = append(limited, token)
+	}
+	if len(limited) > 0 {
+		s.RefreshAccounts(ctx, limited)
+	}
 }
 
 type imageTokenReservation struct {
@@ -2528,13 +2672,19 @@ func IsAccountInvalidErrorMessage(message string) bool {
 // token_invalidated, token_revoked, and invalidated oauth token errors.
 // When this returns true and the account has session_token, refresh it instead of
 // marking the account invalid immediately.
+//
+// 这个分类器是纯文案匹配，因此对上游的措辞变化极其敏感：2026-09 上游把过期
+// 改报成 401「Could not parse your authentication token」，三个分类器全部落空，
+// 账号既不刷新也不标状态，自动续期静默失效。文案兜底保留，但真正的判据是
+// token 自带的 exp（见 AccountTokenExpired / tokenExpired），不要再往里堆措辞。
 func IsAccountTokenExpiredErrorMessage(message string) bool {
 	text := strings.ToLower(strings.TrimSpace(message))
 	if text == "" || isBootstrapErrorMessage(text) {
 		return false
 	}
 	return strings.Contains(text, "token expired") ||
-		strings.Contains(text, "authentication token is expired")
+		strings.Contains(text, "authentication token is expired") ||
+		strings.Contains(text, "could not parse your authentication token")
 }
 
 func IsAccountRateLimitedErrorMessage(message string) bool {

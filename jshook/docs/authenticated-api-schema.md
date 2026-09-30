@@ -1,10 +1,6 @@
 # ChatGPT 认证生图 API Schema（实抓验证）
 
 > 更新: 2026-05-07 — 已通过 curl-cffi + PoW 完整绕过 Cloudflare，成功触发生图并下载图片
->
-> 身份字段说明（2026-09-30）：文档中的身份取值已改写为
-> `America/Los_Angeles` + `-420`，与后端 `util.OutboundTimeZone*` 一致；
-> 原始实抓记录的是 `Asia/Shanghai` + `-480`。两个取值未经重新抓包确认。
 
 ## 一、Cloudflare 绕过方案（✅ 已验证）
 
@@ -98,8 +94,8 @@ proof_token = build_proof_token(seed, difficulty, user_agent, scripts, data_buil
   "parent_message_id": "<uuid>",
   "model": "gpt-5-5",            // gpt-image-2 → gpt-5-5
   "client_prepare_state": "success",
-  "timezone_offset_min": -420,
-  "timezone": "America/Los_Angeles",
+  "timezone_offset_min": -480,
+  "timezone": "Asia/Shanghai",
   "conversation_mode": { "kind": "primary_assistant" },
   "system_hints": ["picture_v2"],
   "partial_query": {
@@ -144,8 +140,8 @@ proof_token = build_proof_token(seed, difficulty, user_agent, scripts, data_buil
   "parent_message_id": "<uuid>",
   "model": "gpt-5-5",
   "client_prepare_state": "sent",
-  "timezone_offset_min": -420,
-  "timezone": "America/Los_Angeles",
+  "timezone_offset_min": -480,
+  "timezone": "Asia/Shanghai",
   "conversation_mode": { "kind": "primary_assistant" },
   "system_hints": ["picture_v2"],
   "supports_buffering": true,

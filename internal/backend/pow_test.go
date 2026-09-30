@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"chatgpt2api/internal/util"
 )
@@ -65,15 +64,14 @@ func TestBuildPOWConfigIdentityIsSelfConsistent(t *testing.T) {
 
 	// index 1 是本地时间字符串，时区必须与请求体的 timezone 一致。
 	localTime, _ := config[1].(string)
-	wantOffset := util.OutboundTimeZoneOffsetMinutes(time.Now())
-	if !strings.Contains(localTime, formatGMTOffset(wantOffset*60)) {
-		t.Fatalf("config[1] local time = %q, want offset %s", localTime, formatGMTOffset(wantOffset*60))
+	if !strings.Contains(localTime, "GMT+0800") {
+		t.Fatalf("config[1] local time = %q, want the China Standard Time offset", localTime)
 	}
-	if !strings.Contains(localTime, "Pacific") {
-		t.Fatalf("config[1] local time = %q, want a US Pacific zone label", localTime)
+	if !strings.Contains(localTime, "中国标准时间") {
+		t.Fatalf("config[1] local time = %q, want a China Standard Time label", localTime)
 	}
-	if strings.Contains(localTime, "GMT+0800") {
-		t.Fatalf("config[1] local time = %q, still reports the old China offset", localTime)
+	if strings.Contains(localTime, "Pacific") {
+		t.Fatalf("config[1] local time = %q, still reports a US Pacific zone label", localTime)
 	}
 
 	// index 13 是 performance.now()，应为页面存活毫秒数（量级远小于 Unix 毫秒）。

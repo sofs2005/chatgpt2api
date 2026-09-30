@@ -19,52 +19,40 @@ func TestNowLocalUsesFixedDisplayTimeZone(t *testing.T) {
 	}
 }
 
-// 太平洋时区必须按日期在 PST(-480) 与 PDT(-420) 之间切换，
-// 写死单一偏移会在换季时让请求体与 PoW 探针自报的时区互相矛盾。
-func TestPacificTimeZoneFollowsDaylightSaving(t *testing.T) {
-	cases := []struct {
-		name       string
-		year       int
-		month      int
-		day        int
-		hourUTC    int
-		wantOffset int
-	}{
-		{"冬季为 PST", 2026, 1, 15, 12, -480},
-		{"夏季为 PDT", 2026, 7, 15, 12, -420},
-		{"春季切换前一日仍是 PST", 2026, 3, 7, 12, -480},
-		{"春季切换当日进入 PDT", 2026, 3, 8, 12, -420},
-		{"秋季切换当日 08:00 UTC 仍是 PDT", 2026, 11, 1, 8, -420},
-		{"秋季切换当日 12:00 UTC 已是 PST", 2026, 11, 1, 12, -480},
-		{"秋季切换后一日是 PST", 2026, 11, 2, 12, -480},
+// 出站身份的语言与时区必须指向同一地区。
+//
+// 语言报 zh-CN、时区报 America/Los_Angeles 这种跨地区组合是脚本特征：
+// 浏览器语言设置与系统时区虽相互独立，但同一份身份不会既在中国时区
+// 又只认英文。上游对这种组合直接返回 403。
+func TestOutboundIdentityStaysInOneRegion(t *testing.T) {
+	if OutboundTimeZoneName != "Asia/Shanghai" {
+		t.Fatalf("OutboundTimeZoneName = %q, want Asia/Shanghai", OutboundTimeZoneName)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			at := time.Date(tc.year, time.Month(tc.month), tc.day, tc.hourUTC, 0, 0, 0, time.UTC)
-			if got := OutboundTimeZoneOffsetMinutes(at); got != tc.wantOffset {
-				t.Fatalf("offset at %s = %d, want %d", at.Format("2006-01-02 15:04"), got, tc.wantOffset)
-			}
-		})
+	if OutboundLocaleTag != "zh-CN" {
+		t.Fatalf("OutboundLocaleTag = %q, want zh-CN", OutboundLocaleTag)
+	}
+	if got := OutboundTimeZone().String(); got != OutboundTimeZoneName {
+		t.Fatalf("OutboundTimeZone() = %q, want %q", got, OutboundTimeZoneName)
+	}
+	// 东八区全年恒定，不受夏令时影响，任意时刻偏移都必须是 +480 分钟。
+	for _, at := range []time.Time{
+		time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
+	} {
+		if _, offset := at.In(OutboundTimeZone()).Zone(); offset != 8*3600 {
+			t.Fatalf("offset at %s = %d, want %d", at.Format("2006-01-02"), offset, 8*3600)
+		}
 	}
 }
 
-// 夏令时切换日期本身要落在正确的周日上：3 月第二个周日、11 月第一个周日。
-func TestNthSundayPicksTheRightDay(t *testing.T) {
-	cases := []struct {
-		month int
-		n     int
-		want  string
-	}{
-		{3, 2, "2026-03-08"},
-		{11, 1, "2026-11-01"},
-	}
-	for _, tc := range cases {
-		got := nthSunday(2026, time.Month(tc.month), tc.n)
-		if got.Format("2006-01-02") != tc.want {
-			t.Fatalf("nthSunday(2026, %d, %d) = %s, want %s", tc.month, tc.n, got.Format("2006-01-02"), tc.want)
-		}
-		if got.Weekday() != time.Sunday {
-			t.Fatalf("nthSunday(2026, %d, %d) = %s, not a Sunday", tc.month, tc.n, got.Weekday())
-		}
+// timezone_offset_min 的取值必须与实抓一致。
+//
+// jshook/docs/api-endpoints.md 的原始实抓（2026-05-07）记录
+// `timezone: "Asia/Shanghai"` 配 `timezone_offset_min: -480`。
+// 该字段的符号在文档里存在两套互相矛盾的说法，改动前需重新抓包确认，
+// 因此这里把当前取值钉死，避免被顺手「修正」成正数。
+func TestOutboundTimeZoneOffsetMatchesCapture(t *testing.T) {
+	if got := OutboundTimeZoneOffsetMinutes(); got != -480 {
+		t.Fatalf("OutboundTimeZoneOffsetMinutes() = %d, want -480 (captured value)", got)
 	}
 }

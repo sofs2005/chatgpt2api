@@ -3,10 +3,6 @@
 > **分析日期**: 2026-05-07
 > **数据来源**: HAR 实抓 (`chatgpt.com_2026_05_07_14_35_51.har`) + jshook CDP 逆向 + curl-cffi 验证
 > **标记**: ✅ 实抓验证 | 🔶 JS逆向推测 | ❌ 已证伪
->
-> 身份字段说明（2026-09-30）：文档中的身份取值已改写为
-> `America/Los_Angeles` + `-420`，与后端 `util.OutboundTimeZone*` 一致；
-> 原始实抓记录的是 `Asia/Shanghai` + `-480`。两个取值未经重新抓包确认。
 
 ---
 
@@ -245,8 +241,8 @@ func officialImageModelSlug(model string) string {
   "parent_message_id": "client-created-root",
   "model": "gpt-5-5",
   "client_prepare_state": "success",
-  "timezone_offset_min": -420,
-  "timezone": "America/Los_Angeles",
+  "timezone_offset_min": -480,
+  "timezone": "Asia/Shanghai",
   "conversation_mode": { "kind": "primary_assistant" },
   "enable_message_followups": true,
   "system_hints": ["picture_v2"],
@@ -277,8 +273,8 @@ func officialImageModelSlug(model string) string {
   "parent_message_id": "<existing_msg_id>",
   "model": "gpt-5-5",
   "client_prepare_state": "none",
-  "timezone_offset_min": -420,
-  "timezone": "America/Los_Angeles",
+  "timezone_offset_min": -480,
+  "timezone": "Asia/Shanghai",
   "conversation_mode": { "kind": "primary_assistant" },
   "system_hints": [],
   "supports_buffering": true,

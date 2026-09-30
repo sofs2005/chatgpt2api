@@ -272,62 +272,59 @@ const DisplayTimeZoneName = "Asia/Shanghai"
 // DisplayTimeZone 是 DisplayTimeZoneName 对应的 Location。
 var DisplayTimeZone = time.FixedZone(DisplayTimeZoneName, 8*3600)
 
-// OutboundTimeZoneName 是发往上游的身份时区名。
+// OutboundTimeZoneName 是发往上游请求体 timezone 字段的 IANA 时区名。
 //
-// 上游请求体里的 timezone、PoW 探针的本地时间、请求头语言三者必须同源自洽，
-// 否则同一份浏览器身份会自报互相矛盾的语言与时区，构成风控可识别的信号。
-// 美国太平洋时区在语言上对应 en-US（见 OutboundLocaleTag）。
-//
-// 用它而不是 time.LoadLocation("America/Los_Angeles")：后者依赖运行环境里的
-// tzdata，精简镜像缺这份数据时会静默回退到 UTC，把 -480 配上 UTC 的本地时间串。
-const OutboundTimeZoneName = "America/Los_Angeles"
+// 它与 OutboundLocaleTag 必须指向同一个地区：语言报 zh-CN、时区报
+// America/Los_Angeles 这种组合真实浏览器不会产生——浏览器语言设置与系统
+// 时区虽相互独立，但同一份身份不会既在中国时区又只认英文。风控把这种
+// 跨地区的组合当作脚本特征。
+const OutboundTimeZoneName = "Asia/Shanghai"
 
 // OutboundLocaleTag 是发往上游的身份语言（navigator.language / OAI-Language）。
-const OutboundLocaleTag = "en-US"
+const OutboundLocaleTag = "zh-CN"
 
 // OutboundLocaleList 是 navigator.languages 的取值。
-const OutboundLocaleList = "en-US,en"
+const OutboundLocaleList = "zh-CN,zh,en"
 
 // OutboundAcceptLanguage 是出站请求统一的 Accept-Language。
 //
 // 真实浏览器的 Accept-Language 来自浏览器语言设置，对同一份浏览器身份的
 // 所有请求取值相同。它必须与 OAI-Language、PoW 配置里的 navigator.language
 // 保持一致，否则同一份身份会自报不同语言。
-const OutboundAcceptLanguage = "en-US,en;q=0.9"
+const OutboundAcceptLanguage = "zh-CN,zh;q=0.9,en;q=0.8"
 
-// PacificTimeZone 返回给定时刻美国太平洋时区（PST/PDT）的 Location。
+// WebAcceptLanguage 是 chatgpt.com 主站 API 请求的 Accept-Language。
 //
-// 夏令时偏移随日期变化：3 月第二个周日到 11 月第一个周日之间是 PDT(-420)，
-// 其余时间是 PST(-480)。时区名沿用 IANA 的 PST8PDT，Go 对它的已知行为是
-// 「名字恒为 PST8PDT、偏移按美国规则换算」——与上游前端 Date.toString() 给出的
-// "GMT-0700 (Pacific Daylight Time)" 在关键部分（偏移）一致，因此可以直接用。
+// 比 OutboundAcceptLanguage 多一个 en-US 备选，与实抓的网页端请求头逐字一致。
+// 单独列出而不是复用统一值，是为了让主站请求头与已知可用状态保持完全相同。
+const WebAcceptLanguage = "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7"
+
+// RegisterAcceptLanguage 是注册/登录流程的 Accept-Language。
 //
-// 不用 time.LoadLocation 的理由见 OutboundTimeZoneName 的注释。
-func PacificTimeZone(t time.Time) *time.Location {
-	year := t.Year()
-	// 切换时刻按 UTC 钉死，避免「切换当天凌晨」那一两小时判错：
-	// 开始于 3 月第二个周日 02:00 PST（=10:00 UTC），
-	// 结束于 11 月第一个周日 02:00 PDT（=09:00 UTC）。
-	start := nthSunday(year, time.March, 2).Add(10 * time.Hour)
-	end := nthSunday(year, time.November, 1).Add(9 * time.Hour)
-	utc := t.UTC()
-	if !utc.Before(start) && utc.Before(end) {
-		return time.FixedZone("PDT", -7*3600)
-	}
-	return time.FixedZone("PST", -8*3600)
+// 该流程打的是 OpenAI 认证域而非 chatgpt.com 主站，两者是不同上游：
+// 认证域一直使用英文，不要与主站的中文身份混为一谈。
+const RegisterAcceptLanguage = "en-US,en;q=0.9"
+
+// outboundTimeZoneOffsetSeconds 是东八区偏移：中国不实行夏令时，全年恒定。
+const outboundTimeZoneOffsetSeconds = 8 * 3600
+
+// OutboundTimeZone 返回发往上游的身份时区。
+//
+// 写死偏移而不是 time.LoadLocation("Asia/Shanghai")：后者依赖运行环境里的
+// tzdata，精简镜像缺这份数据时会静默回退到 UTC，把偏移配上 UTC 的本地时间串。
+func OutboundTimeZone() *time.Location {
+	return time.FixedZone(OutboundTimeZoneName, outboundTimeZoneOffsetSeconds)
 }
 
-// nthSunday 返回某年第 n 个周日的 UTC 日期（仅日期参与比较）。
-func nthSunday(year int, month time.Month, n int) time.Time {
-	first := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
-	offset := (7 - int(first.Weekday())) % 7
-	return first.AddDate(0, 0, offset+7*(n-1))
-}
-
-// OutboundTimeZoneOffsetMinutes 返回给定时刻发往上游的 UTC 偏移（分钟）。
-func OutboundTimeZoneOffsetMinutes(t time.Time) int {
-	_, offset := t.In(PacificTimeZone(t)).Zone()
-	return offset / 60
+// OutboundTimeZoneOffsetMinutes 返回发往上游 timezone_offset_min 的取值。
+//
+// 取 -480 而不是 +480，与实抓一致：jshook/docs/api-endpoints.md 的原始实抓
+// （2026-05-07）记录 `timezone: "Asia/Shanghai"` 配 `timezone_offset_min: -480`。
+// 文档 request-completion-flow.md 里的 `-new Date().getTimezoneOffset()` 是
+// 另一条更早的推测性记录，与实抓值互相冲突且从未对拍过；在有新的实抓之前
+// 以实抓值为准。改动此值前先按 AGENTS.md 重新抓一份。
+func OutboundTimeZoneOffsetMinutes() int {
+	return -outboundTimeZoneOffsetSeconds / 60
 }
 
 func NowLocal() string {

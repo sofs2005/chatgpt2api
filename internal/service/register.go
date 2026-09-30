@@ -951,7 +951,7 @@ func (w *registerWorker) requestForm(ctx context.Context, target string, form ur
 func (w *registerWorker) navigateHeaders(referer string) map[string]string {
 	headers := map[string]string{
 		"Accept":                      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-		"Accept-Language":             util.OutboundAcceptLanguage,
+		"Accept-Language":             util.RegisterAcceptLanguage,
 		"Upgrade-Insecure-Requests":   "1",
 		"User-Agent":                  registerUserAgent,
 		"sec-ch-ua":                   registerSecCHUA,
@@ -976,7 +976,7 @@ func (w *registerWorker) navigateHeaders(referer string) map[string]string {
 func (w *registerWorker) jsonHeaders(referer string) map[string]string {
 	headers := map[string]string{
 		"Accept":                      "application/json",
-		"Accept-Language":             util.OutboundAcceptLanguage,
+		"Accept-Language":             util.RegisterAcceptLanguage,
 		"Content-Type":                "application/json",
 		"Origin":                      registerAuthBase,
 		"priority":                    "u=1, i",

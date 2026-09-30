@@ -26,6 +26,9 @@ docker-compose-local.yml
 .env
 .env.local
 
+# Stack chosen locally by "deploy/docker-stack.sh use" (per-machine, not shared)
+deploy/.stack
+
 # Database files
 *.db
 *.sqlite

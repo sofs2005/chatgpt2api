@@ -102,7 +102,17 @@ CHATGPT2API_ADMIN_PASSWORD=change_me_please
 
 ### 2. 启动服务
 
-按需要的能力选一套 compose 栈（详见「上游 Cloudflare 降低风控」一节的对照表）：
+推荐用 `deploy/docker-stack.sh`，它把下面这些长命令收成一个入口，并始终带上 `--env-file .env`：
+
+```bash
+sh deploy/docker-stack.sh use warp   # 选一次栈，记住它（base | flaresolverr | warp）
+sh deploy/docker-stack.sh update     # 以后就这一条：拉镜像 + 重建
+sh deploy/docker-stack.sh logs       # 看日志
+sh deploy/docker-stack.sh check      # 排查「镜像改了没生效」
+sh deploy/docker-stack.sh help       # 全部命令
+```
+
+等价的手写命令（不想用脚本时）：
 
 ```bash
 # 基础：只有 app，出站行为与升级前一致
@@ -150,7 +160,14 @@ CHATGPT2API_IMAGE=ghcr.io/sofs2005/chatgpt2api:dev docker compose --env-file .en
 验证实际生效的镜像：
 
 ```bash
+sh deploy/docker-stack.sh check
+```
+
+`check` 会并排打印「`.env` 里写的值」「compose 解析出的值」「容器实际在跑的值」并指出是否一致——镜像改了没生效时先跑它。等价的手写命令：
+
+```bash
 docker compose --env-file .env -f deploy/docker-compose.yml config | grep -A 2 "image:"
+docker inspect chatgpt2api --format '{{.Config.Image}}'
 ```
 
 访问：
@@ -270,7 +287,13 @@ sh deploy/docker-build-limited.sh build
 
 ### Docker 镜像升级
 
-Docker 部署的推荐升级方式（`--env-file` 不能省，原因见「使用自定义镜像」）：
+Docker 部署的推荐升级方式：
+
+```bash
+sh deploy/docker-stack.sh update
+```
+
+它等于下面两条（`--env-file` 不能省，原因见「使用自定义镜像」）：
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.yml pull

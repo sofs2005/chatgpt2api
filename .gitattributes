@@ -1,0 +1,5 @@
+# Shell 脚本必须保持 LF：仓库在 Windows 上检出时 core.autocrlf=true 会把它们
+# 改写成 CRLF，而带 CR 的脚本在 Linux 上执行会报
+# "sh: bad interpreter" 或 "\r: command not found"。部署脚本恰恰是在 Linux
+# 服务器上跑的，所以这里显式钉死。
+*.sh text eol=lf

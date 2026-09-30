@@ -25,14 +25,13 @@ type ProxyConfig interface {
 
 // BrowserAcceptLanguage 是出站请求统一的 Accept-Language。
 //
-// 真实浏览器的 Accept-Language 来自浏览器语言设置，对同一份浏览器身份的所有请求
-// 取值相同。它必须与 OAI-Language、PoW 配置里的 navigator.language 保持一致，
-// 否则同一份身份会自报不同语言，是风控可识别的矛盾信号。
+// 取值来自 util.OutboundAcceptLanguage，与请求体的身份时区同源：
+// 太平洋时区配 en-US，否则同一份身份会自报「美国时区 + 中文语言」。
 //
 // surf 的 Impersonate() 会把 Accept-Language 硬编码成 en-US，且它的请求中间件
 // 优先级为 0，晚于调用方设置的头。因此这里在更高优先级上再写回统一值，
 // 保证「我们自己设的语言」最终生效。
-const BrowserAcceptLanguage = "zh-CN,zh;q=0.9,en;q=0.8"
+const BrowserAcceptLanguage = util.OutboundAcceptLanguage
 
 type ProxyService struct {
 	config ProxyConfig

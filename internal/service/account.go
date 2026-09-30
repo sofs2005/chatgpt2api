@@ -1651,7 +1651,7 @@ func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string
 		return nil, err
 	}
 	init, err := remote.doJSON(http.MethodPost, "/backend-api/conversation/init", map[string]any{
-		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": -480,
+		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": util.OutboundTimeZoneOffsetMinutes(time.Now()),
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -2521,9 +2521,9 @@ func (s *AccountService) remoteHeaders(accessToken string) map[string]string {
 	headers := map[string]string{
 		"authorization":      "Bearer " + accessToken,
 		"accept":             "*/*",
-		"accept-language":    "zh-CN,zh;q=0.9,en;q=0.8",
+		"accept-language":    util.OutboundAcceptLanguage,
 		"content-type":       "application/json",
-		"oai-language":       "zh-CN",
+		"oai-language":       util.OutboundLocaleTag,
 		"origin":             "https://chatgpt.com",
 		"referer":            "https://chatgpt.com/",
 		"sec-fetch-dest":     "empty",
@@ -2561,7 +2561,7 @@ func (s *AccountService) remoteBootstrapHeaders(accessToken string) map[string]s
 	return map[string]string{
 		"user-agent":                firstNonEmpty(clean("user-agent", "user_agent"), defaultRemoteUserAgent),
 		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-		"accept-language":           "zh-CN,zh;q=0.9,en;q=0.8",
+		"accept-language":           util.OutboundAcceptLanguage,
 		"sec-ch-ua":                 firstNonEmpty(clean("sec-ch-ua"), defaultRemoteSecCHUA),
 		"sec-ch-ua-mobile":          firstNonEmpty(clean("sec-ch-ua-mobile"), "?0"),
 		"sec-ch-ua-platform":        firstNonEmpty(clean("sec-ch-ua-platform"), `"Windows"`),

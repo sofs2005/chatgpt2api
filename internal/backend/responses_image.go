@@ -766,8 +766,8 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 		"parent_message_id":     parentMessageID,
 		"model":                 c.officialImageModelSlug(request.Model),
 		"client_prepare_state":  "success",
-		"timezone_offset_min":   -480,
-		"timezone":              "Asia/Shanghai",
+		"timezone_offset_min":   outboundTimezoneOffsetMinutes(),
+		"timezone":              util.OutboundTimeZoneName,
 		"conversation_mode":     map[string]any{"kind": "primary_assistant"},
 		"system_hints":          []any{"picture_v2"},
 		"partial_query": map[string]any{
@@ -913,7 +913,7 @@ func (c *Client) uploadImage(ctx context.Context, input ResponsesInputImage, fil
 		"Referer":         c.BaseURL + "/",
 		"User-Agent":      c.userAgent,
 		"Accept":          "application/json, text/plain, */*",
-		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
+		"Accept-Language": util.OutboundAcceptLanguage,
 	} {
 		req.Header.Set(key, value)
 	}
@@ -1023,8 +1023,8 @@ func (c *Client) startOfficialImageConversation(ctx context.Context, prompt stri
 		"parent_message_id":                    parentMessageID,
 		"model":                                c.officialImageModelSlug(request.Model),
 		"client_prepare_state":                 "sent",
-		"timezone_offset_min":                  -480,
-		"timezone":                             "Asia/Shanghai",
+		"timezone_offset_min":                  outboundTimezoneOffsetMinutes(),
+		"timezone":                             util.OutboundTimeZoneName,
 		"conversation_mode":                    map[string]any{"kind": "primary_assistant"},
 		"enable_message_followups":             true,
 		"system_hints":                         []any{"picture_v2"},

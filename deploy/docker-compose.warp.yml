@@ -99,9 +99,13 @@ services:
       # 理由与 docker-compose.yml 相同：做成可覆盖的插值变量后，在 deploy/
       # 下放一份 .env 会连带改掉它，容器会挂载到一份空白配置。
       - ../.env
-    # 出口指向 privoxy 而非 WARP 的 SOCKS5：Go 侧需要 HTTP 代理，
-    # 由 privoxy 完成协议转换与按域名分流。
     environment:
+      # 容器 TZ 影响 Go 日志时间、配额周期边界与文件 mtime 的格式化，
+      # 不设就是 UTC，跟面板按东八区展示的时间对不上。这里对齐成同一时区。
+      # 注意：这只管「给人看的时间」，发往上游的身份时区固定为美西，与此无关。
+      - TZ=Asia/Shanghai
+      # 出口指向 privoxy 而非 WARP 的 SOCKS5：Go 侧需要 HTTP 代理，
+      # 由 privoxy 完成协议转换与按域名分流。
       - CHATGPT2API_PROXY=${CHATGPT2API_PROXY:-http://privoxy:8118}
       # 只给地址不开开关等于没启用：clearance 默认关闭，本栈的存在意义就是
       # 打开它，所以在这里默认置 true。基础 compose 不受影响，仍保持默认关闭。

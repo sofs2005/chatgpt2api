@@ -190,7 +190,7 @@ func (a *App) logBusinessFailure(r *http.Request, identity service.Identity, sum
 		"error":       errText,
 		"ip_address":  clientIP(r),
 		"user_agent":  r.UserAgent(),
-		"started_at":  started.Format("2006-01-02 15:04:05"),
+		"started_at":  started.In(util.DisplayTimeZone).Format(util.DisplayTimeLayout),
 		"duration_ms": time.Since(started).Milliseconds(),
 	}, service.DiagnosticFields{
 		EventKind: service.EventKindBusiness,

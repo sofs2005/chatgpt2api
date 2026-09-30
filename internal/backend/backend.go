@@ -287,8 +287,8 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 				}
 			}
 		}
-		path, timezoneName := c.chatTarget()
-		payload := c.conversationPayload(messages, model, timezoneName)
+		path := c.chatTarget()
+		payload := c.conversationPayload(messages, model)
 		resp, err := c.postJSON(ctx, path, payload, c.conversationHeaders(path, reqs), true)
 		if err != nil {
 			errCh <- err
@@ -661,7 +661,7 @@ func (c *Client) headers(path string, extra map[string]string) map[string]string
 		"User-Agent":                  c.userAgent,
 		"Origin":                      c.BaseURL,
 		"Referer":                     c.BaseURL + "/",
-		"Accept-Language":             "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
+		"Accept-Language":             util.OutboundAcceptLanguage,
 		"Cache-Control":               "no-cache",
 		"Pragma":                      "no-cache",
 		"Priority":                    "u=1, i",
@@ -679,7 +679,7 @@ func (c *Client) headers(path string, extra map[string]string) map[string]string
 		"Sec-Fetch-Site":              "same-origin",
 		"OAI-Device-Id":               c.deviceID,
 		"OAI-Session-Id":              c.sessionID,
-		"OAI-Language":                "zh-CN",
+		"OAI-Language":                util.OutboundLocaleTag,
 		"OAI-Client-Version":          c.ClientVersion,
 		"OAI-Client-Build-Number":     c.ClientBuildNumber,
 		// 上游前端 Hc() 默认头里固定带这个标记，缺失即为可识别的客户端差异。
@@ -700,7 +700,7 @@ func (c *Client) bootstrapHeaders() map[string]string {
 	return map[string]string{
 		"User-Agent":                c.userAgent,
 		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-		"Accept-Language":           "zh-CN,zh;q=0.9,en;q=0.8",
+		"Accept-Language":           util.OutboundAcceptLanguage,
 		"Sec-Ch-Ua":                 c.fp["sec-ch-ua"],
 		"Sec-Ch-Ua-Mobile":          c.fp["sec-ch-ua-mobile"],
 		"Sec-Ch-Ua-Platform":        c.fp["sec-ch-ua-platform"],
@@ -815,11 +815,13 @@ func (c *Client) buildRequirements(data map[string]any, sourceP string) (ChatReq
 	return ChatRequirements{Token: util.Clean(data["token"]), ProofToken: proofToken, TurnstileToken: turnstileToken, SOToken: util.Clean(data["so_token"]), Raw: data}, nil
 }
 
-func (c *Client) chatTarget() (string, string) {
+func (c *Client) chatTarget() string {
+	// 匿名与已登录走同一条身份：时区、语言、PoW 探针三者必须自洽，
+	// 按登录态切时区只会让同一份身份前后矛盾。登录态只决定打哪个端点。
 	if c.AccessToken != "" {
-		return "/backend-api/conversation", "Asia/Shanghai"
+		return "/backend-api/conversation"
 	}
-	return "/backend-anon/conversation", "America/Los_Angeles"
+	return "/backend-anon/conversation"
 }
 
 func textModelSlug(model string) string {
@@ -839,8 +841,8 @@ func (c *Client) prepareTextConversation(ctx context.Context, messages []map[str
 		"parent_message_id":     util.NewUUID(),
 		"model":                 textModelSlug(model),
 		"client_prepare_state":  "success",
-		"timezone_offset_min":   -480,
-		"timezone":              "Asia/Shanghai",
+		"timezone_offset_min":   outboundTimezoneOffsetMinutes(),
+		"timezone":              util.OutboundTimeZoneName,
 		"conversation_mode":     map[string]any{"kind": "primary_assistant"},
 		"system_hints":          []any{},
 		"partial_query": map[string]any{
@@ -900,8 +902,8 @@ func (c *Client) startTextConversation(ctx context.Context, messages []map[strin
 		"parent_message_id":                    util.NewUUID(),
 		"model":                                textModelSlug(model),
 		"client_prepare_state":                 "sent",
-		"timezone_offset_min":                  -480,
-		"timezone":                             "Asia/Shanghai",
+		"timezone_offset_min":                  outboundTimezoneOffsetMinutes(),
+		"timezone":                             util.OutboundTimeZoneName,
 		"conversation_mode":                    map[string]any{"kind": "primary_assistant"},
 		"enable_message_followups":             true,
 		"system_hints":                         []any{},
@@ -983,8 +985,8 @@ func (c *Client) prepareMultimodalConversation(ctx context.Context, messages []m
 		"parent_message_id":     util.NewUUID(),
 		"model":                 textModelSlug(model),
 		"client_prepare_state":  "success",
-		"timezone_offset_min":   -480,
-		"timezone":              "Asia/Shanghai",
+		"timezone_offset_min":   outboundTimezoneOffsetMinutes(),
+		"timezone":              util.OutboundTimeZoneName,
 		"conversation_mode":     map[string]any{"kind": "primary_assistant"},
 		"system_hints":          []any{},
 		"partial_query": map[string]any{
@@ -1039,8 +1041,8 @@ func (c *Client) startMultimodalConversation(ctx context.Context, messages []map
 		"parent_message_id":                    util.NewUUID(),
 		"model":                                textModelSlug(model),
 		"client_prepare_state":                 "sent",
-		"timezone_offset_min":                  -480,
-		"timezone":                             "Asia/Shanghai",
+		"timezone_offset_min":                  outboundTimezoneOffsetMinutes(),
+		"timezone":                             util.OutboundTimeZoneName,
 		"conversation_mode":                    map[string]any{"kind": "primary_assistant"},
 		"enable_message_followups":             true,
 		"system_hints":                         []any{},
@@ -1107,7 +1109,7 @@ func (c *Client) StreamMultimodalConversation(ctx context.Context, messages []ma
 	return out, errCh
 }
 
-func (c *Client) conversationPayload(messages []map[string]any, model, timezoneName string) map[string]any {
+func (c *Client) conversationPayload(messages []map[string]any, model string) map[string]any {
 	conversationMessages := []map[string]any{conversationUserMessage(conversationPrompt(messages))}
 	return map[string]any{
 		"action": "next", "messages": conversationMessages, "model": model, "parent_message_id": "client-created-root",
@@ -1115,7 +1117,7 @@ func (c *Client) conversationPayload(messages []map[string]any, model, timezoneN
 		"force_paragen": false, "force_paragen_model_slug": "", "force_rate_limit": false, "force_use_sse": true,
 		"history_and_training_disabled": true, "reset_rate_limits": false, "suggestions": []any{}, "supported_encodings": []any{"v1"},
 		"enable_message_followups": true, "supports_buffering": true,
-		"system_hints": []any{}, "timezone": timezoneName, "timezone_offset_min": -480,
+		"system_hints": []any{}, "timezone": util.OutboundTimeZoneName, "timezone_offset_min": outboundTimezoneOffsetMinutes(),
 		"variant_purpose": "comparison_implicit", "websocket_request_id": util.NewUUID(),
 		"client_contextual_info": map[string]any{"is_dark_mode": false, "time_since_loaded": 120, "page_height": 900, "page_width": 1400, "pixel_ratio": 2, "screen_height": 1440, "screen_width": 2560},
 	}

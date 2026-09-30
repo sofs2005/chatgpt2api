@@ -58,13 +58,17 @@ services:
       # 固定为 ../.env，理由与 docker-compose.yml 相同：做成可覆盖的插值变量后，
       # 在 deploy/ 下放一份 .env 会连带改掉它，容器会挂载到一份空白配置。
       - ../.env
-    # 下面三项只是「.env 里没写」时的默认值。
-    #
-    # 重要：.env 是 bind mount 进容器的文件，其中已有的键**优先于**这里注入的值。
-    # 若 .env 里存在 CHATGPT2API_CLEARANCE_ENABLED=false / CHATGPT2API_FLARESOLVERR_URL=
-    # 这类行，会压掉下面的注入，兜底静默不生效。此时请直接改 .env，或删除该行。
-    # 启动日志的 configuration loaded 会打印实际生效值。
     environment:
+      # 容器 TZ 影响 Go 日志时间、配额周期边界与文件 mtime 的格式化，
+      # 不设就是 UTC，跟面板按东八区展示的时间对不上。这里对齐成同一时区。
+      # 注意：这只管「给人看的时间」，发往上游的身份时区固定为美西，与此无关。
+      - TZ=Asia/Shanghai
+      # 下面两项只是「.env 里没写」时的默认值。
+      #
+      # 重要：.env 是 bind mount 进容器的文件，其中已有的键**优先于**这里注入的值。
+      # 若 .env 里存在 CHATGPT2API_CLEARANCE_ENABLED=false / CHATGPT2API_FLARESOLVERR_URL=
+      # 这类行，会压掉下面的注入，兜底静默不生效。此时请直接改 .env，或删除该行。
+      # 启动日志的 configuration loaded 会打印实际生效值。
       - CHATGPT2API_CLEARANCE_ENABLED=${CHATGPT2API_CLEARANCE_ENABLED:-true}
       - CHATGPT2API_FLARESOLVERR_URL=${CHATGPT2API_FLARESOLVERR_URL:-http://flaresolverr:8191}
     volumes:

@@ -256,8 +256,82 @@ func CompactJSON(v any) string {
 	return buf.String()
 }
 
+// DisplayTimeLayout 是后台面板展示时间戳的格式，也是各服务落库时间的格式。
+const DisplayTimeLayout = "2006-01-02 15:04:05"
+
+// DisplayTimeZoneName 是后台面板展示时间戳所用时区。
+//
+// 面板面向中文用户，时间一律按东八区展示，与部署机、容器 TZ 无关：
+// 容器没设 TZ 时是 UTC，运维照着 UTC 时间找日志会白费半天。写死时区而不是
+// 跟随 time.Local，行为才可预测、可测试。
+//
+// 注意：这里只管「给人看的时间」。发往上游的身份时区是另一件事，
+// 见 OutboundTimeZone。
+const DisplayTimeZoneName = "Asia/Shanghai"
+
+// DisplayTimeZone 是 DisplayTimeZoneName 对应的 Location。
+var DisplayTimeZone = time.FixedZone(DisplayTimeZoneName, 8*3600)
+
+// OutboundTimeZoneName 是发往上游的身份时区名。
+//
+// 上游请求体里的 timezone、PoW 探针的本地时间、请求头语言三者必须同源自洽，
+// 否则同一份浏览器身份会自报互相矛盾的语言与时区，构成风控可识别的信号。
+// 美国太平洋时区在语言上对应 en-US（见 OutboundLocaleTag）。
+//
+// 用它而不是 time.LoadLocation("America/Los_Angeles")：后者依赖运行环境里的
+// tzdata，精简镜像缺这份数据时会静默回退到 UTC，把 -480 配上 UTC 的本地时间串。
+const OutboundTimeZoneName = "America/Los_Angeles"
+
+// OutboundLocaleTag 是发往上游的身份语言（navigator.language / OAI-Language）。
+const OutboundLocaleTag = "en-US"
+
+// OutboundLocaleList 是 navigator.languages 的取值。
+const OutboundLocaleList = "en-US,en"
+
+// OutboundAcceptLanguage 是出站请求统一的 Accept-Language。
+//
+// 真实浏览器的 Accept-Language 来自浏览器语言设置，对同一份浏览器身份的
+// 所有请求取值相同。它必须与 OAI-Language、PoW 配置里的 navigator.language
+// 保持一致，否则同一份身份会自报不同语言。
+const OutboundAcceptLanguage = "en-US,en;q=0.9"
+
+// PacificTimeZone 返回给定时刻美国太平洋时区（PST/PDT）的 Location。
+//
+// 夏令时偏移随日期变化：3 月第二个周日到 11 月第一个周日之间是 PDT(-420)，
+// 其余时间是 PST(-480)。时区名沿用 IANA 的 PST8PDT，Go 对它的已知行为是
+// 「名字恒为 PST8PDT、偏移按美国规则换算」——与上游前端 Date.toString() 给出的
+// "GMT-0700 (Pacific Daylight Time)" 在关键部分（偏移）一致，因此可以直接用。
+//
+// 不用 time.LoadLocation 的理由见 OutboundTimeZoneName 的注释。
+func PacificTimeZone(t time.Time) *time.Location {
+	year := t.Year()
+	// 切换时刻按 UTC 钉死，避免「切换当天凌晨」那一两小时判错：
+	// 开始于 3 月第二个周日 02:00 PST（=10:00 UTC），
+	// 结束于 11 月第一个周日 02:00 PDT（=09:00 UTC）。
+	start := nthSunday(year, time.March, 2).Add(10 * time.Hour)
+	end := nthSunday(year, time.November, 1).Add(9 * time.Hour)
+	utc := t.UTC()
+	if !utc.Before(start) && utc.Before(end) {
+		return time.FixedZone("PDT", -7*3600)
+	}
+	return time.FixedZone("PST", -8*3600)
+}
+
+// nthSunday 返回某年第 n 个周日的 UTC 日期（仅日期参与比较）。
+func nthSunday(year int, month time.Month, n int) time.Time {
+	first := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+	offset := (7 - int(first.Weekday())) % 7
+	return first.AddDate(0, 0, offset+7*(n-1))
+}
+
+// OutboundTimeZoneOffsetMinutes 返回给定时刻发往上游的 UTC 偏移（分钟）。
+func OutboundTimeZoneOffsetMinutes(t time.Time) int {
+	_, offset := t.In(PacificTimeZone(t)).Zone()
+	return offset / 60
+}
+
 func NowLocal() string {
-	return time.Now().Format("2006-01-02 15:04:05")
+	return time.Now().In(DisplayTimeZone).Format(DisplayTimeLayout)
 }
 
 func NowISO() string {

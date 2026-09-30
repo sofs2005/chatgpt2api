@@ -145,7 +145,9 @@ func (s *LogService) CleanupOlderThan(retentionDays int) (LogCleanupResult, erro
 	if retentionDays < 1 || retentionDays > 3650 {
 		return LogCleanupResult{}, errors.New("retention days must be between 1 and 3650")
 	}
-	cutoffDate := time.Now().AddDate(0, 0, -retentionDays+1).Format("2006-01-02")
+	// 截断边界必须与 util.NowLocal 同源：日志时间戳按展示时区写，
+	// 这里若用 time.Now() 的容器时区，两者最多会差一整天。
+	cutoffDate := time.Now().In(util.DisplayTimeZone).AddDate(0, 0, -retentionDays+1).Format("2006-01-02")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -751,7 +753,7 @@ func usageDates(days int) []string {
 	if days > 90 {
 		days = 90
 	}
-	start := time.Now().AddDate(0, 0, -days+1)
+	start := time.Now().In(util.DisplayTimeZone).AddDate(0, 0, -days+1)
 	dates := make([]string, 0, days)
 	for i := 0; i < days; i++ {
 		dates = append(dates, start.AddDate(0, 0, i).Format("2006-01-02"))

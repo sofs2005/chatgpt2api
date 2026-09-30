@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"chatgpt2api/internal/util"
 )
 
 // 验证 buildPOWConfig 已对齐 ChatGPT 网页最新版 PoW 格式（上游 commit 86a4977）。
@@ -47,26 +50,30 @@ func TestBuildPOWConfigMatchesLatestWebFormat(t *testing.T) {
 // 验证 PoW 载荷内部自洽，且与请求其余部分使用同一身份。
 //
 // 同一份浏览器身份在请求体、请求头与 PoW 探针里必须自报一致的语言与时区。
-// 此前载荷固定写 en-US / EST，而请求体用的是 Asia/Shanghai（-480），
-// 头里是 OAI-Language: zh-CN，三者互相矛盾。
+// 判据取自 util 的共享常量，而不是在这里再抄一份字面量：抄一份的话，
+// 改了身份却漏改测试，测试反而会「通过」。
 func TestBuildPOWConfigIdentityIsSelfConsistent(t *testing.T) {
 	config := buildPOWConfig("UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
 
 	// index 7/8 是 navigator.language 与 languages，必须与请求身份一致。
-	if got := config[7]; got != "zh-CN" {
-		t.Fatalf("config[7] language = %v, want zh-CN", got)
+	if got := config[7]; got != util.OutboundLocaleTag {
+		t.Fatalf("config[7] language = %v, want %s", got, util.OutboundLocaleTag)
 	}
-	if got := config[8]; got != "zh-CN,zh,en" {
-		t.Fatalf("config[8] languages = %v, want zh-CN,zh,en", got)
+	if got := config[8]; got != util.OutboundLocaleList {
+		t.Fatalf("config[8] languages = %v, want %s", got, util.OutboundLocaleList)
 	}
 
-	// index 1 是本地时间字符串，时区必须与请求体的 Asia/Shanghai 一致。
+	// index 1 是本地时间字符串，时区必须与请求体的 timezone 一致。
 	localTime, _ := config[1].(string)
-	if !strings.Contains(localTime, "GMT+0800") {
-		t.Fatalf("config[1] local time = %q, want GMT+0800 offset", localTime)
+	wantOffset := util.OutboundTimeZoneOffsetMinutes(time.Now())
+	if !strings.Contains(localTime, formatGMTOffset(wantOffset*60)) {
+		t.Fatalf("config[1] local time = %q, want offset %s", localTime, formatGMTOffset(wantOffset*60))
 	}
-	if strings.Contains(localTime, "Eastern Standard Time") {
-		t.Fatalf("config[1] local time = %q, still reports the old EST zone", localTime)
+	if !strings.Contains(localTime, "Pacific") {
+		t.Fatalf("config[1] local time = %q, want a US Pacific zone label", localTime)
+	}
+	if strings.Contains(localTime, "GMT+0800") {
+		t.Fatalf("config[1] local time = %q, still reports the old China offset", localTime)
 	}
 
 	// index 13 是 performance.now()，应为页面存活毫秒数（量级远小于 Unix 毫秒）。

@@ -1900,7 +1900,7 @@ func TestConversationPayloadEmbedsOpenAIMessageHistoryInSingleUserMessage(t *tes
 		{"role": "user", "content": "你好，你是什么模型？"},
 		{"role": "assistant", "content": "你好！我是一个由OpenAI开发的语言模型，叫做GPT-4。"},
 		{"role": "user", "content": "我之前说了什么？"},
-	}, "auto", "Asia/Shanghai")
+	}, "auto")
 
 	if payload["parent_message_id"] != "client-created-root" {
 		t.Fatalf("parent_message_id = %q, want client-created-root", payload["parent_message_id"])
@@ -1941,7 +1941,7 @@ func TestConversationPayloadKeepsSingleUserMessagePrompt(t *testing.T) {
 	client := &Client{}
 	payload := client.conversationPayload([]map[string]any{
 		{"role": "user", "content": "hello"},
-	}, "auto", "Asia/Shanghai")
+	}, "auto")
 
 	messages := payload["messages"].([]map[string]any)
 	content := messages[0]["content"].(map[string]any)
@@ -1955,7 +1955,7 @@ func TestConversationPayloadKeepsSystemHintsEmpty(t *testing.T) {
 	client := &Client{}
 	payload := client.conversationPayload([]map[string]any{
 		{"role": "user", "content": "draw\n\n输出为 16:9 横屏构图"},
-	}, "gpt-5-5", "Asia/Shanghai")
+	}, "gpt-5-5")
 
 	if payload["model"] != "gpt-5-5" {
 		t.Fatalf("model = %q, want gpt-5-5", payload["model"])

@@ -17,6 +17,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
+
+	"chatgpt2api/internal/util"
 )
 
 type Backend interface {
@@ -377,12 +379,12 @@ func (b *DatabaseBackend) AppendLog(item map[string]any) error {
 	}
 	createdAt := strings.TrimSpace(fmt.Sprint(item["time"]))
 	if createdAt == "" {
-		createdAt = time.Now().Format("2006-01-02 15:04:05")
+		createdAt = util.NowLocal()
 	}
 	logType := "event"
 	day := logDay(createdAt)
 	if day == "" {
-		day = time.Now().Format("2006-01-02")
+		day = util.NowLocal()[:10]
 	}
 	_, err = b.db.Exec(
 		"INSERT INTO logs (created_at, type, day, data) VALUES ("+b.placeholder(1)+", "+b.placeholder(2)+", "+b.placeholder(3)+", "+b.placeholder(4)+")",

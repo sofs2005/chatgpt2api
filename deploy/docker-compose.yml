@@ -6,6 +6,12 @@ services:
     restart: unless-stopped
     ports:
       - "3000:80"
+    environment:
+      # 面板时间戳一律按东八区展示（util.DisplayTimeZone），不依赖本变量；
+      # 但容器 TZ 仍会影响 Go 日志时间、配额周期边界、文件 mtime 的格式化，
+      # 不设就是 UTC，跟面板显示对不上。这里对齐成同一时区。
+      # 注意：这只管「给人看的时间」，发往上游的身份时区固定为美西，与此无关。
+      - TZ=Asia/Shanghai
     env_file:
       # 注入容器的配置文件，路径相对本文件所在目录。
       # 这里刻意不写成可覆盖的 ${CHATGPT2API_ENV_FILE:-...}：该变量同时是

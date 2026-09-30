@@ -222,6 +222,10 @@ export type AccountRefreshResult = {
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
+  // access_token 过期但 session_token 可用时走第二段 session 续期，
+  // 成功后只累加 session_refreshed，不计入 refreshed。
+  session_refreshed?: number;
+  session_failed?: number;
   errors: Array<{ access_token?: string; account_id?: string; error: string }>;
   results: AccountRefreshResult[];
   total?: number;

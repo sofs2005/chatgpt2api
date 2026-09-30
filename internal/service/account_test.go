@@ -1395,6 +1395,15 @@ func TestRefreshAccountsUsesStoredBrowserCookiesForSessionRefresh(t *testing.T) 
 	if result["session_refreshed"] != 1 || result["session_failed"] != 0 {
 		t.Fatalf("refresh result = %#v, want session refresh success", result)
 	}
+	// session 续期只累加 session_refreshed，refreshed 保持 0，errors 也为空。
+	// 前端若只读 refreshed，就会把一次成功的续期报成「刷新成功 0 个账户」。
+	// 这里把该形状固定下来：消费方必须同时读这两个计数。
+	if result["refreshed"] != 0 {
+		t.Fatalf("refreshed = %#v, want 0 for a pure session refresh", result["refreshed"])
+	}
+	if errors := result["errors"].([]map[string]string); len(errors) != 0 {
+		t.Fatalf("errors = %#v, want empty so the refresh counts as a success", errors)
+	}
 	if account := accounts.GetAccount("new-access-token"); account == nil {
 		t.Fatalf("new-access-token account missing after session refresh")
 	}

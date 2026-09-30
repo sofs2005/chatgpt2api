@@ -444,6 +444,12 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
       const data = await refreshAccounts(targetIds);
       applyAccountItems(data.items);
       window.dispatchEvent(new Event(QUOTA_REFRESH_EVENT));
+      // access_token 过期但 session_token 可用的账号走的是第二段 session 续期，
+      // 后端只累加 session_refreshed，不计入 refreshed。只报 refreshed 会把
+      // 「明明续期成功了」说成「刷新成功 0 个账户」。
+      const sessionRefreshed = data.session_refreshed ?? 0;
+      const succeeded = data.refreshed + sessionRefreshed;
+      const sessionHint = sessionRefreshed > 0 ? `，其中 ${sessionRefreshed} 个是 token 过期后经 session 续期` : "";
       if (data.errors.length > 0) {
         const cfChallengeCount = data.results.filter((item) => item.cf_challenge).length;
         const firstError = data.errors[0]?.error;
@@ -453,10 +459,14 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
           ? `其中 ${cfChallengeCount} 个是 Cloudflare 拦截（出口 IP 或指纹问题，账号本身未失效）`
           : "";
         toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${cfHint ? `，${cfHint}` : firstError ? `，首个错误：${firstError}` : ""}`,
+          `刷新成功 ${succeeded} 个${sessionHint}，失败 ${data.errors.length} 个${cfHint ? `，${cfHint}` : firstError ? `，首个错误：${firstError}` : ""}`,
         );
+      } else if (succeeded > 0) {
+        toast.success(`刷新成功 ${succeeded} 个账户${sessionHint}`);
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户`);
+        // 无错误却一个都没刷新成功：账号可能已在刷新过程中被移除或停用，
+        // 此时 refreshed 与 session_refreshed 都不计数，不能报成成功。
+        toast.error("没有账户被刷新：账号可能已被移除或停用，请重新加载列表确认");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "刷新账户失败";

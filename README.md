@@ -112,6 +112,8 @@ sh deploy/docker-stack.sh check      # 排查「镜像改了没生效」
 sh deploy/docker-stack.sh help       # 全部命令
 ```
 
+脚本内部会切到仓库根目录，因此**在哪个目录执行都行**，不用先 `cd`。选定的栈存在 `deploy/.stack`（该文件已被 gitignore），之后所有命令沿用。
+
 等价的手写命令（不想用脚本时）：
 
 ```bash

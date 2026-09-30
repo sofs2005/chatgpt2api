@@ -782,7 +782,7 @@ func (c *Client) downloadEditableEndpoint(ctx context.Context, path string, extr
 	}
 	resp, err := c.do(req)
 	if err != nil {
-		return nil, upstreamTransportError(path, err)
+		return nil, upstreamTransportError("editable_download", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
@@ -792,7 +792,7 @@ func (c *Client) downloadEditableEndpoint(ctx context.Context, path string, extr
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
-		return nil, upstreamHTTPError(path, resp.StatusCode, data)
+		return nil, upstreamHTTPError("editable_download", resp.StatusCode, data)
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

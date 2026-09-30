@@ -508,8 +508,8 @@ function LogsContent() {
                       </TableCell>
                       <TableCell>{formatDuration(item)}</TableCell>
                       <TableCell className="max-w-[300px] truncate text-muted-foreground">{item.summary || "-"}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap items-center gap-1">
+                      <TableCell className="max-w-[220px]">
+                        <div className="flex min-w-0 flex-wrap items-center gap-1">
                           {(() => {
                             const kind = detailText(item, "event_kind");
                             if (!kind) return <span className="text-muted-foreground">—</span>;
@@ -518,7 +518,10 @@ function LogsContent() {
                           {(() => {
                             const stage = stageText(item);
                             if (!stage) return null;
-                            return <span className="font-mono text-xs text-muted-foreground">{stage}</span>;
+                            // 截断而非换行：阶段名本该是短标识，一旦异常地带上
+                            // 路径/查询串（见 backend 的 stage 赋值），无界文本会
+                            // 把整列撑宽、挤掉后面的操作列。完整值在详情弹窗里看。
+                            return <span className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={stage}>{stage}</span>;
                           })()}
                         </div>
                       </TableCell>

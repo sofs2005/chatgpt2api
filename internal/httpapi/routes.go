@@ -1244,6 +1244,31 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result := a.accounts.RefreshAccounts(r.Context(), tokens)
+		// 刷新本身只写一条 shape 恒定的审计日志（POST /api/accounts/refresh），
+		// 看不出刷了谁、成了几个、败在哪。cd991e6 删掉「更新账号」那批噪声日志
+		// 之后，这里就成了唯一的记录点，于是运维点完刷新在日志页什么也读不到。
+		// 与新增/删除账号一样补一条带计数的业务日志，并抑制审计重复行。
+		//
+		// 抑制审计行会连带丢掉它原本记下的 response_body（失败原因就在里面），
+		// 所以把失败账号与首个错误一并带进这条业务日志。
+		refreshed := util.ToInt(result["refreshed"], 0) + util.ToInt(result["session_refreshed"], 0)
+		failed := util.ToInt(result["failed"], 0)
+		extra := map[string]any{"token_previews": accountTokenPreviews(tokens)}
+		if failed > 0 {
+			failedAccounts := make([]string, 0, failed)
+			if errors, ok := result["errors"].([]map[string]string); ok {
+				for _, item := range errors {
+					if id := util.Clean(item["account_id"]); id != "" {
+						failedAccounts = append(failedAccounts, id)
+					}
+				}
+			}
+			extra["failed_account_ids"] = failedAccounts
+			if errors, ok := result["errors"].([]map[string]string); ok && len(errors) > 0 {
+				extra["first_error"] = util.Clean(errors[0]["error"])
+			}
+		}
+		a.logAccountMutation(r, identity, "刷新", fmt.Sprintf("刷新 %d 个账号，成功 %d 个，失败 %d 个", util.ToInt(result["total"], 0), refreshed, failed), extra)
 		a.redactAccountPayloadForIdentity(identity, result)
 		util.WriteJSON(w, http.StatusOK, result)
 	case r.URL.Path == "/api/accounts/upstream-actions" && r.Method == http.MethodPost:

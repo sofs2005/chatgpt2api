@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"chatgpt2api/internal/backend"
 	"chatgpt2api/internal/config"
@@ -2003,6 +2004,112 @@ func TestAccountToggleEnabledEndpoint(t *testing.T) {
 	updated2 = findHTTPItem(items, account2ID)
 	if updated2 == nil || updated2["status"] != "限流" || updated2["enabled"] != true {
 		t.Fatalf("enabled token-2 item = %#v in %#v", updated2, payload)
+	}
+}
+
+// 刷新的上游根地址没有对外配置项，测试里直接改写未导出字段把它指到本地服务器——
+// 与本仓库既有的同类做法一致（protocol 包的 conversation_test.go 同款）。
+func setAccountServiceRemoteBaseURL(t *testing.T, accounts *service.AccountService, baseURL string) {
+	t.Helper()
+	field := reflect.ValueOf(accounts).Elem().FieldByName("remoteBaseURL")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetString(baseURL)
+}
+
+// 刷新此前只留一条 shape 恒定的审计行（POST /api/accounts/refresh），看不出刷了谁、
+// 成了几个、败在哪；cd991e6 删掉「更新账号」那批噪声日志后更是彻底读不到。
+// 这里把「刷新必须留下带计数的业务日志、且不再重复写审计行」固定下来。
+func TestAccountRefreshEndpointWritesBusinessLog(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			_, _ = w.Write([]byte(`{"email":"user@example.com","id":"user-1"}`))
+		case "/backend-api/conversation/init":
+			_, _ = w.Write([]byte(`{"default_model_slug":"gpt-5","limits_progress":[{"feature_name":"image_gen","remaining":3}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	setAccountServiceRemoteBaseURL(t, app.accounts, upstream.URL)
+
+	app.accounts.AddAccounts([]string{"token-1"})
+	app.accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/refresh", strings.NewReader(`{"account_ids":["`+util.SHA1Short("token-1", 16)+`"]}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	items := app.logs.Search(service.LogQuery{Limit: 20, View: service.LogViewAll})
+	log := findLogBySummary(items, "刷新 1 个账号，成功 1 个，失败 0 个")
+	if log == nil {
+		t.Fatalf("refresh should leave a countable business log, got %#v", logPayloadSummaries(items))
+	}
+	detail, _ := log["detail"].(map[string]any)
+	if detail["module"] != "accounts" || detail["outcome"] != "success" || detail["operation_type"] != "刷新" {
+		t.Fatalf("refresh log detail = %#v", detail)
+	}
+	if previews := util.AsStringSlice(detail["token_previews"]); len(previews) != 1 {
+		t.Fatalf("refresh log token_previews = %#v", detail["token_previews"])
+	}
+	// 业务日志已覆盖这次请求，中间件不应再补一条同路径的审计行。
+	// 这里按 event_kind 判定：业务日志同样带 path，用路径匹配会误伤。
+	for _, item := range items {
+		itemDetail, _ := item["detail"].(map[string]any)
+		if itemDetail["path"] == "/api/accounts/refresh" && itemDetail["event_kind"] == service.EventKindAudit {
+			t.Fatalf("business log should suppress the generic audit duplicate: %#v", item)
+		}
+	}
+}
+
+// 失败同样要有日志：用户报的正是「刷新成功 0 个、日志里什么都没有」。
+// 抑制审计行后失败原因只剩这条业务日志承载，因此失败账号与首个错误必须落进去。
+func TestAccountRefreshEndpointLogsFailures(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>ok</html>"))
+			return
+		}
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	setAccountServiceRemoteBaseURL(t, app.accounts, upstream.URL)
+
+	app.accounts.AddAccounts([]string{"token-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/refresh", strings.NewReader(`{"account_ids":["`+util.SHA1Short("token-1", 16)+`"]}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	items := app.logs.Search(service.LogQuery{Limit: 20, View: service.LogViewAll})
+	log := findLogBySummary(items, "刷新 1 个账号，成功 0 个，失败 1 个")
+	if log == nil {
+		t.Fatalf("failed refresh should still leave a log, got %#v", logPayloadSummaries(items))
+	}
+	detail, _ := log["detail"].(map[string]any)
+	if ids := util.AsStringSlice(detail["failed_account_ids"]); len(ids) != 1 || ids[0] != util.SHA1Short("token-1", 16) {
+		t.Fatalf("failed_account_ids = %#v", detail["failed_account_ids"])
+	}
+	if util.Clean(detail["first_error"]) == "" {
+		t.Fatalf("failed refresh log should carry the upstream error: %#v", detail)
 	}
 }
 

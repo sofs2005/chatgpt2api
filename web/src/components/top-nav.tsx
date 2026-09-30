@@ -30,10 +30,11 @@ import {
   type ColorTheme,
 } from "@/lib/theme";
 
+// /register（注册机）刻意不出现在导航里：它是运维自己用的工具，不该摆给所有
+// 登录用户。路由与权限守卫照旧保留，知道地址的人手输 /register 仍可进入。
 const navItems = [
   { href: "/image", label: "创作台" },
   { href: "/accounts", label: "号池管理" },
-  { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片库" },
   { href: "/users", label: "用户管理" },
   { href: "/rbac", label: "角色权限" },

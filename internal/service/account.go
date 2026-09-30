@@ -1237,6 +1237,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			"refreshed":         0,
 			"session_refreshed": 0,
 			"session_failed":    0,
+			"info_stale":        0,
 			"errors":            []map[string]string{},
 			"results":           []map[string]any{},
 			"total":             0,
@@ -1384,6 +1385,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 
 	refreshedCount := 0
 	failedRefreshCount := 0
+	staleInfoCount := 0
 	if len(pendingRefresh) > 0 {
 		sortPendingRefreshByPriority(pendingRefresh, s)
 	}
@@ -1422,7 +1424,12 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			}
 			continue
 		}
-		if info, err := s.FetchRemoteInfo(ctx, newAccessToken); err == nil {
+		// 续期只换新 token，不搬运额度等账号信息：额度、上传额度、类型都来自
+		// 这次 FetchRemoteInfo。此前这里在 err != nil 时静默跳过，于是续期成功
+		// 但信息拉取失败（常见于 401/403 之外的上游抖动）时，账号状态被置为
+		// 正常、界面却还在展示续期之前的旧额度，使用者无从得知数字其实是陈的。
+		info, infoErr := s.FetchRemoteInfo(ctx, newAccessToken)
+		if infoErr == nil {
 			s.UpdateAccount(newAccessToken, info)
 		}
 		if detail != nil {
@@ -1432,6 +1439,11 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			detail["status"] = "success"
 			detail["message"] = "token刷新成功"
 			delete(detail, "error")
+			if infoErr != nil {
+				staleInfoCount++
+				detail["info_stale"] = true
+				detail["message"] = "token刷新成功，但账号信息（额度等）拉取失败，展示值仍为上次结果"
+			}
 			if current := s.GetAccount(newAccessToken); current != nil {
 				detail["account_status"] = current["status"]
 				detail["email"] = current["email"]
@@ -1448,6 +1460,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		"refreshed":         refreshed,
 		"session_refreshed": refreshedCount,
 		"session_failed":    failedRefreshCount,
+		"info_stale":        staleInfoCount,
 		"errors":            errors,
 		"results":           details,
 		"total":             len(tokens),

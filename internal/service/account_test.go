@@ -1409,6 +1409,68 @@ func TestRefreshAccountsUsesStoredBrowserCookiesForSessionRefresh(t *testing.T) 
 	}
 }
 
+// 续期后的账号信息拉取失败时，续期本身仍算成功，但必须如实标注额度等展示值
+// 还是旧的。此前这条错误被静默丢弃：界面显示「刷新成功」，表格里的上传额度
+// 却纹丝不动，使用者无从判断是没刷上还是刷新没生效。
+func TestRefreshAccountsFlagsStaleInfoWhenSessionRefreshCannotFetchQuota(t *testing.T) {
+	var meCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			// 续期前 token 过期；续期后上游仍拒绝，信息拉取失败。
+			if atomic.AddInt32(&meCalls, 1) == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				writeJSON(t, w, map[string]any{"detail": "authentication token is expired"})
+				return
+			}
+			w.WriteHeader(http.StatusBadGateway)
+			writeJSON(t, w, map[string]any{"detail": "upstream unavailable"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.refresher = NewSessionRefresher(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access-token","sessionToken":"new-session-token","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"expired-access-token"})
+	accounts.UpdateAccount("expired-access-token", map[string]any{
+		"status":                    "正常",
+		"quota":                     5,
+		"file_upload_quota":         80,
+		"file_upload_quota_unknown": false,
+		"session_token":             "refresh-session-token",
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"expired-access-token"})
+	if result["session_refreshed"] != 1 || result["refreshed"] != 0 {
+		t.Fatalf("refresh result = %#v, want a pure session refresh", result)
+	}
+	if result["info_stale"] != 1 {
+		t.Fatalf("info_stale = %#v, want 1 so the UI can say the numbers are old", result["info_stale"])
+	}
+	details := result["results"].([]map[string]any)
+	if len(details) != 1 || details[0]["info_stale"] != true {
+		t.Fatalf("results = %#v, want a single entry flagged info_stale", details)
+	}
+	// 额度未被本次刷新改写：上游没给新值，旧值原样保留正是「展示值仍是上次结果」。
+	if account := accounts.GetAccount("new-access-token"); util.ToInt(account["file_upload_quota"], -1) != 80 {
+		t.Fatalf("file_upload_quota = %#v, want the previous value kept", account["file_upload_quota"])
+	}
+}
+
 func TestRefreshAccountsMarksRateLimitedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

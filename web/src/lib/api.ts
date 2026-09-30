@@ -226,6 +226,9 @@ type AccountRefreshResponse = {
   // 成功后只累加 session_refreshed，不计入 refreshed。
   session_refreshed?: number;
   session_failed?: number;
+  // 有账号续期成功、但续期后的账号信息（额度等）拉取失败，
+  // 列表里的额度仍是上一次的结果。
+  info_stale?: number;
   errors: Array<{ access_token?: string; account_id?: string; error: string }>;
   results: AccountRefreshResult[];
   total?: number;

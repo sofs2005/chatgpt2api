@@ -220,12 +220,49 @@ func (s *ProxyService) Test(candidate string, timeout time.Duration) map[string]
 		return map[string]any{"ok": false, "status": 0, "latency_ms": latency, "error": message}
 	}
 	defer resp.Body.Close()
-	ok := resp.StatusCode < 500
+	// 判据不能是「< 500 就算通」：chatgpt.com 由 Cloudflare 保护，被挑战或
+	// 被拒时返回的是 403，那样会把「每次请求都被 CF 拦下」报成「代理可用」，
+	// 而面板显示的绿灯恰恰是排查时最该看到的红灯。
+	//
+	// 这里区分三种结局：
+	//   ok        拿到 2xx/3xx，链路与身份都被接受；
+	//   challenged 拿到 CF 挑战页（403/503 且带 CF 标记），代理本身通，
+	//              但缺 cf_clearance —— 这解释了为什么请求仍会失败；
+	//   其余      连接失败或明确的拒绝，按不可用上报。
+	ok := resp.StatusCode < 400
+	challenged := false
 	var message any
 	if !ok {
+		challenged = isCloudflareChallengeResponse(resp)
 		message = resp.Status
+		if challenged {
+			message = "upstream returned a Cloudflare challenge; the proxy works but the request needs a valid cf_clearance"
+		}
 	}
-	return map[string]any{"ok": ok, "status": resp.StatusCode, "latency_ms": latency, "error": message}
+	return map[string]any{
+		"ok":         ok,
+		"challenged": challenged,
+		"status":     resp.StatusCode,
+		"latency_ms": latency,
+		"error":      message,
+	}
+}
+
+// isCloudflareChallengeResponse 判断一次探测响应是否为 CF 挑战页。
+//
+// 依据响应头优先（cf-mitigated / cf-ray），其次看状态码与 CF 的挑战标记：
+// 光看 403 会把「IP 被封」也算成挑战，光看 body 则要在探测里多读一次响应体。
+func isCloudflareChallengeResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("cf-mitigated")), "challenge") {
+		return true
+	}
+	if !util.IsCloudflareChallengeStatus(resp.StatusCode) {
+		return false
+	}
+	return strings.TrimSpace(resp.Header.Get("cf-ray")) != ""
 }
 
 func browserHTTPClient(proxy string, timeout time.Duration) *http.Client {

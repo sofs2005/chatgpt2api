@@ -734,7 +734,19 @@ func (c *Client) bootstrapOnce(ctx context.Context, attempt int) (error, bool) {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.reportStage("bootstrap", false, map[string]any{"status": resp.StatusCode, "attempt": attempt})
+		attrs := map[string]any{
+			"status":  resp.StatusCode,
+			"attempt": attempt,
+			"body":    summarizeUpstreamErrorBody(data),
+		}
+		// CF 的诊断头是判断「挑战 / 封禁 / 正常拒绝」的最直接依据：
+		// 没有它时，403 的三种成因在日志里长得完全一样。
+		for name, key := range cloudflareDiagnosticHeaders {
+			if value := strings.TrimSpace(resp.Header.Get(name)); value != "" {
+				attrs[key] = value
+			}
+		}
+		c.reportStage("bootstrap", false, attrs)
 		return upstreamHTTPError("bootstrap", resp.StatusCode, data), util.IsRetryableBootstrapStatus(resp.StatusCode)
 	}
 	c.powSources, c.powDataBuild = parsePOWResources(string(data))
@@ -1321,6 +1333,13 @@ func upstreamTransportError(context string, err error) error {
 	}
 }
 
+// summarizeUpstreamErrorBody 把上游错误响应体压缩成一行可读的诊断文案。
+//
+// HTML 分支刻意保留响应体的特征片段，而不是只回一句「HTML error page」：
+// 上游被拒时返回的 HTML 分好几类（Cloudflare 挑战页、CF 的简单拒绝页、
+// 网关错误页），它们的处置方式完全不同，只报一句归一化文案会让线上
+// 只剩「被拒了」这个信息，无从判断该换出口、刷新凭证还是改请求。
+// 特征片段取自 <title> 与 CF 的判定标记，足以区分类别，且不含请求内容。
 func summarizeUpstreamErrorBody(body []byte) string {
 	text := strings.TrimSpace(string(body))
 	if text == "" {
@@ -1328,16 +1347,66 @@ func summarizeUpstreamErrorBody(body []byte) string {
 	}
 	lower := strings.ToLower(text)
 	if util.IsCloudflareChallengeBody(lower) {
-		return util.CloudflareChallengeMessage
+		return util.CloudflareChallengeMessage + htmlBodyHint(text)
 	}
 	if looksLikeHTMLBody(lower) {
-		return "upstream returned HTML error page"
+		return "upstream returned HTML error page" + htmlBodyHint(text)
 	}
 	const maxBodyDetail = 2048
 	if len(text) > maxBodyDetail {
 		return "body=" + text[:maxBodyDetail] + "...(truncated)"
 	}
 	return "body=" + text
+}
+
+// htmlBodyHint 从 HTML 响应体里提取一小段可用于区分错误类别的特征。
+//
+// 只取 <title> 的内容，取不到就回落到 CF 判定标记的存在性。不截取正文，
+// 避免把上游页面里的内容（可能含账号相关文案）写进日志。
+func htmlBodyHint(text string) string {
+	if match := htmlTitleRE.FindStringSubmatch(text); len(match) > 1 {
+		if title := strings.TrimSpace(util.Clean(match[1])); title != "" {
+			return " (title=" + truncateHint(title, 120) + ")"
+		}
+	}
+	lower := strings.ToLower(text)
+	marks := make([]string, 0, 4)
+	for _, mark := range []string{"cf_chl", "challenge-platform", "cf-mitigated", "just a moment"} {
+		if strings.Contains(lower, mark) {
+			marks = append(marks, mark)
+		}
+	}
+	if len(marks) == 0 {
+		return ""
+	}
+	return " (marks=" + strings.Join(marks, ",") + ")"
+}
+
+// truncateHint 按字符截断日志提示文案，避免按字节切断多字节字符。
+func truncateHint(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
+}
+
+// htmlTitleRE 匹配 HTML 文档标题，用于错误页分类。
+var htmlTitleRE = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+
+// cloudflareDiagnosticHeaders 把 CF 的诊断响应头映射成日志字段名。
+//
+// cf-ray 是向 Cloudflare 侧追查该请求的唯一凭据；cf-mitigated 直接标明
+// 是「challenge」还是硬拒绝；cf-cache-status 与 server 用来区分命中 CDN
+// 与否。这些都不含凭证，可以安全落日志。
+var cloudflareDiagnosticHeaders = map[string]string{
+	"cf-ray":          "cf_ray",
+	"cf-mitigated":    "cf_mitigated",
+	"cf-cache-status": "cf_cache_status",
+	"server":          "server",
 }
 
 func looksLikeHTMLBody(lower string) bool {

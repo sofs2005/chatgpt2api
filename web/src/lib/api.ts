@@ -1871,6 +1871,7 @@ export type ProxySettings = {
 
 export type ProxyTestResult = {
   ok: boolean;
+  challenged: boolean;
   status: number;
   latency_ms: number;
   error: string | null;

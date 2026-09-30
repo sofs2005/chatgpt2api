@@ -232,6 +232,10 @@ export function ConfigCard() {
         toast.success(
           `代理可用（${data.result.latency_ms} ms，HTTP ${data.result.status}）`,
         );
+      } else if (data.result.challenged) {
+        toast.warning(
+          `代理通，但上游返回 Cloudflare 挑战（HTTP ${data.result.status}，${data.result.latency_ms} ms）：缺少有效的 cf_clearance`,
+        );
       } else {
         toast.error(`代理不可用：${data.result.error ?? "未知错误"}`);
       }
@@ -593,12 +597,16 @@ export function ConfigCard() {
                   "rounded-[13px] border px-3 py-2 text-xs leading-5",
                   proxyTestResult.ok
                     ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    : "border-rose-200 bg-rose-50 text-rose-800",
+                    : proxyTestResult.challenged
+                      ? "border-amber-200 bg-amber-50 text-amber-800"
+                      : "border-rose-200 bg-rose-50 text-rose-800",
                 )}
               >
                 {proxyTestResult.ok
                   ? `代理可用：HTTP ${proxyTestResult.status}，用时 ${proxyTestResult.latency_ms} ms`
-                  : `代理不可用：${proxyTestResult.error ?? "未知错误"}（用时 ${proxyTestResult.latency_ms} ms）`}
+                  : proxyTestResult.challenged
+                    ? `代理通，但上游返回 Cloudflare 挑战：HTTP ${proxyTestResult.status}，用时 ${proxyTestResult.latency_ms} ms。当前缺少有效的 cf_clearance，请求仍会失败。`
+                    : `代理不可用：${proxyTestResult.error ?? "未知错误"}（用时 ${proxyTestResult.latency_ms} ms）`}
               </div>
             ) : null}
           </Field>

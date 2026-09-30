@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -453,6 +454,169 @@ func TestBootstrapRemoteDoesNotRetryNonRetryableStatus(t *testing.T) {
 	}
 	if got := attempts; got != 1 {
 		t.Fatalf("bootstrap attempts = %d, want exactly 1 for a non-retryable status", got)
+	}
+}
+
+// clearanceBootstrapServer 造一个「一直挑战、解出凭证后才放行」的上游。
+//
+// 首次请求按 challenge 参数决定是否挑战；一旦请求带上了 solvedClearance，
+// 之后一律放行——这样测试就能断言「重放确实带了新凭证」，
+// 而不是靠调用次数猜。replays 记录每次 bootstrap 请求的头，供断言重放身份。
+func clearanceBootstrapServer(t *testing.T, challengeOnce bool, solvedClearance string, bootstrapCalls, meCalls *int32, replays *[]http.Header) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			if replays != nil {
+				*replays = append(*replays, r.Header.Clone())
+			}
+			attempt := atomic.AddInt32(bootstrapCalls, 1)
+			cleared := false
+			if cookie, err := r.Cookie("cf_clearance"); err == nil && cookie.Value == solvedClearance {
+				cleared = true
+			}
+			if (challengeOnce && attempt == 1) || !cleared {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`<html><script>window._cf_chl_opt={}</script>Enable JavaScript and cookies to continue</html>`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			atomic.AddInt32(meCalls, 1)
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			writeJSON(t, w, map[string]any{"limits_progress": []map[string]any{{
+				"feature_name": "image_gen",
+				"remaining":    7,
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// refreshAccountsWithClearance 用「上游 + 可解挑战的 FlareSolverr」跑一次刷新。
+//
+// useSurfClient 为真时走真实的 surf 指纹 client：出站身份头必须经它才算数，
+// 用 server.Client() 会绕过 impersonate 中间件，测不出身份覆盖是否生效。
+func refreshAccountsWithClearance(t *testing.T, upstream *httptest.Server, flaresolverrURL string, useSurfClient bool) map[string]any {
+	t.Helper()
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = upstream.URL
+	if useSurfClient {
+		accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+			return browserHTTPClientForProfile("", DefaultBrowserImpersonationProfile, 5*time.Second)
+		}
+	} else {
+		accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+			return upstream.Client()
+		}
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+	if flaresolverrURL != "" {
+		accounts.proxy.SetClearance(NewClearanceService(testClearanceConfig{
+			enabled: true,
+			url:     flaresolverrURL,
+			ttl:     3600,
+		}))
+	}
+	return accounts.RefreshAccounts(context.Background(), []string{"token-1"})
+}
+
+// 刷新链路命中 CF 挑战时必须动用 clearance 兜底：退避重试只是把同一份旧凭证
+// 再送几次，挑战不会因此自愈，用户看到的就是「几秒后失败」。
+//
+// 这里走真实 surf client，一并验证重放确实换掉了出站 UA——cf_clearance 绑定
+// 签发时的 UA，只回注 cookie 而沿用旧 UA 会被上游判为凭证盗用，兜底等于没做。
+func TestRefreshAccountsSolvesCloudflareChallengeWithClearance(t *testing.T) {
+	const clearanceUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+	var bootstrapCalls, meCalls, solverCalls int32
+	var replays []http.Header
+	upstream := clearanceBootstrapServer(t, false, "solved-cf", &bootstrapCalls, &meCalls, &replays)
+	defer upstream.Close()
+	solver := flareSolverrStub(t, &solverCalls, func(req map[string]any) map[string]any {
+		return map[string]any{"status": "ok", "solution": map[string]any{
+			"userAgent": clearanceUA,
+			"cookies":   []any{map[string]any{"name": "cf_clearance", "value": "solved-cf"}},
+		}}
+	})
+	defer solver.Close()
+
+	result := refreshAccountsWithClearance(t, upstream, solver.URL, true)
+	if result["refreshed"] != 1 || result["failed"] != 0 {
+		t.Fatalf("refresh result = %#v, want the challenge solved into a success", result)
+	}
+	if got := atomic.LoadInt32(&solverCalls); got != 1 {
+		t.Fatalf("flaresolverr calls = %d, want 1", got)
+	}
+	// bootstrap 的退避重试会各打一次，兜底重放再打一次；关键是它确实重放到了。
+	if got := atomic.LoadInt32(&bootstrapCalls); got != 4 {
+		t.Fatalf("bootstrap calls = %d, want 4 (3 retries + 1 clearance replay)", got)
+	}
+	// 解出的凭证必须随 sessionCookies 注入后续请求：若只用来重放 bootstrap，
+	// 拿到 /me 的这一跳仍会带着被挑战的旧凭证。
+	if got := atomic.LoadInt32(&meCalls); got != 1 {
+		t.Fatalf("/backend-api/me calls = %d, want 1 replay carrying the solved clearance", got)
+	}
+	if len(replays) != 4 {
+		t.Fatalf("recorded bootstrap requests = %d, want 4", len(replays))
+	}
+	// 前三次仍是账号自己的身份。
+	if ua := replays[0].Get("User-Agent"); ua != DefaultBrowserUserAgent {
+		t.Fatalf("first bootstrap User-Agent = %q, want the account fingerprint", ua)
+	}
+	// 重放必须整套换成签发凭证的那个浏览器：UA 与 Sec-Ch-Ua 都要对上。
+	if ua := replays[3].Get("User-Agent"); ua != clearanceUA {
+		t.Fatalf("replay User-Agent = %q, want the clearance UA %q", ua, clearanceUA)
+	}
+	if ch := replays[3].Get("Sec-Ch-Ua"); !strings.Contains(ch, `"Google Chrome";v="131"`) {
+		t.Fatalf("replay Sec-Ch-Ua = %q, want client hints matching the clearance UA", ch)
+	}
+}
+
+// 未部署 FlareSolverr 时行为必须与引入兜底之前完全一致：如实上报挑战失败，
+// 并且不为一次注定无解的请求多打上游。
+func TestRefreshAccountsSkipsClearanceFallbackWhenUnconfigured(t *testing.T) {
+	var bootstrapCalls, meCalls int32
+	upstream := clearanceBootstrapServer(t, false, "solved-cf", &bootstrapCalls, &meCalls, nil)
+	defer upstream.Close()
+
+	// 全程挑战：重试 3 次耗尽后，因为没有 clearance 可用，直接上报失败。
+	result := refreshAccountsWithClearance(t, upstream, "", false)
+	if result["failed"] != 1 {
+		t.Fatalf("refresh result = %#v, want the challenge reported as a failure", result)
+	}
+	if got := atomic.LoadInt32(&bootstrapCalls); got != 3 {
+		t.Fatalf("bootstrap calls = %d, want 3 retries and no replay", got)
+	}
+	if got := atomic.LoadInt32(&meCalls); got != 0 {
+		t.Fatalf("/backend-api/me calls = %d, want 0 when the bootstrap never succeeds", got)
+	}
+}
+
+// FlareSolverr 不可达时兜底失败，仍须如实上报挑战，且不污染刷新结果的语义。
+func TestRefreshAccountsReportsChallengeWhenClearanceSolveFails(t *testing.T) {
+	var bootstrapCalls, meCalls int32
+	upstream := clearanceBootstrapServer(t, false, "solved-cf", &bootstrapCalls, &meCalls, nil)
+	defer upstream.Close()
+
+	// 保留端口 9（discard）：连接必然被拒，模拟 FlareSolverr 挂了。
+	result := refreshAccountsWithClearance(t, upstream, "http://127.0.0.1:9", false)
+	if result["failed"] != 1 {
+		t.Fatalf("refresh result = %#v, want the challenge reported as a failure", result)
+	}
+	details, ok := result["results"].([]map[string]any)
+	if !ok || len(details) != 1 {
+		t.Fatalf("results = %#v, want one refresh detail", result["results"])
+	}
+	if details[0]["cf_challenge"] != true {
+		t.Fatalf("refresh detail = %#v, want cf_challenge still marked", details[0])
+	}
+	if got := atomic.LoadInt32(&bootstrapCalls); got != 3 {
+		t.Fatalf("bootstrap calls = %d, want 3 retries and no successful replay", got)
 	}
 }
 

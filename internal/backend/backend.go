@@ -28,17 +28,6 @@ const (
 	// 这里的常量只在解析失败时使用，不应作为长期真值。
 	DefaultClientVersion     = "prod-980a55fc7f96eb70ab707f04eca80e3f613c9ed1"
 	DefaultClientBuildNumber = "11447364"
-
-	browserUserAgent              = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
-	browserSecCHUA                = `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`
-	browserSecCHUAFullVersion     = `"145.0.0.0"`
-	browserSecCHUAFullVersionList = `"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.0.0", "Chromium";v="145.0.0.0"`
-	browserSecCHUAMobile          = "?0"
-	browserSecCHUAPlatform        = `"Windows"`
-	browserSecCHUAPlatformVersion = `"19.0.0"`
-	browserSecCHUAArch            = `"x86"`
-	browserSecCHUABitness         = `"64"`
-	browserImpersonationProfile   = "chrome145"
 )
 
 type AccountLookup interface {
@@ -432,24 +421,10 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	if err == nil && accountCookieURL {
 		c.rememberAccountCookies(resp)
 	}
-	if err != nil || !accountCookieURL || !isClearanceChallengeResponse(resp) {
+	if err != nil || !accountCookieURL || !service.IsClearanceChallengeResponse(resp) {
 		return resp, err
 	}
 	return c.retryWithFreshClearance(req, resp)
-}
-
-// isClearanceChallengeResponse 判断响应是否是一次 Cloudflare 挑战拦截。
-//
-// 只凭状态码会把普通的业务 403 也当成挑战，白跑一次浏览器求解；因此优先采信
-// Cloudflare 自己的标记（cf-mitigated），没有标记时再回落到状态码。
-func isClearanceChallengeResponse(resp *http.Response) bool {
-	if resp == nil {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("cf-mitigated")), "challenge") {
-		return true
-	}
-	return util.IsCloudflareChallengeStatus(resp.StatusCode)
 }
 
 // retryWithFreshClearance 在命中 Cloudflare 挑战时，用该账号出口现取一份
@@ -505,6 +480,9 @@ func (c *Client) retryWithFreshClearance(req *http.Request, resp *http.Response)
 			return nil, upstreamTransportError("clearance", err)
 		}
 	}
+	// 身份覆盖走 context：surf 的 impersonate 中间件会在发送前把 UA 与 Sec-Ch-Ua
+	// 改回 profile 自己的值，在这里 Set 头会被静默丢弃，等于没换身份。
+	ctx = service.WithIdentityOverride(ctx, service.ClearanceRequestHeaders(bundle))
 	retry, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), body)
 	if err != nil {
 		c.reportStage("clearance", false, map[string]any{"error": err})
@@ -513,9 +491,6 @@ func (c *Client) retryWithFreshClearance(req *http.Request, resp *http.Response)
 	retry.Header = req.Header.Clone()
 	if retry.Header == nil {
 		retry.Header = http.Header{}
-	}
-	for name, value := range clearanceRequestHeaders(bundle) {
-		retry.Header.Set(name, value)
 	}
 	applyClearanceCookies(retry, bundle)
 
@@ -563,97 +538,6 @@ func applyClearanceCookies(req *http.Request, bundle service.ClearanceBundle) {
 	for _, name := range names {
 		req.AddCookie(&http.Cookie{Name: name, Value: values[name]})
 	}
-}
-
-type browserHeaderMetadata struct {
-	secCHUA         string
-	fullVersion     string
-	fullVersionList string
-}
-
-// clearanceRequestHeaders 生成与 clearance UA 自洽的请求头覆盖集。
-//
-// cf_clearance 绑定签发时的 User-Agent，因此重放时必须整套替换：
-// UA、Sec-Ch-Ua、Sec-Ch-Ua-Full-Version(-List) 以及由 UA 推导的平台版本。
-// 只改 UA 不改 Sec-Ch-Ua* 会留下「UA 说一个浏览器、客户端提示说另一个」的矛盾。
-func clearanceRequestHeaders(bundle service.ClearanceBundle) map[string]string {
-	headers := map[string]string{}
-	if bundle.UA == "" {
-		return headers
-	}
-	headers["User-Agent"] = bundle.UA
-	metadata := browserMetadataFromUserAgent(bundle.UA)
-	headers["Sec-Ch-Ua"] = metadata.secCHUA
-	headers["Sec-Ch-Ua-Full-Version"] = quoteHeaderValue(metadata.fullVersion)
-	headers["Sec-Ch-Ua-Full-Version-List"] = metadata.fullVersionList
-	return headers
-}
-
-func browserMetadataFromUserAgent(userAgent string) browserHeaderMetadata {
-	chromeVersion := regexpVersion(userAgent, `Chrome/([0-9]+(?:\.[0-9]+){0,3})`)
-	edgeVersion := regexpVersion(userAgent, `Edg[A-Z]*/([0-9]+(?:\.[0-9]+){0,3})`)
-	if edgeVersion != "" {
-		edgeMajor := majorVersion(edgeVersion)
-		chromiumVersion := firstNonEmpty(chromeVersion, edgeVersion)
-		chromiumMajor := majorVersion(chromiumVersion)
-		return browserHeaderMetadata{
-			secCHUA:         fmt.Sprintf(`"Microsoft Edge";v="%s", "Chromium";v="%s", "Not A(Brand";v="24"`, edgeMajor, chromiumMajor),
-			fullVersion:     edgeVersion,
-			fullVersionList: fmt.Sprintf(`"Microsoft Edge";v="%s", "Chromium";v="%s", "Not A(Brand";v="24.0.0.0"`, normalizeFullVersion(edgeVersion), normalizeFullVersion(chromiumVersion)),
-		}
-	}
-	if chromeVersion != "" {
-		major := majorVersion(chromeVersion)
-		full := normalizeFullVersion(chromeVersion)
-		return browserHeaderMetadata{
-			secCHUA:         fmt.Sprintf(`"Not:A-Brand";v="99", "Google Chrome";v="%s", "Chromium";v="%s"`, major, major),
-			fullVersion:     full,
-			fullVersionList: fmt.Sprintf(`"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="%s", "Chromium";v="%s"`, full, full),
-		}
-	}
-	return browserHeaderMetadata{
-		secCHUA:         browserSecCHUA,
-		fullVersion:     strings.Trim(browserSecCHUAFullVersion, `"`),
-		fullVersionList: browserSecCHUAFullVersionList,
-	}
-}
-
-func regexpVersion(value, pattern string) string {
-	match := regexp.MustCompile(pattern).FindStringSubmatch(value)
-	if len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func majorVersion(version string) string {
-	if before, _, ok := strings.Cut(version, "."); ok {
-		return before
-	}
-	return version
-}
-
-func normalizeFullVersion(version string) string {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return strings.Trim(browserSecCHUAFullVersion, `"`)
-	}
-	parts := strings.Split(version, ".")
-	for len(parts) < 4 {
-		parts = append(parts, "0")
-	}
-	return strings.Join(parts[:4], ".")
-}
-
-func quoteHeaderValue(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		value = strings.Trim(browserSecCHUAFullVersion, `"`)
-	}
-	if strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
-		return value
-	}
-	return `"` + value + `"`
 }
 
 func (c *Client) headers(path string, extra map[string]string) map[string]string {

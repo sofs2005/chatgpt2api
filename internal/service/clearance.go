@@ -34,6 +34,20 @@ var clearanceCookieNames = map[string]bool{
 	"__cflb":       true,
 }
 
+// IsClearanceChallengeResponse 判断响应是否是一次 Cloudflare 挑战拦截。
+//
+// 只凭状态码会把普通的业务 403 也当成挑战，白跑一次浏览器求解；因此优先采信
+// Cloudflare 自己的标记（cf-mitigated），没有标记时再回落到状态码。
+func IsClearanceChallengeResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("cf-mitigated")), "challenge") {
+		return true
+	}
+	return util.IsCloudflareChallengeStatus(resp.StatusCode)
+}
+
 // ClearanceConfig 是 cf_clearance 兜底所需配置。
 type ClearanceConfig interface {
 	ClearanceEnabled() bool

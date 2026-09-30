@@ -371,6 +371,24 @@ func BrowserMetadataFromUserAgent(userAgent string) browserHeaderMetadata {
 	}
 }
 
+// ClearanceRequestHeaders 生成与 clearance UA 自洽的请求头覆盖集。
+//
+// cf_clearance 绑定签发时的 User-Agent，因此重放时必须整套替换：
+// UA、Sec-Ch-Ua、Sec-Ch-Ua-Full-Version(-List)。只改 UA 不改 Sec-Ch-Ua*
+// 会留下「UA 说一个浏览器、客户端提示说另一个」的矛盾。
+func ClearanceRequestHeaders(bundle ClearanceBundle) map[string]string {
+	headers := map[string]string{}
+	if bundle.UA == "" {
+		return headers
+	}
+	headers["User-Agent"] = bundle.UA
+	metadata := BrowserMetadataFromUserAgent(bundle.UA)
+	headers["Sec-Ch-Ua"] = metadata.secCHUA
+	headers["Sec-Ch-Ua-Full-Version"] = quoteBrowserHeaderValue(metadata.fullVersion)
+	headers["Sec-Ch-Ua-Full-Version-List"] = metadata.fullVersionList
+	return headers
+}
+
 func defaultImpersonationProfileForUserAgent(userAgent string) string {
 	if browserRegexpVersion(userAgent, `Edg[A-Z]*/([0-9]+(?:\.[0-9]+){0,3})`) != "" {
 		return "edge" + browserMajorVersion(browserRegexpVersion(userAgent, `Edg[A-Z]*/([0-9]+(?:\.[0-9]+){0,3})`))

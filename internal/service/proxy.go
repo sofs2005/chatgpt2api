@@ -189,6 +189,43 @@ func AccountProfileFromContext(ctx context.Context) string {
 	return value
 }
 
+// identityOverrideKey 是请求上下文里承载出站身份头覆盖集的键。
+//
+// 覆盖必须经中间件而非请求头注入：impersonate 的请求中间件优先级为 0，
+// 会在发送前把 User-Agent 与 Sec-Ch-Ua 改写成 profile 自己的值，
+// 调用方在请求上 Set 的头会被静默丢弃。而 cf_clearance 绑定签发时的 UA，
+// 只换 cookie 不换 UA 会被上游判为凭证盗用——兜底重放因此形同虚设。
+type identityOverrideKey struct{}
+
+// WithIdentityOverride 把一组身份头绑定到请求上下文，供本次请求覆盖出站身份。
+//
+// 只作用于携带该 context 的这一次请求：FlareSolverr 的 UA 是浏览器容器的实际版本，
+// 写回账号持久指纹会让账号长期自报一个与 TLS 指纹不匹配的版本。
+func WithIdentityOverride(ctx context.Context, headers map[string]string) context.Context {
+	if ctx == nil || len(headers) == 0 {
+		return ctx
+	}
+	copied := make(map[string]string, len(headers))
+	for name, value := range headers {
+		if value != "" {
+			copied[name] = value
+		}
+	}
+	if len(copied) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, identityOverrideKey{}, copied)
+}
+
+// IdentityOverrideFromContext 取出请求上下文里的身份头覆盖集；没有时返回 nil。
+func IdentityOverrideFromContext(ctx context.Context) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	value, _ := ctx.Value(identityOverrideKey{}).(map[string]string)
+	return value
+}
+
 func (s *ProxyService) Test(candidate string, timeout time.Duration) map[string]any {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
@@ -282,6 +319,17 @@ func browserHTTPClientForProfile(proxy, profile string, timeout time.Duration) *
 	// PoW 的 navigator.language 保持一致，避免同一身份自报不同语言。
 	builder = builder.With(func(req *surf.Request) error {
 		req.GetRequest().Header.Set("Accept-Language", BrowserAcceptLanguage)
+		return nil
+	}, 1)
+
+	// clearance 兜底重放要换成签发 cf_clearance 的那个浏览器身份，否则凭证与 UA
+	// 不符等于没换。同优先级 1：必须排在 impersonate 之后，否则会被它改回去。
+	// clearance 兜底重放要换成签发 cf_clearance 的那个浏览器身份，否则凭证与 UA
+	// 不符等于没换。同优先级 1：必须排在 impersonate 之后，否则会被它改回去。
+	builder = builder.With(func(req *surf.Request) error {
+		for name, value := range IdentityOverrideFromContext(req.GetRequest().Context()) {
+			req.GetRequest().Header.Set(name, value)
+		}
 		return nil
 	}, 1)
 

@@ -12,7 +12,7 @@ import (
 // 因此覆盖集必须整套一致：UA 与 Sec-Ch-Ua* 同代，且不得残留账号指纹里的版本。
 func TestClearanceRequestHeadersReplaceWholeBrowserIdentity(t *testing.T) {
 	bundle := service.ClearanceBundle{UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7339.80 Safari/537.36"}
-	headers := clearanceRequestHeaders(bundle)
+	headers := service.ClearanceRequestHeaders(bundle)
 
 	if headers["User-Agent"] != bundle.UA {
 		t.Fatalf("User-Agent = %q, want the clearance UA", headers["User-Agent"])
@@ -39,7 +39,7 @@ func TestClearanceRequestHeadersReplaceWholeBrowserIdentity(t *testing.T) {
 // Chrome 就把身份写成 Google Chrome。
 func TestClearanceRequestHeadersDetectEdgeBrand(t *testing.T) {
 	bundle := service.ClearanceBundle{UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.3485.54"}
-	headers := clearanceRequestHeaders(bundle)
+	headers := service.ClearanceRequestHeaders(bundle)
 
 	if !strings.Contains(headers["Sec-Ch-Ua"], `"Microsoft Edge";v="140"`) {
 		t.Fatalf("Sec-Ch-Ua = %q, want the Edge brand", headers["Sec-Ch-Ua"])
@@ -53,9 +53,9 @@ func TestClearanceRequestHeadersDetectEdgeBrand(t *testing.T) {
 // 空 Sec-Ch-Ua 比不覆盖更容易识别：真实浏览器绝不会缺这一项。
 func TestClearanceRequestHeadersFallBackForUnparsableUA(t *testing.T) {
 	bundle := service.ClearanceBundle{UA: "Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0"}
-	headers := clearanceRequestHeaders(bundle)
+	headers := service.ClearanceRequestHeaders(bundle)
 
-	if headers["Sec-Ch-Ua"] != browserSecCHUA {
+	if headers["Sec-Ch-Ua"] != service.DefaultBrowserSecCHUA {
 		t.Fatalf("Sec-Ch-Ua = %q, want the repo constant for a UA without Chrome/Edge version", headers["Sec-Ch-Ua"])
 	}
 	if headers["User-Agent"] != bundle.UA {
@@ -65,7 +65,7 @@ func TestClearanceRequestHeadersFallBackForUnparsableUA(t *testing.T) {
 
 // 没有 UA 就没有可对齐的身份，此时必须完全不覆盖，而不是写空值。
 func TestClearanceRequestHeadersEmptyWithoutUA(t *testing.T) {
-	headers := clearanceRequestHeaders(service.ClearanceBundle{})
+	headers := service.ClearanceRequestHeaders(service.ClearanceBundle{})
 	if len(headers) != 0 {
 		t.Fatalf("headers = %v, want empty when the bundle has no UA", headers)
 	}
@@ -124,12 +124,12 @@ func TestIsClearanceChallengeResponse(t *testing.T) {
 			if tc.header != "" {
 				resp.Header.Set("cf-mitigated", tc.header)
 			}
-			if got := isClearanceChallengeResponse(resp); got != tc.want {
-				t.Fatalf("isClearanceChallengeResponse(%d, %q) = %v, want %v", tc.status, tc.header, got, tc.want)
+			if got := service.IsClearanceChallengeResponse(resp); got != tc.want {
+				t.Fatalf("service.IsClearanceChallengeResponse(%d, %q) = %v, want %v", tc.status, tc.header, got, tc.want)
 			}
 		})
 	}
-	if isClearanceChallengeResponse(nil) {
+	if service.IsClearanceChallengeResponse(nil) {
 		t.Fatal("nil response must not be treated as a challenge")
 	}
 }

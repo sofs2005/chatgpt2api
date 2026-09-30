@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,8 +176,8 @@ func TestBuildFingerprintUsesAccountFingerprint(t *testing.T) {
 		lookup: testAccountLookup{
 			"token-1": {
 				"fp": map[string]any{
-					"user-agent":     browserUserAgent,
-					"impersonate":    browserImpersonationProfile,
+					"user-agent":     service.DefaultBrowserUserAgent,
+					"impersonate":    service.DefaultBrowserImpersonationProfile,
 					"oai-device-id":  "device-1",
 					"oai-session-id": "session-1",
 				},
@@ -183,16 +185,16 @@ func TestBuildFingerprintUsesAccountFingerprint(t *testing.T) {
 		},
 	}
 	fp := client.buildFingerprint()
-	if fp["user-agent"] != browserUserAgent {
+	if fp["user-agent"] != service.DefaultBrowserUserAgent {
 		t.Fatalf("user-agent = %q", fp["user-agent"])
 	}
-	if fp["sec-ch-ua"] != browserSecCHUA {
+	if fp["sec-ch-ua"] != service.DefaultBrowserSecCHUA {
 		t.Fatalf("sec-ch-ua = %q", fp["sec-ch-ua"])
 	}
-	if fp["sec-ch-ua-full-version"] != browserSecCHUAFullVersion {
+	if fp["sec-ch-ua-full-version"] != service.DefaultBrowserSecCHUAFullVersion {
 		t.Fatalf("sec-ch-ua-full-version = %q", fp["sec-ch-ua-full-version"])
 	}
-	if fp["impersonate"] != browserImpersonationProfile {
+	if fp["impersonate"] != service.DefaultBrowserImpersonationProfile {
 		t.Fatalf("impersonate = %q", fp["impersonate"])
 	}
 	if fp["oai-device-id"] != "device-1" || fp["oai-session-id"] != "session-1" {
@@ -408,19 +410,19 @@ func TestOfficialImageHeadersIncludeSentinelAndConduitTokens(t *testing.T) {
 	client := &Client{
 		BaseURL:     "https://chatgpt.com",
 		AccessToken: "token-1",
-		userAgent:   browserUserAgent,
+		userAgent:   service.DefaultBrowserUserAgent,
 		deviceID:    "device-1",
 		sessionID:   "session-1",
 		fp: map[string]string{
-			"user-agent":                  browserUserAgent,
-			"sec-ch-ua":                   browserSecCHUA,
-			"sec-ch-ua-arch":              browserSecCHUAArch,
-			"sec-ch-ua-bitness":           browserSecCHUABitness,
-			"sec-ch-ua-full-version":      browserSecCHUAFullVersion,
-			"sec-ch-ua-full-version-list": browserSecCHUAFullVersionList,
-			"sec-ch-ua-mobile":            browserSecCHUAMobile,
-			"sec-ch-ua-platform":          browserSecCHUAPlatform,
-			"sec-ch-ua-platform-version":  browserSecCHUAPlatformVersion,
+			"user-agent":                  service.DefaultBrowserUserAgent,
+			"sec-ch-ua":                   service.DefaultBrowserSecCHUA,
+			"sec-ch-ua-arch":              service.DefaultBrowserSecCHUAArch,
+			"sec-ch-ua-bitness":           service.DefaultBrowserSecCHUABitness,
+			"sec-ch-ua-full-version":      service.DefaultBrowserSecCHUAFullVersion,
+			"sec-ch-ua-full-version-list": service.DefaultBrowserSecCHUAFullVersionList,
+			"sec-ch-ua-mobile":            service.DefaultBrowserSecCHUAMobile,
+			"sec-ch-ua-platform":          service.DefaultBrowserSecCHUAPlatform,
+			"sec-ch-ua-platform-version":  service.DefaultBrowserSecCHUAPlatformVersion,
 		},
 	}
 	headers := client.officialHeaders(officialStreamPath, ChatRequirements{
@@ -2004,6 +2006,84 @@ func (c clearanceTestConfig) ClearanceEnabled() bool       { return c.enabled }
 func (c clearanceTestConfig) FlareSolverrURL() string      { return c.url }
 func (c clearanceTestConfig) ClearanceTimeoutSeconds() int { return 60 }
 func (c clearanceTestConfig) ClearanceTTLSeconds() int     { return 3600 }
+
+// proxyTestConfig 是 ProxyConfig 的最小实现，用来拿到一个挂了 clearance 的 ProxyService。
+type proxyTestConfig struct{ proxy string }
+
+func (c proxyTestConfig) Proxy() string { return c.proxy }
+
+// 兜底重放必须真的换掉出站身份。
+//
+// surf 的 impersonate 中间件会在发送前把 UA 与 Sec-Ch-Ua 改回 profile 自己的值，
+// 在请求上直接 Set 会被静默丢弃。而 cf_clearance 绑定签发时的 UA，只回注 cookie
+// 而沿用旧 UA 会被上游判为凭证盗用——兜底会因此全程无效却无人察觉。
+//
+// 这里走真实的 surf client：用 server.Client() 会绕过 impersonate，测不出问题。
+func TestRetryWithFreshClearanceReplaysWithSolverIdentity(t *testing.T) {
+	const solverUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+	var solverCalls int32
+	solver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&solverCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","solution":{"userAgent":"` + solverUA + `","cookies":[{"name":"cf_clearance","value":"solved-cf","expires":0}]}}`))
+	}))
+	defer solver.Close()
+
+	var seenMu sync.Mutex
+	var seen []http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenMu.Lock()
+		seen = append(seen, r.Header.Clone())
+		n := len(seen)
+		seenMu.Unlock()
+		if n == 1 {
+			w.Header().Set("cf-mitigated", "challenge")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer upstream.Close()
+
+	client := newTestBackendClient(upstream)
+	fingerprintProxy := service.NewProxyService(proxyTestConfig{})
+	client.httpClient = fingerprintProxy.BrowserHTTPClientForProxy("", service.DefaultBrowserImpersonationProfile, 5*time.Second)
+	proxy := service.NewProxyService(proxyTestConfig{})
+	proxy.SetClearance(service.NewClearanceService(clearanceTestConfig{enabled: true, url: solver.URL}))
+	client.SetClearanceService(proxy.Clearance())
+
+	req, err := http.NewRequest(http.MethodGet, upstream.URL+"/backend-api/me", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	resp, err := client.do(req)
+	if err != nil {
+		t.Fatalf("do() error = %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if got := atomic.LoadInt32(&solverCalls); got != 1 {
+		t.Fatalf("flaresolverr calls = %d, want 1", got)
+	}
+	seenMu.Lock()
+	got := append([]http.Header(nil), seen...)
+	seenMu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("upstream requests = %d, want 2 (original + clearance replay)", len(got))
+	}
+	if ua := got[0].Get("User-Agent"); ua == solverUA {
+		t.Fatalf("first request already used the solver UA (%q); the test no longer proves the replay switched identity", ua)
+	}
+	if ua := got[1].Get("User-Agent"); ua != solverUA {
+		t.Fatalf("replay User-Agent = %q, want the solver UA %q", ua, solverUA)
+	}
+	if ch := got[1].Get("Sec-Ch-Ua"); !strings.Contains(ch, `"Google Chrome";v="131"`) {
+		t.Fatalf("replay Sec-Ch-Ua = %q, want client hints matching the solver UA", ch)
+	}
+}
 
 // 兜底被跳过时必须在日志里留下原因。此前两类放弃都静默返回，"没配置兜底"
 // 与"配了但没跑"在日志上完全一样，无法判断该去查配置还是查 FlareSolverr。

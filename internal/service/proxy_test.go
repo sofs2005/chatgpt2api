@@ -262,6 +262,70 @@ func identityMajorFromUserAgent(userAgent string) string {
 	return ""
 }
 
+// clearance 兜底重放必须真的换掉出站 UA 与 Sec-Ch-Ua。
+//
+// surf 的 impersonate 中间件优先级为 0，会在发送前把这两个头改回 profile 自己的值：
+// 调用方在请求上直接 Set 会被静默丢弃。而 cf_clearance 绑定签发时的 UA，
+// 只回注 cookie 而沿用旧 UA 会被上游判为凭证盗用——兜底会因此全程无效却无人察觉。
+func TestIdentityOverrideReachesTheWire(t *testing.T) {
+	var seenMu sync.Mutex
+	var seen http.Header
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenMu.Lock()
+		seen = r.Header.Clone()
+		seenMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	client := browserHTTPClientForProfile("", DefaultBrowserImpersonationProfile, 5*time.Second)
+
+	// 对照：直接 Set 头会被 impersonate 覆盖掉。
+	plain, err := http.NewRequest(http.MethodGet, target.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain.Header.Set("User-Agent", "PLAIN-UA/1.0")
+	resp, err := client.Do(plain)
+	if err != nil {
+		t.Fatalf("plain request failed: %v", err)
+	}
+	resp.Body.Close()
+	seenMu.Lock()
+	gotPlain := seen.Clone()
+	seenMu.Unlock()
+	if gotPlain.Get("User-Agent") != DefaultBrowserUserAgent {
+		t.Fatalf("precondition changed: plain Set reached the wire (%q); the override test no longer proves anything", gotPlain.Get("User-Agent"))
+	}
+
+	// 经 context 注入的身份覆盖必须穿透 impersonate。
+	ctx := WithIdentityOverride(context.Background(), map[string]string{
+		"User-Agent": "CLEARANCE-UA/1.0",
+		"Sec-Ch-Ua":  `"Clearance";v="9"`,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("User-Agent", DefaultBrowserUserAgent)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("override request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	seenMu.Lock()
+	got := seen.Clone()
+	seenMu.Unlock()
+	if ua := got.Get("User-Agent"); ua != "CLEARANCE-UA/1.0" {
+		t.Fatalf("User-Agent = %q, want the clearance UA to survive the impersonate middleware", ua)
+	}
+	if ch := got.Get("Sec-Ch-Ua"); ch != `"Clearance";v="9"` {
+		t.Fatalf("Sec-Ch-Ua = %q, want the clearance client hints", ch)
+	}
+}
+
 // identityMajorFromClientHint 从 Sec-Ch-Ua 中取指定品牌的版本。
 func identityMajorFromClientHint(secCHUA, brand string) string {
 	pattern := `"` + regexp.QuoteMeta(brand) + `";v="([0-9]+)`

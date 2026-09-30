@@ -1948,33 +1948,132 @@ func (s *AccountService) rememberSessionCookies(accessToken string, current map[
 
 // bootstrapRemote 执行刷新链路的 bootstrap（GET 上游首页），换取 CF 上下文。
 //
-// 复用 util.RetryBootstrap 的重试策略：403（Cloudflare 挑战）与 429 都是瞬时失败，
-// 退避重试比直接上报划算。此前这里一次失败就直接返回，而同样是一次 bootstrap 的
-// 生图链路有重试，导致同一个瞬时 403 在生图被吸收、在批量刷新却大面积误报失败。
+// 先用 util.RetryBootstrap 退避重试：403（Cloudflare 挑战）与 429 都是瞬时失败，
+// 退避重试比直接上报划算，且成本远低于浏览器求解。此前这里一次失败就直接返回，
+// 而同样是一次 bootstrap 的生图链路有重试，导致同一个瞬时 403 在生图被吸收、
+// 在批量刷新却大面积误报失败。
+//
+// 退避重试全部失败后，若确属 Cloudflare 挑战，再动用一次昂贵的兜底
+// （见 retryBootstrapWithFreshClearance）：挑战不是靠重试能自愈的，
+// 换一份 cf_clearance 才有可能。
 //
 // 这里不换账号：RefreshAccounts 的语义是「刷新这批指定的账号」，
 // 静默换成别的账号刷新没有意义。换号只在生图/对话这类要拿到结果的路径上成立。
 func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, error) {
-	var cookies map[string]string
+	cookies := sessionCookies
+	lastStatus := 0
+	var lastBody []byte
 	err := util.RetryBootstrap(ctx, func(attempt int) (error, bool) {
-		updated, status, err := s.bootstrapRemoteOnce(ctx, client, baseURL, accessToken, sessionCookies)
-		// 保留已刷新的 cookie：上游在挑战响应里也可能下发 __cf_bm 等新值，
-		// 丢掉会让重试仍用旧 cookie，重试就失去意义。
+		updated, status, body, err := s.bootstrapRemoteOnce(ctx, client, baseURL, accessToken, cookies)
+		// 回灌本次响应带出的 cookie：上游在挑战响应里也会下发 __cf_bm 等新值，
+		// 若下一次尝试仍用入口那份旧 cookie，重试就失去意义。
 		cookies = updated
+		lastStatus, lastBody = status, body
 		if err == nil {
 			return nil, false
 		}
 		return err, util.IsRetryableBootstrapStatus(status)
 	})
-	if err != nil {
+	if err == nil {
+		return cookies, nil
+	}
+	// 仅当这次失败确属 Cloudflare 挑战时才兜底：求解要经 FlareSolverr 开一次
+	// 真实浏览器，代价远高于退避重试，不该为普通的 404/网关错误付这份成本。
+	// 判定与 backend 同源（同一个 helper），避免两条链路的挑战语义漂移。
+	if !IsClearanceChallengeResponse(statusResponse(lastStatus, lastBody)) {
 		return cookies, err
 	}
-	return cookies, nil
+	updated, fallbackErr := s.retryBootstrapWithFreshClearance(ctx, client, baseURL, accessToken, cookies)
+	if fallbackErr != nil {
+		// 兜底失败仍上报原始错误：它是上游的真实回应，兜底只是尽力而为的补救。
+		return updated, err
+	}
+	return updated, nil
+}
+
+// retryBootstrapWithFreshClearance 用该账号出口现取一份 cf_clearance，
+// 并以 FlareSolverr 实际使用的 UA 重放一次 bootstrap。
+//
+// 挑战判定绑定出口 IP 与浏览器指纹，因此这里既不换出口也不换账号：用别的出口
+// 求解等于拿到一张当场作废的凭证。同理只覆盖本次重放的请求头，不写回账号持久
+// 指纹——FlareSolverr 的 UA 是浏览器容器的实际版本，写回会让账号长期自报一个与
+// TLS 指纹（surf chrome145/firefox148）不匹配的版本，把一次性修复变成长期撕裂。
+//
+// 身份覆盖走 WithIdentityOverride 而不是在请求上 Set 头：surf 的 impersonate
+// 中间件会在发送前把 UA 与 Sec-Ch-Ua 改回 profile 自己的值，直接 Set 会被静默丢弃。
+//
+// 只重放一次，不再二次兜底，避免与上游来回拉锯（与生图链路 backend 的策略一致）。
+func (s *AccountService) retryBootstrapWithFreshClearance(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, error) {
+	clearance := s.proxy.Clearance()
+	// 未部署 FlareSolverr 时 Enabled() 为 false，此时行为与引入兜底之前完全一致。
+	if clearance == nil || !clearance.Enabled() {
+		return sessionCookies, fmt.Errorf("clearance disabled")
+	}
+	// 出口必须与触发挑战的那次请求同源，否则新凭证签发 IP 与请求出口不符，当场作废。
+	proxyURL := s.proxy.EgressProxy(AccountProxy(s.GetAccount(accessToken)))
+	bundle, err := clearance.Refresh(ctx, proxyURL)
+	if err != nil {
+		return sessionCookies, err
+	}
+	// 凭证必须先落到本次请求上：重放若仍带着旧的 cf_clearance，等于没换。
+	sessionCookies = s.rememberClearanceCookies(accessToken, sessionCookies, bundle)
+	updated, _, _, err := s.bootstrapRemoteOnce(WithIdentityOverride(ctx, ClearanceRequestHeaders(bundle)), client, baseURL, accessToken, sessionCookies)
+	if updated == nil {
+		updated = sessionCookies
+	}
+	return updated, err
+}
+
+// rememberClearanceCookies 把解出的 CF 凭证并入账号的 session cookie。
+//
+// 必须同时写入 session_cookie_updated_at：AccountSessionCookiesForRequest 会按
+// 时间窗口丢弃过期的挑战凭证，缺时间戳的凭证在下一次请求就会被丢掉。
+func (s *AccountService) rememberClearanceCookies(accessToken string, current map[string]string, bundle ClearanceBundle) map[string]string {
+	values := bundle.ClearanceCookieValues()
+	if len(values) == 0 {
+		return current
+	}
+	merged := map[string]string{}
+	for name, value := range current {
+		merged[name] = value
+	}
+	for name, value := range values {
+		merged[name] = value
+	}
+	updates := map[string]any{"session_cookies": merged}
+	// 时间戳整份重建，而不是在已有记录上叠加：SessionCookieStringMap 对 nil
+	// 输入返回 nil，在 nil map 上写键会 panic。
+	updatedAt := SessionCookieStringMap(s.GetAccount(accessToken)["session_cookie_updated_at"])
+	if updatedAt == nil {
+		updatedAt = map[string]string{}
+	}
+	for name, value := range SessionCookieUpdatedAtForCookies(values, time.Now()) {
+		updatedAt[name] = value
+	}
+	updates["session_cookie_updated_at"] = updatedAt
+	s.UpdateAccount(accessToken, updates)
+	return merged
+}
+
+// statusResponse 用已读出的状态码拼一个最小响应，供挑战判定复用。
+//
+// 判定必须与 backend 同源：两条链路各写一份「什么算挑战」，迟早会漂移成
+// 「生图认、刷新不认」这类只在一边出现的误判。刷新链路为复用该 helper 而丢掉
+// 了响应头，这里补回空头，剩余的判定依据（状态码与响应体）已在手上。
+func statusResponse(status int, body []byte) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(body)),
+	}
 }
 
 // bootstrapRemoteOnce 执行一次 bootstrap。
-// 返回本次响应后应当持有的 session cookie，以及上游状态码（传输层失败为 0）。
-func (s *AccountService) bootstrapRemoteOnce(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, int, error) {
+//
+// 出站身份来自 ctx：账号自身的 bootstrap 头，若 ctx 带身份覆盖集（clearance
+// 兜底重放）则由代理 client 在 impersonate 之后覆写。
+// 返回本次响应后应当持有的 session cookie、上游状态码（传输层失败为 0）与响应体。
+func (s *AccountService) bootstrapRemoteOnce(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, int, []byte, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/", nil)
 	for key, value := range s.remoteBootstrapHeaders(accessToken) {
 		req.Header.Set(key, value)
@@ -1982,15 +2081,15 @@ func (s *AccountService) bootstrapRemoteOnce(ctx context.Context, client *http.C
 	addSessionCookiesToRequest(req, sessionCookies)
 	resp, err := client.Do(req)
 	if err != nil {
-		return sessionCookies, 0, err
+		return sessionCookies, 0, nil, err
 	}
 	sessionCookies = s.rememberSessionCookies(accessToken, sessionCookies, resp)
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return sessionCookies, resp.StatusCode, refreshHTTPError("bootstrap", resp.StatusCode, data)
+		return sessionCookies, resp.StatusCode, data, refreshHTTPError("bootstrap", resp.StatusCode, data)
 	}
-	return sessionCookies, resp.StatusCode, nil
+	return sessionCookies, resp.StatusCode, data, nil
 }
 
 // StartAccountRefreshWatcher 起一个周期任务，主动续期「限流已到恢复时间」与

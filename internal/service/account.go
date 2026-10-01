@@ -847,6 +847,13 @@ func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常"})
 			return
 		}
+		// 上游可能返回 200 却给出同一个旧的 accessToken。若直接把它写成「正常」，
+		// 这个账号就再也不会被自动续期盯上（refreshableExpiredToken 只挑过期的），
+		// 而它的 token 依旧过期——实时请求会一直失败。因此按可用性判定。
+		if !sessionRefreshAccepted(data, time.Now()) {
+			s.UpdateAccount(accessToken, map[string]any{"status": "异常"})
+			return
+		}
 		s.RefreshAccountViaSession(accessToken, data)
 	}()
 }
@@ -1422,6 +1429,25 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			}
 			continue
 		}
+		// 续期请求成功不等于换到了新 token：上游可能返回 200 却给出同一个旧的
+		// accessToken（session 已失效时就是这样）。按可用性判定，别把它记成成功。
+		if !sessionRefreshAccepted(data, time.Now()) {
+			s.UpdateAccount(item.accessToken, map[string]any{"status": "异常"})
+			failedRefreshCount++
+			message := "token刷新失败: 上游未换发新 token，session 可能已失效"
+			errors = append(errors, map[string]string{
+				"account_id":   accountIDFromToken(item.accessToken),
+				"access_token": item.accessToken,
+				"error":        message,
+			})
+			if detail != nil {
+				detail["status"] = "error"
+				detail["message"] = message
+				detail["error"] = message
+				detail["account_status"] = "异常"
+			}
+			continue
+		}
 		newAccessToken := data.AccessToken
 		if !s.RefreshAccountViaSession(item.accessToken, data) {
 			failedRefreshCount++
@@ -1599,6 +1625,21 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 		return "检测到限流", true
 	}
 	return message, false
+}
+
+// sessionRefreshAccepted 判断一次续期结果是否真的可用。
+//
+// 判据是「拿到的 token 能用」，而不是「请求返回了 200」：/api/auth/session 在
+// session 仍然有效时返回当前 token，在 session 已失效时同样可能返回 200 加一个
+// 旧的 accessToken——两种情况响应形状一样。把后者当成续期成功，账号会被标成
+// 正常而 token 依旧过期：自动续期此后不再管它（refreshableExpiredToken 只挑
+// 过期的），实时请求则一直失败。
+func sessionRefreshAccepted(data SessionRefreshData, now time.Time) bool {
+	token := util.Clean(data.AccessToken)
+	if token == "" {
+		return false
+	}
+	return !tokenExpired(token, now, tokenExpirySkew)
 }
 
 // RefreshAccountViaSession updates account data after a successful session refresh.

@@ -3692,3 +3692,64 @@ func TestRefreshAccountsKeepsRotatedSessionCookie(t *testing.T) {
 		t.Fatalf("post-renewal /backend-api/me lost the device cookie: %q", after)
 	}
 }
+
+// 上游在 session 已失效时也会返回 200，但给出的还是原来那个（已过期的）
+// accessToken。此前这条链路只看「请求成没成功」，于是把这种空转换记成续期成功：
+// 账号被标成正常，而 token 依旧过期——自动续期此后不再管它（refreshableExpiredToken
+// 只挑过期的），实时请求则一直失败。用户看到的就是「刷新成功 1 个」加上一句
+// 额度拉取失败，而账号 JWT 的 exp 根本没动。
+func TestRefreshAccountsRejectsUnchangedExpiredToken(t *testing.T) {
+	expired := testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			// 续期没换到新 token，这一跳注定 401。
+			w.WriteHeader(http.StatusUnauthorized)
+			writeJSON(t, w, map[string]any{"detail": "authentication token is expired"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.refresher = NewSessionRefresher(func(*http.Request) (*http.Response, error) {
+		// 200，但 accessToken 与请求里那个一模一样。
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"` + expired + `","sessionToken":"same-session","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{expired})
+	accounts.UpdateAccount(expired, map[string]any{
+		"status":        "过期待刷新",
+		"quota":         5,
+		"session_token": "refresh-session-token",
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{expired})
+	if result["session_refreshed"] != 0 {
+		t.Fatalf("session_refreshed = %#v, want 0: an unchanged token is not a renewal", result["session_refreshed"])
+	}
+	if result["failed"] != 1 {
+		t.Fatalf("failed = %#v, want the no-op renewal reported as a failure", result["failed"])
+	}
+	// 账号不能被标成正常：标正常就等于把它从自动续期里摘出去，
+	// 而它的 token 仍然过期。
+	if account := accounts.GetAccount(expired); util.Clean(account["status"]) != "异常" {
+		t.Fatalf("status = %#v, want 异常 so the account stays visible as broken", account["status"])
+	}
+	// 也不能悄悄把 access_token 换成同一个值还宣称刷新过。
+	errors, _ := result["errors"].([]map[string]string)
+	if len(errors) != 1 || !strings.Contains(errors[0]["error"], "未换发新 token") {
+		t.Fatalf("errors = %#v, want the no-rotation reason surfaced", result["errors"])
+	}
+}

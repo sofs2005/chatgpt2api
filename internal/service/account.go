@@ -1269,10 +1269,11 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 	startedAt := time.Now()
 	pendingRefresh := []pendingRefreshItem{}
 	type result struct {
-		token    string
-		info     map[string]any
-		err      error
-		duration time.Duration
+		token     string
+		info      map[string]any
+		err       error
+		duration  time.Duration
+		clearance ClearanceOutcome
 	}
 	workers := len(tokens)
 	if workers > 10 {
@@ -1287,8 +1288,8 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			defer wg.Done()
 			for token := range jobs {
 				started := time.Now()
-				info, err := s.FetchRemoteInfo(ctx, token)
-				results <- result{token: token, info: info, err: err, duration: time.Since(started)}
+				info, clearance, err := s.fetchRemoteInfo(ctx, token)
+				results <- result{token: token, info: info, err: err, duration: time.Since(started), clearance: clearance}
 			}
 		}()
 	}
@@ -1318,6 +1319,23 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			"success":       false,
 			"status":        "error",
 			"duration_ms":   res.duration.Milliseconds(),
+		}
+		// 兜底结果必须逐账号记录，而不是只汇总一个总数：同一批刷新里可能有的账号
+		// 解开了、有的没配置、有的求解报错，出口也各不相同（cf_clearance 绑定签发
+		// IP，出问题时第一个要看的就是解的是哪个出口）。
+		if res.clearance.Attempted || res.clearance.Skipped != "" || res.clearance.Error != "" {
+			clearance := map[string]any{
+				"attempted": res.clearance.Attempted,
+				"solved":    res.clearance.Solved,
+				"proxy":     res.clearance.Proxy,
+			}
+			if res.clearance.Skipped != "" {
+				clearance["skipped"] = res.clearance.Skipped
+			}
+			if res.clearance.Error != "" {
+				clearance["error"] = res.clearance.Error
+			}
+			detail["clearance"] = clearance
 		}
 		detailsByToken[token] = detail
 		if res.err == nil {
@@ -1742,19 +1760,28 @@ type remoteAccountClient struct {
 }
 
 func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {
-	remote, err := s.newRemoteAccountClient(ctx, accessToken, 30*time.Second)
+	info, _, err := s.fetchRemoteInfo(ctx, accessToken)
+	return info, err
+}
+
+// fetchRemoteInfo 是 FetchRemoteInfo 的内部实现，额外回报这次 bootstrap 的 CF 兜底结果。
+//
+// 兜底发生在 bootstrap 阶段，而刷新结果要等到整条链路跑完才组装，中间还隔着两次
+// doJSON，因此只能由这里把它带出去，不能等到出错时再回头去问。
+func (s *AccountService) fetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, ClearanceOutcome, error) {
+	remote, clearance, err := s.newRemoteAccountClient(ctx, accessToken, 30*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, clearance, err
 	}
 	me, err := remote.doJSON(http.MethodGet, "/backend-api/me", nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, clearance, err
 	}
 	init, err := remote.doJSON(http.MethodPost, "/backend-api/conversation/init", map[string]any{
 		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": util.OutboundTimeZoneOffsetMinutes(time.Now()),
 	}, nil)
 	if err != nil {
-		return nil, err
+		return nil, clearance, err
 	}
 	accessToken = util.Clean(accessToken)
 	limits := anyList(init["limits_progress"])
@@ -1786,7 +1813,7 @@ func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string
 		"default_model_slug":        init["default_model_slug"],
 		"restore_at":                restoreAt,
 		"status":                    status,
-	}, nil
+	}, clearance, nil
 }
 
 func (s *AccountService) RunUpstreamAccountActions(ctx context.Context, accessTokens []string, options UpstreamAccountActionOptions) map[string]any {
@@ -1808,7 +1835,7 @@ func (s *AccountService) RunUpstreamAccountActions(ctx context.Context, accessTo
 			"actions":       map[string]any{},
 		}
 		actions := detail["actions"].(map[string]any)
-		remote, err := s.newRemoteAccountClient(ctx, token, 60*time.Second)
+		remote, _, err := s.newRemoteAccountClient(ctx, token, 60*time.Second)
 		if err == nil && options.DisableMemory {
 			actions["disable_memory"], err = remote.disableMemory()
 		}
@@ -1846,10 +1873,10 @@ func (s *AccountService) RunUpstreamAccountActions(ctx context.Context, accessTo
 	}
 }
 
-func (s *AccountService) newRemoteAccountClient(ctx context.Context, accessToken string, timeout time.Duration) (*remoteAccountClient, error) {
+func (s *AccountService) newRemoteAccountClient(ctx context.Context, accessToken string, timeout time.Duration) (*remoteAccountClient, ClearanceOutcome, error) {
 	accessToken = util.Clean(accessToken)
 	if accessToken == "" {
-		return nil, fmt.Errorf("access_token is required")
+		return nil, ClearanceOutcome{}, fmt.Errorf("access_token is required")
 	}
 	baseURL := strings.TrimRight(firstNonEmpty(s.remoteBaseURL, "https://chatgpt.com"), "/")
 	client := s.browserHTTPClient(AccountProxy(s.GetAccount(accessToken)), s.remoteImpersonation(accessToken), timeout)
@@ -1857,11 +1884,13 @@ func (s *AccountService) newRemoteAccountClient(ctx context.Context, accessToken
 		client = &http.Client{Timeout: timeout}
 	}
 	sessionCookies := s.accountSessionCookies(accessToken)
-	updatedCookies, err := s.bootstrapRemote(ctx, client, baseURL, accessToken, sessionCookies)
+	updatedCookies, clearance, err := s.bootstrapRemote(ctx, client, baseURL, accessToken, sessionCookies)
+	// 失败路径同样要把兜底结果带出去：挑战失败恰恰是最需要它的时候，
+	// 只返回 err 会让「没配 FlareSolverr」和「求解报错」都退化成一句失败。
 	if err != nil {
-		return nil, err
+		return nil, clearance, err
 	}
-	return &remoteAccountClient{ctx: ctx, baseURL: baseURL, headers: s.remoteHeaders(accessToken), client: client, service: s, accessToken: accessToken, sessionCookies: updatedCookies}, nil
+	return &remoteAccountClient{ctx: ctx, baseURL: baseURL, headers: s.remoteHeaders(accessToken), client: client, service: s, accessToken: accessToken, sessionCookies: updatedCookies}, clearance, nil
 }
 
 func (c *remoteAccountClient) doJSON(method, urlPath string, body any, extra map[string]string) (map[string]any, error) {
@@ -2050,10 +2079,11 @@ func (s *AccountService) rememberSessionCookies(accessToken string, current map[
 //
 // 这里不换账号：RefreshAccounts 的语义是「刷新这批指定的账号」，
 // 静默换成别的账号刷新没有意义。换号只在生图/对话这类要拿到结果的路径上成立。
-func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, error) {
+func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, ClearanceOutcome, error) {
 	cookies := sessionCookies
 	lastStatus := 0
 	var lastBody []byte
+	var clearance ClearanceOutcome
 	err := util.RetryBootstrap(ctx, func(attempt int) (error, bool) {
 		updated, status, body, err := s.bootstrapRemoteOnce(ctx, client, baseURL, accessToken, cookies)
 		// 回灌本次响应带出的 cookie：上游在挑战响应里也会下发 __cf_bm 等新值，
@@ -2066,20 +2096,24 @@ func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Clien
 		return err, util.IsRetryableBootstrapStatus(status)
 	})
 	if err == nil {
-		return cookies, nil
+		return cookies, clearance, nil
 	}
 	// 仅当这次失败确属 Cloudflare 挑战时才兜底：求解要经 FlareSolverr 开一次
 	// 真实浏览器，代价远高于退避重试，不该为普通的 404/网关错误付这份成本。
 	// 判定与 backend 同源（同一个 helper），避免两条链路的挑战语义漂移。
 	if !IsClearanceChallengeResponse(statusResponse(lastStatus, lastBody)) {
-		return cookies, err
+		return cookies, clearance, err
 	}
-	updated, fallbackErr := s.retryBootstrapWithFreshClearance(ctx, client, baseURL, accessToken, cookies)
+	// 这里必须用 = 而不是 :=：:= 会另起一个局部 clearance，把兜底结果挡在这个
+	// 函数里，调用方读到的永远是零值。
+	var updated map[string]string
+	var fallbackErr error
+	updated, clearance, fallbackErr = s.retryBootstrapWithFreshClearance(ctx, client, baseURL, accessToken, cookies)
 	if fallbackErr != nil {
 		// 兜底失败仍上报原始错误：它是上游的真实回应，兜底只是尽力而为的补救。
-		return updated, err
+		return updated, clearance, err
 	}
-	return updated, nil
+	return updated, clearance, nil
 }
 
 // retryBootstrapWithFreshClearance 用该账号出口现取一份 cf_clearance，
@@ -2094,17 +2128,22 @@ func (s *AccountService) bootstrapRemote(ctx context.Context, client *http.Clien
 // 中间件会在发送前把 UA 与 Sec-Ch-Ua 改回 profile 自己的值，直接 Set 会被静默丢弃。
 //
 // 只重放一次，不再二次兜底，避免与上游来回拉锯（与生图链路 backend 的策略一致）。
-func (s *AccountService) retryBootstrapWithFreshClearance(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, error) {
+//
+// 返回值里的 ClearanceOutcome 让调用方能把这次兜底写进日志：解开了、用的是缓存、
+// 还是压根没启用，此前三者都只表现为「刷新失败」，运维看不出区别。
+func (s *AccountService) retryBootstrapWithFreshClearance(ctx context.Context, client *http.Client, baseURL, accessToken string, sessionCookies map[string]string) (map[string]string, ClearanceOutcome, error) {
 	clearance := s.proxy.Clearance()
 	// 未部署 FlareSolverr 时 Enabled() 为 false，此时行为与引入兜底之前完全一致。
+	// 但「撞上挑战却没有兜底」和「压根没撞上挑战」在日志里必须分得开：前者要去看
+	// .env，后者什么都不用做，而两者的表现都是「刷新失败」。
 	if clearance == nil || !clearance.Enabled() {
-		return sessionCookies, fmt.Errorf("clearance disabled")
+		return sessionCookies, ClearanceOutcome{Skipped: "clearance disabled"}, fmt.Errorf("clearance disabled")
 	}
 	// 出口必须与触发挑战的那次请求同源，否则新凭证签发 IP 与请求出口不符，当场作废。
 	proxyURL := s.proxy.EgressProxy(AccountProxy(s.GetAccount(accessToken)))
-	bundle, err := clearance.Refresh(ctx, proxyURL)
+	bundle, outcome, err := clearance.RefreshWithOutcome(ctx, proxyURL)
 	if err != nil {
-		return sessionCookies, err
+		return sessionCookies, outcome, err
 	}
 	// 凭证必须先落到本次请求上：重放若仍带着旧的 cf_clearance，等于没换。
 	sessionCookies = s.rememberClearanceCookies(accessToken, sessionCookies, bundle)
@@ -2112,7 +2151,7 @@ func (s *AccountService) retryBootstrapWithFreshClearance(ctx context.Context, c
 	if updated == nil {
 		updated = sessionCookies
 	}
-	return updated, err
+	return updated, outcome, err
 }
 
 // rememberClearanceCookies 把解出的 CF 凭证并入账号的 session cookie。

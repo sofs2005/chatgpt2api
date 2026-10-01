@@ -55,6 +55,7 @@ import {
   toggleAccountsEnabled,
   updateAccount,
   type Account,
+  type AccountRefreshResult,
   type AccountStatus,
   type AccountType,
   type UpstreamAccountActionOptions,
@@ -251,6 +252,35 @@ function maskToken(token?: string) {
   if (!token) return "—";
   if (token.length <= 18) return token;
   return `${token.slice(0, 16)}...${token.slice(-8)}`;
+}
+
+// describeClearance 把逐账号的 CF 兜底结果汇成一句提示。
+//
+// 「有几个账号被 CF 拦」回答不了「那兜底跑了没有」：没配 FlareSolverr、求解报错、
+// 解开了但仍被拦，三种情况都只是「失败 N 个」。这里按后端记录的 clearance 分开说，
+// 并直接给出下一步——没配的去查 .env，求解报错的是 FlareSolverr 那边的问题。
+function describeClearance(results: AccountRefreshResult[]) {
+  const outcomes = results
+    .map((item) => item.clearance)
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  if (outcomes.length === 0) return "";
+  const attempted = outcomes.filter((item) => item.attempted);
+  if (attempted.length === 0) {
+    const skipped = outcomes.find((item) => item.skipped)?.skipped;
+    return skipped ? `，CF 兜底未启用（${skipped}），请检查 FlareSolverr 配置` : "";
+  }
+  const solved = attempted.filter((item) => item.solved).length;
+  const failed = attempted.filter((item) => item.error);
+  // 求解失败时把原因带出来：只说「兜底失败」等于没说，得能看出是 FlareSolverr
+  // 不可达还是它自己返回了错误。
+  const error = failed[0]?.error;
+  const proxy = attempted[0]?.proxy;
+  const parts = [
+    solved > 0 ? `${solved} 个已用 FlareSolverr 解出 cf_clearance` : "已复用缓存的 cf_clearance",
+    proxy ? `出口 ${proxy}` : "",
+    error ? `另有 ${failed.length} 个求解失败：${error}` : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? `，CF 兜底：${parts.join("，")}` : "";
 }
 
 function accountTokenLabel(account: Account) {
@@ -496,8 +526,12 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
         const cfHint = cfChallengeCount > 0
           ? `其中 ${cfChallengeCount} 个是 Cloudflare 拦截（出口 IP 或指纹问题，账号本身未失效）`
           : "";
+        // 挑战计数只说「有几个被拦」，说不出兜底有没有真的跑过：没配 FlareSolverr、
+        // 求解报错、解开了但还是被拦，三种情况在这个提示里长得一模一样。
+        // 按后端逐账号记录的 clearance 结果补一句，直接指明下一步该做什么。
+        const clearanceHint = describeClearance(data.results);
         toast.error(
-          `刷新成功 ${succeeded} 个${sessionHint}，失败 ${data.errors.length} 个${cfHint ? `，${cfHint}` : firstError ? `，首个错误：${firstError}` : ""}${staleHint}`,
+          `刷新成功 ${succeeded} 个${sessionHint}，失败 ${data.errors.length} 个${cfHint ? `，${cfHint}` : firstError ? `，首个错误：${firstError}` : ""}${clearanceHint}${staleHint}`,
         );
       } else if (succeeded > 0) {
         if (staleInfo > 0) {

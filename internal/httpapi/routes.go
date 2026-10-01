@@ -1251,9 +1251,27 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		//
 		// 抑制审计行会连带丢掉它原本记下的 response_body（失败原因就在里面），
 		// 所以把失败账号与首个错误一并带进这条业务日志。
+		//
+		// CF 兜底同样必须落进来：它整条路径都在 service 层静默 return，日志里看不出
+		// 「没配 FlareSolverr」「命中了缓存」「真解了一次」「求解报错」的区别，而这四种
+		// 情况的表现完全一样——都是刷新失败。用户报的正是「有 FlareSolverr 却没地方看」。
 		refreshed := util.ToInt(result["refreshed"], 0) + util.ToInt(result["session_refreshed"], 0)
 		failed := util.ToInt(result["failed"], 0)
 		extra := map[string]any{"token_previews": accountTokenPreviews(tokens)}
+		clearance := summarizeClearance(result)
+		if clearance.Attempted {
+			extra["clearance_attempted"] = true
+			extra["clearance_solved"] = clearance.Solved
+			if clearance.Proxy != "" {
+				extra["clearance_proxy"] = clearance.Proxy
+			}
+		}
+		if clearance.Skipped != "" {
+			extra["clearance_skipped"] = clearance.Skipped
+		}
+		if clearance.Error != "" {
+			extra["clearance_error"] = clearance.Error
+		}
 		if failed > 0 {
 			failedAccounts := make([]string, 0, failed)
 			if errors, ok := result["errors"].([]map[string]string); ok {
@@ -1361,6 +1379,41 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// summarizeClearance 把刷新结果里逐账号的 CF 兜底信息汇成日志可读的一条。
+//
+// 只看「有没有 Error」是不够的：命中缓存与现解一次都是成功路径，但成本差着
+// 一次真实浏览器；未启用则压根没尝试。因此分别给出 attempted / solved / error，
+// 并带上出口——cf_clearance 绑定签发 IP，排查时第一个要看的就是解的是哪个出口。
+func summarizeClearance(result map[string]any) service.ClearanceOutcome {
+	var out service.ClearanceOutcome
+	items, ok := result["results"].([]map[string]any)
+	if !ok {
+		return out
+	}
+	for _, item := range items {
+		raw, ok := item["clearance"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if skipped := util.Clean(raw["skipped"]); skipped != "" {
+			out.Skipped = skipped
+		}
+		if !util.ToBool(raw["attempted"]) {
+			continue
+		}
+		out.Attempted = true
+		out.Solved = out.Solved || util.ToBool(raw["solved"])
+		if out.Proxy == "" {
+			out.Proxy = util.Clean(raw["proxy"])
+		}
+		// 只留第一条错误：同出口的失败原因通常一致，逐条罗列会把日志撑爆。
+		if out.Error == "" {
+			out.Error = util.Clean(raw["error"])
+		}
+	}
+	return out
 }
 
 // accountTokenPreviews renders account identifiers for the log detail without

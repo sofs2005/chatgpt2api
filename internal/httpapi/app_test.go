@@ -2113,6 +2113,106 @@ func TestAccountRefreshEndpointLogsFailures(t *testing.T) {
 	}
 }
 
+// 撞上挑战却没有 FlareSolverr 可用时，日志必须点名这件事。
+//
+// 这条走的是真实的 RefreshAccounts→summarizeClearance 链路，而不是手搓的 map：
+// 两边的 key（detail 里的 clearance 子对象、汇总后的 clearance_skipped）只要有一处
+// 对不上，日志就会静默退回「只有一句失败」，而单测各自都能过。
+func TestAccountRefreshEndpointLogsClearanceSkipped(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	// 全程 403 + CF 挑战页：退避重试耗尽后进入兜底，而测试环境没有配 FlareSolverr。
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<html><script>window._cf_chl_opt={}</script>Enable JavaScript and cookies to continue</html>`))
+	}))
+	defer upstream.Close()
+	setAccountServiceRemoteBaseURL(t, app.accounts, upstream.URL)
+
+	app.accounts.AddAccounts([]string{"token-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/refresh", strings.NewReader(`{"account_ids":["`+util.SHA1Short("token-1", 16)+`"]}`))
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body = %s", res.Code, res.Body.String())
+	}
+
+	items := app.logs.Search(service.LogQuery{Limit: 20, View: service.LogViewAll})
+	log := findLogBySummary(items, "刷新 1 个账号，成功 0 个，失败 1 个")
+	if log == nil {
+		t.Fatalf("challenged refresh should still leave a log, got %#v", logPayloadSummaries(items))
+	}
+	detail, _ := log["detail"].(map[string]any)
+	if got := util.Clean(detail["clearance_skipped"]); got != "clearance disabled" {
+		t.Fatalf("clearance_skipped = %q, want the disabled reason: %#v", got, detail)
+	}
+	// 没尝试过兜底就不该报 attempted，否则日志会把「没配」说成「配了但没解开」。
+	if util.ToBool(detail["clearance_attempted"]) {
+		t.Fatalf("clearance_attempted should stay false when clearance is disabled: %#v", detail)
+	}
+}
+
+// 刷新链路没撞上挑战时不该写任何 clearance 字段：否则日志页每一条刷新都挂着
+// 「兜底未触发」，等于把噪声当成常态，真出问题时反而看不出来。
+func TestSummarizeClearanceStaysEmptyWithoutChallenge(t *testing.T) {
+	result := map[string]any{"results": []map[string]any{{"account_id": "a"}, {"account_id": "b"}}}
+	if got := summarizeClearance(result); got.Attempted || got.Solved || got.Skipped != "" || got.Error != "" {
+		t.Fatalf("summarizeClearance() = %#v, want a zero outcome", got)
+	}
+}
+
+// 撞上挑战却没有 FlareSolverr 可用，与「压根没撞上挑战」必须分得开：
+// 前者要去看 .env，后者什么都不用做，而两者在刷新结果里都只是「失败」。
+func TestSummarizeClearanceReportsSkipped(t *testing.T) {
+	result := map[string]any{"results": []map[string]any{{
+		"clearance": map[string]any{"attempted": false, "solved": false, "skipped": "clearance disabled"},
+	}}}
+	got := summarizeClearance(result)
+	if got.Attempted {
+		t.Fatalf("summarizeClearance() = %#v, want attempted=false", got)
+	}
+	if got.Skipped != "clearance disabled" {
+		t.Fatalf("summarizeClearance() skipped = %q, want the disabled reason", got.Skipped)
+	}
+}
+
+// 一批里只要有一个账号真的解开了，汇总就该报 solved，并带上求解用的出口：
+// cf_clearance 绑定签发 IP，出问题时第一个要看的就是解的是哪个出口。
+func TestSummarizeClearanceAggregatesSolveAndError(t *testing.T) {
+	result := map[string]any{"results": []map[string]any{
+		{"clearance": map[string]any{"attempted": true, "solved": false, "proxy": "socks5://a:1080", "error": "flaresolverr status=500"}},
+		{"clearance": map[string]any{"attempted": true, "solved": true, "proxy": "socks5://b:1080"}},
+	}}
+	got := summarizeClearance(result)
+	if !got.Attempted || !got.Solved {
+		t.Fatalf("summarizeClearance() = %#v, want attempted and solved", got)
+	}
+	if got.Proxy != "socks5://a:1080" {
+		t.Fatalf("summarizeClearance() proxy = %q, want the first solving exit", got.Proxy)
+	}
+	if got.Error != "flaresolverr status=500" {
+		t.Fatalf("summarizeClearance() error = %q", got.Error)
+	}
+}
+
+// 命中的是缓存时不能报成「现解了一次」：两者都是成功路径，
+// 但一个只是内存查找，一个开了真实浏览器，混为一谈就无从判断兜底的真实成本。
+func TestSummarizeClearanceCacheHitIsNotSolved(t *testing.T) {
+	result := map[string]any{"results": []map[string]any{{
+		"clearance": map[string]any{"attempted": true, "solved": false, "proxy": "socks5://a:1080"},
+	}}}
+	got := summarizeClearance(result)
+	if !got.Attempted || got.Solved {
+		t.Fatalf("summarizeClearance() = %#v, want attempted without solved", got)
+	}
+	if got.Error != "" {
+		t.Fatalf("summarizeClearance() error = %q, want empty for a cache hit", got.Error)
+	}
+}
+
 func TestRedactAccountPayloadCoversRefreshResults(t *testing.T) {
 	app := newTestApp(t)
 	defer app.Close()

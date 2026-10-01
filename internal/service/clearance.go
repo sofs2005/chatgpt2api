@@ -155,6 +155,56 @@ func (s *ClearanceService) Invalidate(proxyURL, host string) {
 	s.mu.Unlock()
 }
 
+// ClearanceOutcome 描述一次 cf_clearance 兜底的结果。
+//
+// 兜底有三个成本与含义都不同的分支：未启用（没配 FlareSolverr）、命中缓存（复用
+// 未过期的凭证）、现解一次（真的开了浏览器）。三者最终都表现为「还是 Cloudflare
+// 挑战」，但处置方式完全不同，只报「兜底失败」等于什么也没说。
+type ClearanceOutcome struct {
+	// Attempted 为真表示确实动用了兜底（含命中缓存）。
+	Attempted bool
+	// Solved 为真表示这次现解了一次，即 FlareSolverr 真的被调用且求解成功。
+	Solved bool
+	// Skipped 记录「撞上挑战却没有兜底」的原因；为空表示不存在这种情况。
+	// 它与 Attempted=false 不是一回事：后者可能只是根本没触发过挑战。
+	Skipped string
+	// Proxy 是本次求解使用的出口，已脱敏。cf_clearance 绑定签发 IP，
+	// 排查时必须知道解的是哪个出口。
+	Proxy string
+	// Error 是求解失败的原因；为空表示求解成功或未求解。
+	Error string
+}
+
+// CachedClearance 报告该出口是否已有未过期的 cf_clearance。
+//
+// 命中缓存与现解一次对调用方是两种完全不同的成本：前者是一次内存查找，后者要经
+// FlareSolverr 开真实浏览器、可能数秒到数十秒。不区分就无从判断兜底到底有没有
+// 真的落到浏览器上。
+func (s *ClearanceService) CachedClearance(proxyURL string) (ClearanceBundle, bool) {
+	return s.Cached(proxyURL, ClearanceTargetHost)
+}
+
+// RefreshWithOutcome 与 Refresh 等价，额外回报这次是否真的向 FlareSolverr 求解。
+//
+// 缓存判定刻意放在 Refresh 之前：Refresh 内部也会查缓存，但调用方需要知道命中的
+// 是哪一条路径，而单看它的返回值无法区分「缓存命中」与「现解成功」。
+func (s *ClearanceService) RefreshWithOutcome(ctx context.Context, proxyURL string) (ClearanceBundle, ClearanceOutcome, error) {
+	outcome := ClearanceOutcome{Proxy: MaskProxyURL(proxyURL)}
+	if !s.Enabled() {
+		return ClearanceBundle{}, outcome, fmt.Errorf("clearance disabled")
+	}
+	_, cached := s.CachedClearance(proxyURL)
+	bundle, err := s.Refresh(ctx, proxyURL)
+	outcome.Attempted = true
+	if err != nil {
+		outcome.Error = err.Error()
+		return bundle, outcome, err
+	}
+	// 未命中缓存却拿到了结果，说明这次真的求解了一次；命中缓存则只是复用。
+	outcome.Solved = !cached
+	return bundle, outcome, nil
+}
+
 // Refresh 获取（或复用）指定出口的 cf_clearance。
 //
 // 同一出口只允许一次求解在途：挑战往往成波出现，若每个请求都去打

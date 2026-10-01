@@ -221,6 +221,25 @@ export type AccountRefreshResult = {
   // 本次失败是 Cloudflare 挑战（出口 IP / 指纹 / cookie 上下文问题），
   // 而不是账号本身有问题。后端不会因此改动账号状态。
   cf_challenge?: boolean;
+  // 这次挑战的 FlareSolverr 兜底结果。只在确实撞上挑战时出现；
+  // 没撞上挑战的账号不带这个字段。
+  clearance?: AccountRefreshClearance;
+};
+
+// AccountRefreshClearance 说明一次 CF 兜底走到了哪一步。
+//
+// attempted 与 solved 必须分开看：命中缓存（attempted=true, solved=false）与现解一次
+// （两者皆真）都是成功路径，但成本差一次真实浏览器；只有 attempted=false 且带
+// skipped 才说明「撞上了挑战却没兜底」，那才需要去查 .env。
+export type AccountRefreshClearance = {
+  attempted: boolean;
+  solved: boolean;
+  // 求解使用的出口，已脱敏。cf_clearance 绑定签发 IP，出问题时先看它。
+  proxy?: string;
+  // 撞上挑战却没有兜底的原因（如 clearance disabled）。
+  skipped?: string;
+  // 求解失败的原因（FlareSolverr 不可达、返回错误等）。
+  error?: string;
 };
 
 type AccountRefreshResponse = {

@@ -525,6 +525,20 @@ func refreshAccountsWithClearance(t *testing.T, upstream *httptest.Server, flare
 	return accounts.RefreshAccounts(context.Background(), []string{"token-1"})
 }
 
+// clearanceDetailOf 取出刷新结果里某个账号的 clearance 子对象。
+func clearanceDetailOf(t *testing.T, result map[string]any) map[string]any {
+	t.Helper()
+	details, ok := result["results"].([]map[string]any)
+	if !ok || len(details) == 0 {
+		t.Fatalf("results = %#v, want at least one refresh detail", result["results"])
+	}
+	detail, ok := details[0]["clearance"].(map[string]any)
+	if !ok {
+		t.Fatalf("refresh detail = %#v, want a clearance sub-object", details[0])
+	}
+	return detail
+}
+
 // 刷新链路命中 CF 挑战时必须动用 clearance 兜底：退避重试只是把同一份旧凭证
 // 再送几次，挑战不会因此自愈，用户看到的就是「几秒后失败」。
 //
@@ -575,6 +589,51 @@ func TestRefreshAccountsSolvesCloudflareChallengeWithClearance(t *testing.T) {
 	if ch := replays[3].Get("Sec-Ch-Ua"); !strings.Contains(ch, `"Google Chrome";v="131"`) {
 		t.Fatalf("replay Sec-Ch-Ua = %q, want client hints matching the clearance UA", ch)
 	}
+	// 兜底解开了必须能被日志读出来。这里断言的是「现解」而不是「命中缓存」：
+	// 两者都是成功路径，但成本差一次真实浏览器，混为一谈就没法判断兜底有没有
+	// 真的落到 FlareSolverr 上。
+	clearance := clearanceDetailOf(t, result)
+	if clearance["attempted"] != true || clearance["solved"] != true {
+		t.Fatalf("clearance detail = %#v, want attempted and solved", clearance)
+	}
+}
+
+// 命中缓存与现解一次都是成功路径，但成本差一次真实浏览器，日志必须分得开：
+// 只看「有没有报错」会把复用旧凭证说成刚解开的。
+func TestClearanceOutcomeDistinguishesCacheFromSolve(t *testing.T) {
+	var solverCalls int32
+	solver := flareSolverrStub(t, &solverCalls, func(req map[string]any) map[string]any {
+		return map[string]any{"status": "ok", "solution": map[string]any{
+			"userAgent": DefaultBrowserUserAgent,
+			"cookies":   []any{map[string]any{"name": "cf_clearance", "value": "solved-cf"}},
+		}}
+	})
+	defer solver.Close()
+
+	svc := NewClearanceService(testClearanceConfig{enabled: true, url: solver.URL, ttl: 3600})
+	ctx := context.Background()
+
+	_, first, err := svc.RefreshWithOutcome(ctx, "socks5://a:1080")
+	if err != nil {
+		t.Fatalf("first RefreshWithOutcome() error = %v", err)
+	}
+	if !first.Attempted || !first.Solved {
+		t.Fatalf("first outcome = %#v, want attempted and solved", first)
+	}
+	if first.Proxy == "" {
+		t.Fatalf("first outcome = %#v, want a masked proxy", first)
+	}
+
+	_, second, err := svc.RefreshWithOutcome(ctx, "socks5://a:1080")
+	if err != nil {
+		t.Fatalf("cached RefreshWithOutcome() error = %v", err)
+	}
+	if !second.Attempted || second.Solved {
+		t.Fatalf("cached outcome = %#v, want attempted without solved", second)
+	}
+	if got := atomic.LoadInt32(&solverCalls); got != 1 {
+		t.Fatalf("flaresolverr calls = %d, want 1 (the second call must reuse the cache)", got)
+	}
 }
 
 // 未部署 FlareSolverr 时行为必须与引入兜底之前完全一致：如实上报挑战失败，
@@ -595,6 +654,11 @@ func TestRefreshAccountsSkipsClearanceFallbackWhenUnconfigured(t *testing.T) {
 	if got := atomic.LoadInt32(&meCalls); got != 0 {
 		t.Fatalf("/backend-api/me calls = %d, want 0 when the bootstrap never succeeds", got)
 	}
+	// 「撞上挑战却没有兜底」必须与「压根没撞上挑战」分开：前者要去看 .env，
+	// 后者什么都不用做，而两者在结果里都是「刷新失败」。
+	if got := util.Clean(clearanceDetailOf(t, result)["skipped"]); got != "clearance disabled" {
+		t.Fatalf("clearance skipped = %q, want the disabled reason", got)
+	}
 }
 
 // FlareSolverr 不可达时兜底失败，仍须如实上报挑战，且不污染刷新结果的语义。
@@ -614,6 +678,15 @@ func TestRefreshAccountsReportsChallengeWhenClearanceSolveFails(t *testing.T) {
 	}
 	if details[0]["cf_challenge"] != true {
 		t.Fatalf("refresh detail = %#v, want cf_challenge still marked", details[0])
+	}
+	// 求解失败的原因必须落到结果里：只报「还是挑战」等于没说，
+	// 运维分不清是 FlareSolverr 挂了还是凭证解出来没用。
+	clearance := clearanceDetailOf(t, result)
+	if clearance["attempted"] != true || clearance["solved"] != false {
+		t.Fatalf("clearance detail = %#v, want an attempted but unsolved fallback", clearance)
+	}
+	if util.Clean(clearance["error"]) == "" {
+		t.Fatalf("clearance detail = %#v, want the flaresolverr failure reason", clearance)
 	}
 	if got := atomic.LoadInt32(&bootstrapCalls); got != 3 {
 		t.Fatalf("bootstrap calls = %d, want 3 retries and no successful replay", got)

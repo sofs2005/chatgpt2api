@@ -3753,3 +3753,43 @@ func TestRefreshAccountsRejectsUnchangedExpiredToken(t *testing.T) {
 		t.Fatalf("errors = %#v, want the no-rotation reason surfaced", result["errors"])
 	}
 }
+
+// TestListAccountsExposesTokenExpiry 固定列表里的 token 到期字段。
+//
+// 没有它，判断「这个账号的 token 是不是死的」只能自己解 JWT——这正是排查
+// 「续期没换到 token」时最耗时的一步。
+func TestListAccountsExposesTokenExpiry(t *testing.T) {
+	expiresAt := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	live := testJWT(t, map[string]any{"exp": expiresAt.Unix()})
+	// 距离过期不足 5 分钟：调度侧已按不可用处理（tokenExpired 带提前量），
+	// 面板必须给出同样的结论，否则这段窗口就是「状态正常但请求失败」。
+	almostExpired := testJWT(t, map[string]any{"exp": time.Now().Add(time.Minute).Unix()})
+	expired := testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{live, almostExpired, expired, "not-a-jwt"})
+
+	byToken := map[string]map[string]any{}
+	for _, item := range accounts.ListAccounts() {
+		byToken[util.Clean(item["access_token"])] = item
+	}
+
+	if got := util.Clean(byToken[live]["tokenExpiresAt"]); got != expiresAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("tokenExpiresAt = %q, want %q", got, expiresAt.UTC().Format(time.RFC3339))
+	}
+	if byToken[live]["tokenExpired"] != false {
+		t.Fatalf("tokenExpired for a live token = %#v, want false", byToken[live]["tokenExpired"])
+	}
+	for name, token := range map[string]string{"almost expired": almostExpired, "expired": expired} {
+		if byToken[token]["tokenExpired"] != true {
+			t.Fatalf("tokenExpired for %s token = %#v, want true", name, byToken[token]["tokenExpired"])
+		}
+	}
+	// 非 JWT 解不出 exp：留空 + false，不能编一个时间也不能当成已过期。
+	if got := util.Clean(byToken["not-a-jwt"]["tokenExpiresAt"]); got != "" {
+		t.Fatalf("tokenExpiresAt for a non-JWT token = %q, want empty", got)
+	}
+	if byToken["not-a-jwt"]["tokenExpired"] != false {
+		t.Fatalf("tokenExpired for a non-JWT token = %#v, want false", byToken["not-a-jwt"]["tokenExpired"])
+	}
+}

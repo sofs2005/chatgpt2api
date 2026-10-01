@@ -3193,6 +3193,21 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			continue
 		}
 		cookieStatus, missingCookies := accountCookieCompleteness(account)
+		// token 的到期时间直接取自 JWT 的 exp，不落库：它是签发时就钉死的绝对
+		// 时间戳，每次读取现解即可，存一份只会在续期后与 token 本身不一致。
+		//
+		// 这里必须按「可用」而不是「已过期」来判定（tokenExpired 用的是
+		// now+skew）：token 快到期但尚未过期时，自动续期不会认领它
+		// （refreshableExpiredToken 用的是不带 skew 的 now），可实时请求已经
+		// 开始失败了。若面板按 now 显示「未过期」，这段窗口期就成了没人能解释的
+		// 「状态正常、额度正常、请求就是失败」。按可用判定，过期时间旁边会同时
+		// 出现「已过期」，与调度侧的判断一致。
+		tokenExpiresAt, tokenExpiresKnown := DecodeAccessTokenExpiry(token)
+		// 解不出 exp（非 JWT、老格式）时留空，交给面板显示「未知」而不是编一个时间。
+		tokenExpiresAtText := ""
+		if tokenExpiresKnown {
+			tokenExpiresAtText = tokenExpiresAt.UTC().Format(time.RFC3339)
+		}
 		out = append(out, map[string]any{
 			"id":                     accountIDFromToken(token),
 			"token_preview":          util.AnonymizeToken(token),
@@ -3207,6 +3222,8 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			"fileUploadQuotaUnknown": util.ToBool(account["file_upload_quota_unknown"]),
 			"cookieStatus":           cookieStatus,
 			"missingCookies":         missingCookies,
+			"tokenExpiresAt":         tokenExpiresAtText,
+			"tokenExpired":           tokenExpiresKnown && tokenExpired(token, time.Now(), tokenExpirySkew),
 			"email":                  account["email"],
 			"user_id":                account["user_id"],
 			"chatgpt_account_id":     account["chatgpt_account_id"],

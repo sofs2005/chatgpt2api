@@ -203,6 +203,39 @@ function formatRestoreAt(value?: string | null) {
   return { absolute, relative };
 }
 
+// formatTokenExpiry 展示 access_token 自带的到期时间。
+//
+// expired 以服务端的 tokenExpired 为准（含 5 分钟提前量），而不是拿本地时间直接比：
+// 调度侧用的是带提前量的判定，若面板按原始时间显示「未过期」，那 5 分钟窗口就会
+// 呈现为「状态正常、额度正常、请求却失败」，无法解释。
+function formatTokenExpiry(account: Account) {
+  const raw = (account.tokenExpiresAt || "").trim();
+  if (!raw) {
+    return { absolute: "未知", relative: "", expired: false, unknown: true };
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return { absolute: raw, relative: "", expired: Boolean(account.tokenExpired), unknown: true };
+  }
+
+  const diffMs = date.getTime() - Date.now();
+  const expired = account.tokenExpired === true || diffMs <= 0;
+  const totalMinutes = Math.ceil(Math.abs(diffMs) / (1000 * 60));
+  const days = Math.floor(totalMinutes / (60 * 24));
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+  const minutes = totalMinutes % 60;
+  const span =
+    days > 0 ? `${days}d ${hours}h` : hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
+  const pad = (num: number) => String(num).padStart(2, "0");
+  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+    date.getHours(),
+  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+
+  return { absolute, relative: expired ? `已过期 ${span}` : `剩余 ${span}`, expired, unknown: false };
+}
+
 function formatQuotaSummary(accounts: Account[]) {
   const availableAccounts = accounts.filter((account) => account.enabled !== false && account.status === "正常");
   if (availableAccounts.some(isUnlimitedImageQuotaAccount)) {
@@ -715,6 +748,30 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
       <div className="flex flex-col gap-0.5 text-xs leading-5 text-muted-foreground">
         {restore.relative ? <span className="font-medium text-foreground">{restore.relative}</span> : null}
         <span>{restore.absolute}</span>
+      </div>
+    );
+  };
+
+  // token 到期与额度恢复是两回事，且 token 到期才是「请求为什么失败」的答案，
+  // 因此单独占一格而不是塞进恢复时间列。已过期时整格标红——这是需要立刻处理的
+  // 状态（续期失败或没有 session_token），不该和「额度用完等恢复」混在一起看。
+  const renderTokenExpiryInfo = (account: Account) => {
+    const token = formatTokenExpiry(account);
+    if (token.unknown) {
+      return (
+        <div className="flex flex-col gap-0.5 text-xs leading-5 text-muted-foreground">
+          <span>{token.absolute}</span>
+        </div>
+      );
+    }
+    return (
+      <div className="flex flex-col gap-0.5 text-xs leading-5">
+        <span className={token.expired ? "font-medium text-rose-600" : "font-medium text-foreground"}>
+          {token.relative}
+        </span>
+        <span className={token.expired ? "text-rose-600/80" : "text-muted-foreground"}>
+          {token.absolute}
+        </span>
       </div>
     );
   };
@@ -1340,6 +1397,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                         <TableHead className="w-32">额度</TableHead>
                         <TableHead className="w-32">上传额度</TableHead>
                         <TableHead className="w-44">恢复时间</TableHead>
+                        <TableHead className="w-44">Token 到期</TableHead>
                         <TableHead className="w-36">调用</TableHead>
                         <TableHead className="w-28 text-right">操作</TableHead>
                       </TableRow>
@@ -1385,6 +1443,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                             </Badge>
                           </TableCell>
                           <TableCell>{renderRestoreInfo(account)}</TableCell>
+                          <TableCell>{renderTokenExpiryInfo(account)}</TableCell>
                           <TableCell>
                             <div className="flex flex-col gap-1 text-xs leading-5">
                               <span className="text-emerald-700">成功 {account.success}</span>
@@ -1449,6 +1508,10 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                               <div className="rounded-lg bg-stone-50 p-2">
                                 <div className="text-muted-foreground">恢复</div>
                                 <div className="mt-1">{renderRestoreInfo(account)}</div>
+                              </div>
+                              <div className="rounded-lg bg-stone-50 p-2">
+                                <div className="text-muted-foreground">Token 到期</div>
+                                <div className="mt-1">{renderTokenExpiryInfo(account)}</div>
                               </div>
                               <div className="rounded-lg bg-stone-50 p-2">
                                 <div className="text-muted-foreground">上传额度恢复</div>

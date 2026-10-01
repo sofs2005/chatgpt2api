@@ -168,6 +168,10 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restoreAt?: string | null;
+  // access_token 自带的 exp（ISO）。空串表示 token 不是可解析的 JWT，到期时间未知。
+  tokenExpiresAt?: string;
+  // 按「可用」判定（含 5 分钟提前量），与调度侧一致：true 时该 token 已不再用于请求。
+  tokenExpired?: boolean;
   // 账号级代理。绑定后该账号出口 IP 固定，cf_clearance 才能长期复用。
   proxy?: string;
   success: number;

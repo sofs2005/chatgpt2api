@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -147,6 +148,63 @@ func cloudflareCookieFreshWindow(name string, stableExitIP bool) (time.Duration,
 // 绑定后 cf_clearance 的 IP 前提成立，可以长期复用而无需按时间丢弃。
 func accountHasStableExitIP(account map[string]any) bool {
 	return util.Clean(account["proxy"]) != ""
+}
+
+// ApplyResponseCookies 把一次响应经由 Set-Cookie 轮换的 cookie 并入 cookie 集合。
+//
+// 与 rememberSessionCookies 的取舍不同：session 端点轮换的是
+// __Secure-next-auth.session-token，而它并不属于 Cloudflare 命名空间
+// （见 isCloudflareSessionCookieName），没有新鲜度窗口可谈，只有「值是什么」。
+// 因此这里不写 session_cookie_updated_at——给非 CF cookie 打时间戳只会让
+// 新鲜度记录混入无关条目。
+//
+// 命名严格按实际收到的 cookie 名：NextAuth 的 session cookie 是分片的
+// （__Secure-next-auth.session-token.0/.1），把轮换后的值写进别的名字，
+// 出站仍会带着旧的那一片，等于没换。
+func ApplyResponseCookies(current map[string]string, setCookies []*http.Cookie, now time.Time) (map[string]string, map[string]string) {
+	if len(setCookies) == 0 {
+		return current, nil
+	}
+	merged := map[string]string{}
+	for name, value := range current {
+		merged[name] = value
+	}
+	updatedAt := map[string]string{}
+	changed := false
+	updatedAtChanged := false
+	for _, cookie := range setCookies {
+		if cookie == nil {
+			continue
+		}
+		if !isAllowedSessionCookieName(cookie.Name) {
+			continue
+		}
+		// MaxAge < 0 是上游明确的删除指令，值也可能同时被置空；
+		// 两种情况都按「移除该 cookie」处理。
+		if cookie.MaxAge < 0 || cookie.Value == "" {
+			if _, ok := merged[cookie.Name]; ok {
+				delete(merged, cookie.Name)
+				changed = true
+			}
+			continue
+		}
+		if merged[cookie.Name] != cookie.Value {
+			merged[cookie.Name] = cookie.Value
+			changed = true
+		}
+		if stamped := SessionCookieUpdatedAtForCookies(map[string]string{cookie.Name: cookie.Value}, now); len(stamped) > 0 {
+			for name, value := range stamped {
+				if updatedAt[name] != value {
+					updatedAt[name] = value
+					updatedAtChanged = true
+				}
+			}
+		}
+	}
+	if !changed && !updatedAtChanged {
+		return current, nil
+	}
+	return merged, updatedAt
 }
 
 func SessionCookieUpdatedAtForCookies(cookies map[string]string, now time.Time) map[string]string {

@@ -17,7 +17,7 @@ func TestSessionRefresherRejectsEmptySessionToken(t *testing.T) {
 		return nil, nil
 	})
 
-	_, _, _, err := refresher.RefreshToken(context.Background(), "access-token", "")
+	_, err := refresher.RefreshSession(context.Background(), "access-token", "")
 	if err == nil || !strings.Contains(err.Error(), "session_token is empty") {
 		t.Fatalf("expected empty session token error, got %v", err)
 	}
@@ -102,18 +102,15 @@ func TestSessionRefresherDeduplicatesConcurrentRefreshes(t *testing.T) {
 
 	const waiters = 5
 	var wg sync.WaitGroup
-	results := make(chan refreshResult, waiters)
+	results := make(chan SessionRefreshData, waiters)
+	errs := make(chan error, waiters)
 	for i := 0; i < waiters; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			accessToken, sessionToken, expires, err := refresher.RefreshToken(context.Background(), "old-access", "old-session")
-			results <- refreshResult{
-				accessToken:    accessToken,
-				sessionToken:   sessionToken,
-				sessionExpires: expires,
-				err:            err,
-			}
+			data, err := refresher.RefreshSession(context.Background(), "old-access", "old-session")
+			results <- data
+			errs <- err
 		}()
 	}
 
@@ -123,6 +120,7 @@ func TestSessionRefresherDeduplicatesConcurrentRefreshes(t *testing.T) {
 	close(release)
 	wg.Wait()
 	close(results)
+	close(errs)
 
 	if calls := atomic.LoadInt32(&calls); calls != 1 {
 		t.Fatalf("expected one upstream refresh, got %d", calls)
@@ -130,11 +128,13 @@ func TestSessionRefresherDeduplicatesConcurrentRefreshes(t *testing.T) {
 	if refresher.IsRefreshing("old-access") {
 		t.Fatalf("refresh should be cleared after completion")
 	}
-	for result := range results {
-		if result.err != nil {
-			t.Fatalf("refresh returned error: %v", result.err)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("refresh returned error: %v", err)
 		}
-		if result.accessToken != "new-access" || result.sessionToken != "new-session" || result.sessionExpires != "2026-05-12T00:00:00Z" {
+	}
+	for result := range results {
+		if result.AccessToken != "new-access" || result.SessionToken != "new-session" || result.Expires != "2026-05-12T00:00:00Z" {
 			t.Fatalf("unexpected refresh result: %#v", result)
 		}
 	}

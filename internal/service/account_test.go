@@ -2281,7 +2281,7 @@ func TestRefreshAccountViaSessionMigratesBusyTokenCounts(t *testing.T) {
 	accounts.busyTokens["old-token"] = 2
 	accounts.busyTokens["new-token"] = 3
 
-	if !accounts.RefreshAccountViaSession("old-token", "new-token", "new-session", "2026-05-20T00:00:00Z") {
+	if !accounts.RefreshAccountViaSession("old-token", SessionRefreshData{AccessToken: "new-token", SessionToken: "new-session", Expires: "2026-05-20T00:00:00Z"}) {
 		t.Fatal("RefreshAccountViaSession() = false")
 	}
 	if _, ok := accounts.busyTokens["old-token"]; ok {
@@ -2323,7 +2323,7 @@ func TestRefreshAccountViaSessionAllowsOldLeaseToReleaseMigratedBusyToken(t *tes
 		t.Fatalf("lease token = %q, want old-token", lease.Token)
 	}
 
-	if !accounts.RefreshAccountViaSession("old-token", "new-token", "new-session", "2026-05-20T00:00:00Z") {
+	if !accounts.RefreshAccountViaSession("old-token", SessionRefreshData{AccessToken: "new-token", SessionToken: "new-session", Expires: "2026-05-20T00:00:00Z"}) {
 		lease.Release()
 		t.Fatal("RefreshAccountViaSession() = false")
 	}
@@ -2361,7 +2361,7 @@ func TestRefreshAccountViaSessionMigratesImageReservationsWithOldTokenAlias(t *t
 	accounts.textRequestCount["old-token"] = 2
 	accounts.textRequestCount["new-token"] = 3
 
-	if !accounts.RefreshAccountViaSession("old-token", "new-token", "new-session", "2026-05-20T00:00:00Z") {
+	if !accounts.RefreshAccountViaSession("old-token", SessionRefreshData{AccessToken: "new-token", SessionToken: "new-session", Expires: "2026-05-20T00:00:00Z"}) {
 		t.Fatal("RefreshAccountViaSession() = false")
 	}
 	if _, ok := accounts.imageReservations["old-token"]; ok {
@@ -3602,5 +3602,93 @@ func TestInPoolFingerprintKeepsClearance(t *testing.T) {
 	cookies := SessionCookieStringMap(account["session_cookies"])
 	if cookies["cf_clearance"] != "fresh-clearance" {
 		t.Fatalf("cf_clearance = %q, want fresh-clearance for in-pool fingerprint", cookies["cf_clearance"])
+	}
+}
+
+// 续期成功时上游会轮换 __Secure-next-auth.session-token（并且该 cookie 按 NextAuth
+// 的约定分片下发），但轮换只被记成了账号的 session_token 字段，没有回写进
+// session_cookies。后续请求发的是 session_cookies，于是永远带着续期前那一片旧
+// cookie：拿新 bearer 配旧 session，上游按凭证不一致拒绝，紧接着的信息拉取就 401——
+// 这正是「续期成功、额度却拉不回来」的成因。
+func TestRefreshAccountsKeepsRotatedSessionCookie(t *testing.T) {
+	var mu sync.Mutex
+	var meCookies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			mu.Lock()
+			meCookies = append(meCookies, r.Header.Get("Cookie"))
+			call := len(meCookies)
+			mu.Unlock()
+			if call == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				writeJSON(t, w, map[string]any{"detail": "authentication token is expired"})
+				return
+			}
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			writeJSON(t, w, map[string]any{"limits_progress": []map[string]any{{"feature_name": "image_gen", "remaining": 7}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.refresher = NewSessionRefresher(func(*http.Request) (*http.Response, error) {
+		// 上游轮换 session cookie：真实响应走 Set-Cookie 下发，且按 NextAuth 的
+		// 约定是分片命名（__Secure-next-auth.session-token.0/.1）。
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Set-Cookie": []string{
+					"__Secure-next-auth.session-token.0=rotated-chunk-0; Path=/; Domain=.chatgpt.com; Secure; HttpOnly",
+					"__Secure-next-auth.session-token.1=rotated-chunk-1; Path=/; Domain=.chatgpt.com; Secure; HttpOnly",
+				},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"accessToken":"new-access-token","sessionToken":"rotated-chunk-1","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"expired-access-token"})
+	accounts.UpdateAccount("expired-access-token", map[string]any{
+		"status":        "正常",
+		"quota":         5,
+		"session_token": "stale-chunk-1",
+		"session_cookies": map[string]string{
+			"oai-did":                            "device-1",
+			"__Secure-next-auth.session-token.0": "stale-chunk-0",
+			"__Secure-next-auth.session-token.1": "stale-chunk-1",
+		},
+		"session_cookie_updated_at": map[string]string{"cf_clearance": time.Now().UTC().Format(time.RFC3339)},
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"expired-access-token"})
+	if result["session_refreshed"] != 1 {
+		t.Fatalf("refresh result = %#v, want a session refresh", result)
+	}
+	mu.Lock()
+	cookies := append([]string(nil), meCookies...)
+	mu.Unlock()
+	if len(cookies) < 2 {
+		t.Fatalf("me calls = %d, want the post-renewal info fetch to happen", len(cookies))
+	}
+	after := cookies[1]
+	// 两个分片都要是轮换后的值：只换了一片，出站仍是新旧混搭。
+	if strings.Contains(after, "stale-chunk-0") || strings.Contains(after, "stale-chunk-1") {
+		t.Fatalf("post-renewal /backend-api/me sent a pre-rotation session cookie: %q", after)
+	}
+	if !strings.Contains(after, "rotated-chunk-0") || !strings.Contains(after, "rotated-chunk-1") {
+		t.Fatalf("post-renewal /backend-api/me did not carry the rotated session token: %q", after)
+	}
+	// 非 session 的 cookie 不能被顺手丢掉。
+	if !strings.Contains(after, "oai-did=device-1") {
+		t.Fatalf("post-renewal /backend-api/me lost the device cookie: %q", after)
 	}
 }

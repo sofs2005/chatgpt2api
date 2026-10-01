@@ -31,6 +31,14 @@ type SessionRefreshData struct {
 	SessionToken string
 	Expires      string
 	User         SessionRefreshUser
+	// SetCookies 是本次响应经由 Set-Cookie 轮换的 cookie，按原样保留（含 MaxAge）。
+	//
+	// 必须回传给账号：NextAuth 轮换 __Secure-next-auth.session-token 走的是
+	// Set-Cookie 而不是响应体的 sessionToken 字段，而账号后续请求发的是
+	// session_cookies。只记 sessionToken 字段不回写 cookie，出站就会变成
+	// 「Bearer 是新的、Cookie 里那一片 session-token 还是旧的」，上游按凭证
+	// 不一致拒绝——续期明明成功，紧跟着的信息拉取却 401。
+	SetCookies []*http.Cookie
 }
 
 type SessionRefreshUser struct {
@@ -44,6 +52,7 @@ type refreshResult struct {
 	sessionToken   string
 	sessionExpires string
 	user           SessionRefreshUser
+	setCookies     []*http.Cookie
 	err            error
 }
 
@@ -73,17 +82,6 @@ func NewSessionRefresher(httpDo func(req *http.Request) (*http.Response, error))
 		semaphore: make(chan struct{}, maxConcurrentRefreshes),
 		httpDo:    httpDo,
 	}
-}
-
-// RefreshToken refreshes access_token with session_token.
-// If the same token is already refreshing, it waits for the in-flight result.
-func (r *SessionRefresher) RefreshToken(ctx context.Context, accessToken, sessionToken string) (newAccessToken, newSessionToken, newExpires string, err error) {
-	return r.RefreshTokenWithContext(ctx, accessToken, sessionToken, SessionRefreshContext{})
-}
-
-func (r *SessionRefresher) RefreshTokenWithContext(ctx context.Context, accessToken, sessionToken string, requestContext SessionRefreshContext) (newAccessToken, newSessionToken, newExpires string, err error) {
-	result, err := r.RefreshSessionWithContext(ctx, accessToken, sessionToken, requestContext)
-	return result.AccessToken, result.SessionToken, result.Expires, err
 }
 
 func (r *SessionRefresher) RefreshSession(ctx context.Context, accessToken, sessionToken string) (SessionRefreshData, error) {
@@ -137,6 +135,7 @@ func (r refreshResult) sessionData() SessionRefreshData {
 		SessionToken: r.sessionToken,
 		Expires:      r.sessionExpires,
 		User:         r.user,
+		SetCookies:   r.setCookies,
 	}
 }
 
@@ -240,6 +239,7 @@ func (r *SessionRefresher) doRefresh(ctx context.Context, sessionToken string, r
 		accessToken:    session.AccessToken,
 		sessionToken:   newSessionToken,
 		sessionExpires: session.Expires,
+		setCookies:     resp.Cookies(),
 		user: SessionRefreshUser{
 			ID:    session.User.ID,
 			Name:  session.User.Name,
@@ -254,25 +254,4 @@ func (r *SessionRefresher) IsRefreshing(accessToken string) bool {
 	defer r.mu.Unlock()
 	_, ok := r.inFlight[accessToken]
 	return ok
-}
-
-// TryRefreshAsync triggers a fire-and-forget refresh for live request paths.
-// It returns true when a refresh has been submitted or is already in flight.
-func (r *SessionRefresher) TryRefreshAsync(accessToken, sessionToken string) bool {
-	if sessionToken == "" {
-		return false
-	}
-	r.mu.Lock()
-	if _, ok := r.inFlight[accessToken]; ok {
-		r.mu.Unlock()
-		return true // Already refreshing.
-	}
-	r.mu.Unlock()
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
-		defer cancel()
-		r.RefreshToken(ctx, accessToken, sessionToken)
-	}()
-	return true
 }

@@ -397,9 +397,22 @@ func (s *AccountService) AddAccountFromSession(sessionJSON string, cookieInputs 
 		"session_token":   sessionToken,
 		"session_expires": sessionExpires,
 	}
-	if len(sessionCookies) > 0 {
-		updates["session_cookies"] = sessionCookies
-		if updatedAt := SessionCookieUpdatedAtForCookies(sessionCookies, time.Now()); len(updatedAt) > 0 {
+	// 校验这一跳也会轮换 session cookie（分片命名），必须与 session_token
+	// 字段一起落盘，否则库里存着的 cookie 在第一次请求之后就成了旧的。
+	mergedCookies, rotatedAt := ApplyResponseCookies(sessionCookies, validated.SetCookies, time.Now())
+	if mergedCookies == nil {
+		mergedCookies = sessionCookies
+	}
+	if len(mergedCookies) > 0 {
+		updates["session_cookies"] = mergedCookies
+		updatedAt := SessionCookieUpdatedAtForCookies(mergedCookies, time.Now())
+		if updatedAt == nil {
+			updatedAt = map[string]string{}
+		}
+		for name, value := range rotatedAt {
+			updatedAt[name] = value
+		}
+		if len(updatedAt) > 0 {
 			updates["session_cookie_updated_at"] = updatedAt
 		}
 	}
@@ -829,12 +842,12 @@ func (s *AccountService) refreshAccountViaSessionAsync(accessToken, sessionToken
 		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 		defer cancel()
 
-		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshTokenWithContext(ctx, accessToken, sessionToken, s.sessionRefreshContext(accessToken, nil))
+		data, err := s.refresher.RefreshSessionWithContext(ctx, accessToken, sessionToken, s.sessionRefreshContext(accessToken, nil))
 		if err != nil {
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常"})
 			return
 		}
-		s.RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires)
+		s.RefreshAccountViaSession(accessToken, data)
 	}()
 }
 
@@ -1391,7 +1404,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 	}
 	for _, item := range pendingRefresh {
 		detail := detailsByToken[item.accessToken]
-		newAccessToken, newSessionToken, newExpires, err := s.refresher.RefreshTokenWithContext(ctx, item.accessToken, item.sessionToken, s.sessionRefreshContext(item.accessToken, nil))
+		data, err := s.refresher.RefreshSessionWithContext(ctx, item.accessToken, item.sessionToken, s.sessionRefreshContext(item.accessToken, nil))
 		if err != nil {
 			s.UpdateAccount(item.accessToken, map[string]any{"status": "异常"})
 			failedRefreshCount++
@@ -1409,7 +1422,8 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			}
 			continue
 		}
-		if !s.RefreshAccountViaSession(item.accessToken, newAccessToken, newSessionToken, newExpires) {
+		newAccessToken := data.AccessToken
+		if !s.RefreshAccountViaSession(item.accessToken, data) {
 			failedRefreshCount++
 			message := "token刷新失败: 账号更新失败"
 			errors = append(errors, map[string]string{
@@ -1588,9 +1602,15 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 }
 
 // RefreshAccountViaSession updates account data after a successful session refresh.
-func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, newSessionToken, newExpires string) bool {
+//
+// data 通常来自 RefreshSessionWithContext：它带回了这次响应轮换的 Set-Cookie。
+// 那些 cookie 必须写回账号的 session_cookies——续期换的新 session token 存在
+// cookie 里，而后续请求（含紧随其后的信息拉取）发的是 session_cookies。
+// 只更新 session_token 字段而不动 cookie，出站就成了「Bearer 是新的、Cookie
+// 里那一片 session-token 还是旧的」，上游按凭证不一致直接拒绝。
+func (s *AccountService) RefreshAccountViaSession(accessToken string, data SessionRefreshData) bool {
 	accessToken = util.Clean(accessToken)
-	newAccessToken = util.Clean(newAccessToken)
+	newAccessToken := util.Clean(data.AccessToken)
 	if accessToken == "" || newAccessToken == "" {
 		return false
 	}
@@ -1611,12 +1631,29 @@ func (s *AccountService) RefreshAccountViaSession(accessToken, newAccessToken, n
 		}
 	}
 
-	account := normalizeAccount(mergeMaps(s.items[idx], map[string]any{
+	updates := map[string]any{
 		"access_token":    newAccessToken,
-		"session_token":   newSessionToken,
-		"session_expires": newExpires,
+		"session_token":   data.SessionToken,
+		"session_expires": data.Expires,
 		"status":          "正常",
-	}))
+	}
+	// 轮换后的 session cookie 必须同时落盘，且与 session_token 字段同源：
+	// 二者描述的是同一个 session，只更新其中一个就会造出上面那种不一致。
+	if merged, updatedAt := ApplyResponseCookies(SessionCookieStringMap(s.items[idx]["session_cookies"]), data.SetCookies, time.Now()); merged != nil {
+		updates["session_cookies"] = merged
+		if len(updatedAt) > 0 {
+			previous := SessionCookieStringMap(s.items[idx]["session_cookie_updated_at"])
+			if previous == nil {
+				previous = map[string]string{}
+			}
+			for name, value := range updatedAt {
+				previous[name] = value
+			}
+			updates["session_cookie_updated_at"] = previous
+		}
+	}
+
+	account := normalizeAccount(mergeMaps(s.items[idx], updates))
 	if account == nil {
 		return false
 	}

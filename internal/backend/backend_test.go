@@ -2085,6 +2085,59 @@ func TestRetryWithFreshClearanceReplaysWithSolverIdentity(t *testing.T) {
 	}
 }
 
+// 重放跑完了不等于挑战过了：上游仍回 403 时必须上报失败。
+//
+// 此前这里无条件上报 ok=true，日志里「求解成功」与「求解后依旧被拦」长得一模一样，
+// 用户没法判断兜底到底有没有用——而这两种情况的下一步动作完全不同（前者是出口
+// 与 cf_clearance 不匹配，后者才是配置问题）。
+func TestRetryWithFreshClearanceReportsUnpassedChallengeAsFailure(t *testing.T) {
+	solver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","solution":{"userAgent":"` + service.DefaultBrowserUserAgent + `","cookies":[{"name":"cf_clearance","value":"solved-cf","expires":0}]}}`))
+	}))
+	defer solver.Close()
+
+	// 无论请求带不带凭证都挑战：求解本身成功，但上游始终不放行。
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("cf-mitigated", "challenge")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer upstream.Close()
+
+	client := newTestBackendClient(upstream)
+	proxy := service.NewProxyService(proxyTestConfig{})
+	proxy.SetClearance(service.NewClearanceService(clearanceTestConfig{enabled: true, url: solver.URL}))
+	client.SetClearanceService(proxy.Clearance())
+	var stages []map[string]any
+	client.SetDiagnosticLogger(func(stage string, attrs map[string]any) {
+		stages = append(stages, attrs)
+	})
+
+	req, err := http.NewRequest(http.MethodGet, upstream.URL+"/backend-api/me", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	resp, err := client.do(req)
+	if err != nil {
+		t.Fatalf("do() error = %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if len(stages) != 1 {
+		t.Fatalf("stages = %#v, want exactly one clearance report", stages)
+	}
+	if stages[0]["ok"] != false {
+		t.Fatalf("ok = %#v, want false: the replay finished but the challenge was not passed", stages[0]["ok"])
+	}
+	if stages[0]["challenge_passed"] != false {
+		t.Fatalf("challenge_passed = %#v, want false", stages[0]["challenge_passed"])
+	}
+	if stages[0]["status"] != http.StatusForbidden {
+		t.Fatalf("status = %#v, want 403 so the log shows what actually came back", stages[0]["status"])
+	}
+}
+
 // 兜底被跳过时必须在日志里留下原因。此前两类放弃都静默返回，"没配置兜底"
 // 与"配了但没跑"在日志上完全一样，无法判断该去查配置还是查 FlareSolverr。
 func TestRetryWithFreshClearanceReportsSkipReason(t *testing.T) {

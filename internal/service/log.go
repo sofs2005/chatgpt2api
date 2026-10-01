@@ -895,23 +895,52 @@ func (l *Logger) print(level string, message string, attrs ...any) {
 // 电平规则：失败进文件与 stdout（需要人当场看见）；成功与被跳过的阶段只进
 // 文件，避免正常请求刷满容器日志。被跳过的阶段尤其重要——它回答的是
 // 「兜底到底有没有试过」，此前这类分支静默返回，失败时无从判断。
+//
+// clearance 阶段是唯一例外：求解成功也进 stdout。它成本最高（开一次
+// FlareSolverr 要几秒到几十秒）而出现频率极低，恰恰是最需要当场看见的。
+// 同时单独给一条 message——求解成功不等于挑战通过（出口不一致时 cf_clearance
+// 当场作废），沿用统一的 "upstream stage" 会把这两者埋在一堆 bootstrap 记录里。
 // attrs 由 backend 侧脱敏，这里只做电平映射。
 func (l *Logger) Upstream(route string, attrs map[string]any) {
 	if l == nil {
 		return
 	}
 	ok, _ := attrs["ok"].(bool)
-	skipped := strings.TrimSpace(fmt.Sprint(attrs["skipped"]))
+	skipped := attrText(attrs["skipped"])
 	fields := make([]any, 0, len(attrs)*2+2)
 	fields = append(fields, "route", route)
 	for key, value := range attrs {
 		fields = append(fields, key, value)
+	}
+	if attrText(attrs["stage"]) == "clearance" {
+		switch {
+		case skipped != "":
+			l.Request("debug", "clearance skipped", fields...)
+		case ok:
+			// 真的解开了：这是「CF 挑战到底有没有用」的直接答案，必须留痕。
+			l.Request("info", "clearance solved", fields...)
+		default:
+			l.Request("warning", "clearance failed", fields...)
+		}
+		return
 	}
 	if ok || skipped != "" {
 		l.Request("debug", "upstream stage", fields...)
 		return
 	}
 	l.Request("warning", "upstream stage failed", fields...)
+}
+
+// attrText 取出一个字符串属性；属性缺失（nil）时返回空串。
+//
+// 不能直接用 fmt.Sprint：nil 会渲染成 "<nil>" 而不是空串，于是「没有这个属性」
+// 被当成「属性值为 <nil>」，下面的 skipped 判定会整片走错分支——求解成功被当成
+// 跳过，求解失败被当成成功。
+func attrText(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 // Request 按给定级别把访问记录投递到两个 sink：日志文件始终记录，

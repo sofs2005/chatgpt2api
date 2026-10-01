@@ -403,3 +403,117 @@ func TestLoggerRequestKeepsStdoutQuietForDebug(t *testing.T) {
 		t.Fatalf("error request missing from stdout: %s", text)
 	}
 }
+
+// captureStdout 在回调期间接管 stdout 与 logger.stdout，返回捕获到的文本。
+func captureStdout(t *testing.T, logger *Logger, run func()) string {
+	t.Helper()
+	orig := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = writer
+	logger.stdout = slog.New(slog.NewJSONHandler(writer, nil))
+	run()
+	_ = writer.Close()
+	os.Stdout = orig
+
+	captured, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(stdout) error = %v", err)
+	}
+	return string(captured)
+}
+
+// 挑战解开必须能从 stdout 直接看见，不能只躺在 server.log 里。
+//
+// 用户要看的是「CF 挑战到底有没有用」：兜底成功是唯一能回答它的信号，
+// 而成功路径此前一律压 debug，容器日志里根本看不到求解跑过。
+func TestLoggerUpstreamLogsSolvedClearanceToStdout(t *testing.T) {
+	dataDir := t.TempDir()
+	logger, err := NewLogger(dataDir, func() []string { return []string{"info", "warning", "error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+	defer logger.Close()
+
+	text := captureStdout(t, logger, func() {
+		logger.Upstream("text", map[string]any{
+			"stage": "clearance", "ok": true, "status": 200, "challenge_passed": true,
+		})
+	})
+	if !strings.Contains(text, "clearance solved") {
+		t.Fatalf("solved clearance missing from stdout: %s", text)
+	}
+	if !strings.Contains(text, `"route":"text"`) {
+		t.Fatalf("route missing from solved clearance record: %s", text)
+	}
+}
+
+// 兜底压根没跑时不该刷 stdout：没撞上挑战的正常请求占绝大多数，
+// 把它们放进容器日志会把真正需要看的求解失败淹掉。
+func TestLoggerUpstreamKeepsSkippedClearanceOutOfStdout(t *testing.T) {
+	dataDir := t.TempDir()
+	logger, err := NewLogger(dataDir, func() []string { return []string{"info", "warning", "error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+	defer logger.Close()
+
+	text := captureStdout(t, logger, func() {
+		logger.Upstream("text", map[string]any{
+			"stage": "clearance", "ok": false, "skipped": "clearance disabled",
+		})
+	})
+	if strings.Contains(text, "clearance") {
+		t.Fatalf("skipped clearance leaked into stdout: %s", text)
+	}
+}
+
+// 求解报错是 warning，文件与 stdout 都要有。
+func TestLoggerUpstreamLogsFailedClearanceToStdout(t *testing.T) {
+	dataDir := t.TempDir()
+	logger, err := NewLogger(dataDir, func() []string { return []string{"info", "warning", "error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+	defer logger.Close()
+
+	text := captureStdout(t, logger, func() {
+		logger.Upstream("official_image", map[string]any{
+			"stage": "clearance", "ok": false, "error": "flaresolverr unreachable",
+		})
+	})
+	if !strings.Contains(text, "clearance failed") {
+		t.Fatalf("failed clearance missing from stdout: %s", text)
+	}
+	if !strings.Contains(text, "flaresolverr unreachable") {
+		t.Fatalf("clearance failure reason missing from stdout: %s", text)
+	}
+}
+
+// 非 clearance 阶段的失败同样必须进 stdout。
+//
+// 这条是回归测试：此前 skipped 用 fmt.Sprint(attrs["skipped"]) 取值，属性缺失时
+// 拿到的是 "<nil>" 而不是空串，于是 `skipped != ""` 恒为真，所有上游阶段失败都被
+// 当成「被跳过」压进 debug——"upstream stage failed" 那条 warning 从来没出现过。
+func TestLoggerUpstreamLogsGenericStageFailureToStdout(t *testing.T) {
+	dataDir := t.TempDir()
+	logger, err := NewLogger(dataDir, func() []string { return []string{"info", "warning", "error"} })
+	if err != nil {
+		t.Fatalf("NewLogger() error = %v", err)
+	}
+	defer logger.Close()
+
+	text := captureStdout(t, logger, func() {
+		logger.Upstream("official_image", map[string]any{
+			"stage": "bootstrap", "ok": false, "error": "upstream returned 403",
+		})
+	})
+	if !strings.Contains(text, "upstream stage failed") {
+		t.Fatalf("generic stage failure missing from stdout: %s", text)
+	}
+	if !strings.Contains(text, `"stage":"bootstrap"`) {
+		t.Fatalf("stage missing from the failure record: %s", text)
+	}
+}

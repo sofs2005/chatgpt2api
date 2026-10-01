@@ -501,7 +501,15 @@ func (c *Client) retryWithFreshClearance(req *http.Request, resp *http.Response)
 		return nil, upstreamTransportError("clearance", retryErr)
 	}
 	c.rememberAccountCookies(retryResp)
-	c.reportStage("clearance", true, map[string]any{"status": retryResp.StatusCode})
+	// ok 必须按「挑战过没过」判定，不能只表示「重放跑完了」：重放本身总是能跑完，
+	// 拿回来的仍可能是 403（例如 FlareSolverr 解的出口与实际请求出口不一致，
+	// cf_clearance 当场作废）。此前无条件上报 ok=true，日志里 403 与 200 长得一样，
+	// 兜底到底有没有用根本看不出来。
+	passed := !service.IsClearanceChallengeResponse(retryResp)
+	c.reportStage("clearance", passed, map[string]any{
+		"status":           retryResp.StatusCode,
+		"challenge_passed": passed,
+	})
 	return retryResp, nil
 }
 

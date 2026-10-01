@@ -3827,6 +3827,79 @@ func TestRefreshAccountsRejectsUnchangedExpiredToken(t *testing.T) {
 	}
 }
 
+// 第一段判定为 CF 挑战、第二段续期救回来的账号，最终结果不能还带着挑战痕迹。
+//
+// 第一段失败后写下的 cf_challenge 与 clearance 描述的是「用旧 token 打不通」，
+// 而第二段换了新 token 已经打通了。留着它们，前端按 cf_challenge 计数、又不看
+// success，就会把一个刷新成功的账号同时算成 CF 拦截和失败——用户看到的是
+// 「成功 1 个，其中 1 个是 Cloudflare 拦截」，自相矛盾。
+func TestRefreshAccountsClearsChallengeMarksAfterSessionRefreshSucceeds(t *testing.T) {
+	var meCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			// 第一段用旧 token，上游返回 CF 挑战；续期换成新 token 后放行。
+			if atomic.AddInt32(&meCalls, 1) == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`<html><script>window._cf_chl_opt={}</script>Enable JavaScript and cookies to continue</html>`))
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer new-access-token" {
+				t.Errorf("Authorization = %q, want the renewed token", r.Header.Get("Authorization"))
+			}
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			writeJSON(t, w, map[string]any{"limits_progress": []map[string]any{{
+				"feature_name": "image_gen",
+				"remaining":    7,
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.refresher = NewSessionRefresher(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-access-token","sessionToken":"new-session-token","expires":"2026-05-12T00:00:00Z"}`)),
+		}, nil
+	})
+	accounts.AddAccounts([]string{"expired-access-token"})
+	accounts.UpdateAccount("expired-access-token", map[string]any{
+		"status":        "过期待刷新",
+		"quota":         5,
+		"session_token": "refresh-session-token",
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"expired-access-token"})
+	if result["session_refreshed"] != 1 || result["failed"] != 0 {
+		t.Fatalf("refresh result = %#v, want the session renewal to count as the only outcome", result)
+	}
+	details := result["results"].([]map[string]any)
+	if len(details) != 1 {
+		t.Fatalf("results = %#v, want a single entry", details)
+	}
+	// 关键断言：第一段的挑战判定必须已被摘掉。
+	if _, ok := details[0]["cf_challenge"]; ok {
+		t.Fatalf("cf_challenge = %#v, want it cleared once the renewed token got through", details[0]["cf_challenge"])
+	}
+	if _, ok := details[0]["clearance"]; ok {
+		t.Fatalf("clearance = %#v, want the stale phase-1 fallback result cleared", details[0]["clearance"])
+	}
+	if details[0]["success"] != true || details[0]["status"] != "success" {
+		t.Fatalf("detail = %#v, want success", details[0])
+	}
+}
+
 // TestListAccountsExposesTokenExpiry 固定列表里的 token 到期字段。
 //
 // 没有它，判断「这个账号的 token 是不是死的」只能自己解 JWT——这正是排查

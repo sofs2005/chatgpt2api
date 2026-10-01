@@ -1250,6 +1250,28 @@ type pendingRefreshItem struct {
 	sessionToken string
 }
 
+// clearanceDetail 把一次兜底结果转成刷新结果里的 clearance 子对象。
+//
+// 没有任何可说内容时返回 nil：没撞上挑战的账号不该带这个字段，否则前端会把
+// 「零值」当成一次兜底尝试。
+func clearanceDetail(outcome ClearanceOutcome) map[string]any {
+	if !outcome.Attempted && outcome.Skipped == "" && outcome.Error == "" {
+		return nil
+	}
+	detail := map[string]any{
+		"attempted": outcome.Attempted,
+		"solved":    outcome.Solved,
+		"proxy":     outcome.Proxy,
+	}
+	if outcome.Skipped != "" {
+		detail["skipped"] = outcome.Skipped
+	}
+	if outcome.Error != "" {
+		detail["error"] = outcome.Error
+	}
+	return detail
+}
+
 func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []string) map[string]any {
 	tokens := cleanTokens(accessTokens)
 	if len(tokens) == 0 {
@@ -1323,18 +1345,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		// 兜底结果必须逐账号记录，而不是只汇总一个总数：同一批刷新里可能有的账号
 		// 解开了、有的没配置、有的求解报错，出口也各不相同（cf_clearance 绑定签发
 		// IP，出问题时第一个要看的就是解的是哪个出口）。
-		if res.clearance.Attempted || res.clearance.Skipped != "" || res.clearance.Error != "" {
-			clearance := map[string]any{
-				"attempted": res.clearance.Attempted,
-				"solved":    res.clearance.Solved,
-				"proxy":     res.clearance.Proxy,
-			}
-			if res.clearance.Skipped != "" {
-				clearance["skipped"] = res.clearance.Skipped
-			}
-			if res.clearance.Error != "" {
-				clearance["error"] = res.clearance.Error
-			}
+		if clearance := clearanceDetail(res.clearance); clearance != nil {
 			detail["clearance"] = clearance
 		}
 		detailsByToken[token] = detail
@@ -1486,11 +1497,21 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		// 这次 FetchRemoteInfo。此前这里在 err != nil 时静默跳过，于是续期成功
 		// 但信息拉取失败（常见于 401/403 之外的上游抖动）时，账号状态被置为
 		// 正常、界面却还在展示续期之前的旧额度，使用者无从得知数字其实是陈的。
-		info, infoErr := s.FetchRemoteInfo(ctx, newAccessToken)
+		info, clearance, infoErr := s.fetchRemoteInfo(ctx, newAccessToken)
 		if infoErr == nil {
 			s.UpdateAccount(newAccessToken, info)
 		}
 		if detail != nil {
+			// 第一段判定为 CF 挑战时留下的两个标记必须清掉：这里续期已经成功，
+			// 那个判断对最终结果不再成立。不清的话前端按 cf_challenge 计数、
+			// 又不看 success，会把一个实际刷新成功的账号同时算成 CF 拦截和失败。
+			delete(detail, "cf_challenge")
+			delete(detail, "clearance")
+			// 第二段自己也可能撞上挑战并走兜底，如实记下来：第一段的结论已被上面
+			// 清掉，这次续期是不是靠兜底过的，只能看这里。
+			if second := clearanceDetail(clearance); second != nil {
+				detail["clearance"] = second
+			}
 			detail["access_token"] = newAccessToken
 			detail["token_preview"] = util.AnonymizeToken(newAccessToken)
 			detail["success"] = true

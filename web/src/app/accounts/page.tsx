@@ -519,7 +519,10 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
       const staleInfo = data.info_stale ?? 0;
       const staleHint = staleInfo > 0 ? `，${staleInfo} 个的额度等账号信息拉取失败，展示值仍为上次结果` : "";
       if (data.errors.length > 0) {
-        const cfChallengeCount = data.results.filter((item) => item.cf_challenge).length;
+        // 只数最终没成功的：第二段 session 续期可能把第一段的 CF 拦截救回来，
+        // 那种账号 results 里 success 为 true、也不在 errors 里，算进来会凭空
+        // 报出一个并不存在的拦截数。
+        const cfChallengeCount = data.results.filter((item) => item.cf_challenge && !item.success).length;
         const firstError = data.errors[0]?.error;
         // CF 挑战是出口 IP / 指纹问题，不是账号问题。单独说清，
         // 否则使用者会误以为这批账号失效而去删号。

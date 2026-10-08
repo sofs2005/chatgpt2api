@@ -550,7 +550,7 @@ function LogsContent() {
       </Card>
 
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="flex max-h-[90vh] w-[min(94vw,980px)] grid-rows-none flex-col gap-0 overflow-hidden rounded-2xl p-0">
+        <DialogContent className="flex max-h-[90vh] w-[min(94vw,980px)] max-w-none grid-rows-none flex-col gap-0 overflow-hidden rounded-2xl p-0">
           <DialogHeader className="border-b border-border px-6 py-5 pr-12">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="min-w-0 space-y-2">

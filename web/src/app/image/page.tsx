@@ -3014,7 +3014,7 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
 
         {editingTurnDraft ? (
           <Dialog open onOpenChange={(open) => (!open ? setEditingTurnDraft(null) : null)}>
-            <DialogContent className="flex max-h-[88dvh] w-[min(92vw,640px)] flex-col overflow-hidden rounded-[28px] p-0">
+            <DialogContent className="flex max-h-[88dvh] w-[min(92vw,640px)] max-w-none flex-col overflow-hidden rounded-[28px] p-0">
               <DialogHeader className="px-6 pt-6 pb-2">
                 <DialogTitle>{editingTurnDraft.mode === "chat" ? "编辑对话" : "编辑生成设置"}</DialogTitle>
                 <DialogDescription>

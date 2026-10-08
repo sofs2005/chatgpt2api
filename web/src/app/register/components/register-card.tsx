@@ -58,8 +58,8 @@ export function RegisterCard() {
   };
 
   return (
-    <div className="grid h-[calc(100vh-132px)] min-h-[640px] items-stretch gap-0 overflow-hidden rounded-[24px] border border-[#f2f3f5] bg-card shadow-[0_0_15px_rgba(44,30,116,0.16)] xl:grid-cols-2">
-      <section className="space-y-4 overflow-y-auto border-b border-border p-4 xl:border-r xl:border-b-0">
+    <div className="grid items-stretch gap-0 rounded-[24px] border border-[#f2f3f5] bg-card shadow-[0_0_15px_rgba(44,30,116,0.16)] xl:h-[calc(100vh-132px)] xl:min-h-[640px] xl:grid-cols-2 xl:overflow-hidden">
+      <section className="space-y-4 border-b border-border p-4 xl:overflow-y-auto xl:border-r xl:border-b-0">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-md bg-muted">

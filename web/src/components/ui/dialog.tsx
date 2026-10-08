@@ -54,7 +54,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-[50%] left-[50%] z-50 grid max-h-[90dvh] w-[92vw] max-w-[560px] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto overscroll-contain rounded-[24px] border border-border bg-background p-6 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] duration-200 data-[state=open]:animate-in",
+          "fixed top-[50%] left-[50%] z-50 grid max-h-[90dvh] w-[92vw] max-w-[560px] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto overscroll-contain rounded-[24px] border border-border bg-background p-6 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] duration-200 [scrollbar-color:rgba(142,142,147,.45)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#8e8e93]/45 [&::-webkit-scrollbar-track]:bg-transparent data-[state=open]:animate-in",
           className,
         )}
         {...props}

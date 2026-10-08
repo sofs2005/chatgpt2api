@@ -95,13 +95,13 @@ function MethodCard({
       className="w-full rounded-2xl border border-stone-200 bg-white p-0 text-left transition hover:border-stone-300 hover:bg-stone-50"
     >
       <Card className="rounded-2xl border-0 bg-transparent shadow-none">
-        <CardContent className="flex items-start gap-4 p-4">
-          <div className="rounded-xl bg-stone-100 p-3 text-stone-700">
+        <CardContent className="flex items-center gap-3 p-3">
+          <div className="rounded-xl bg-stone-100 p-2.5 text-stone-700">
             <Icon className="size-5" />
           </div>
           <div className="space-y-1">
             <div className="text-sm font-semibold text-stone-900">{title}</div>
-            <div className="text-sm leading-6 text-stone-500">{description}</div>
+            <div className="text-sm text-stone-500">{description}</div>
           </div>
         </CardContent>
       </Card>
@@ -311,7 +311,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
               placeholder="每行一个 Access Token..."
               value={tokenInput}
               onChange={(event) => setTokenInput(event.target.value)}
-              className="min-h-56 resize-none rounded-xl border-stone-200"
+              className="min-h-32 resize-none rounded-xl border-stone-200"
             />
           </div>
           <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50 p-4">
@@ -380,7 +380,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
               placeholder='粘贴完整 JSON，例如包含 "accessToken" 的对象...'
               value={sessionInput}
               onChange={(event) => setSessionInput(event.target.value)}
-              className="min-h-56 resize-none rounded-xl border-stone-200 font-mono text-xs"
+              className="min-h-32 resize-none rounded-xl border-stone-200 font-mono text-xs"
             />
           </div>
           <div className="space-y-2">
@@ -389,7 +389,7 @@ export function AccountImportDialog({ disabled, canImportTokens, canImportSessio
               placeholder='粘贴 Cookie Header，或 JSON，例如 {"oai-did":"...","cf_clearance":"...","__cf_bm":"..."}'
               value={sessionCookiesInput}
               onChange={(event) => setSessionCookiesInput(event.target.value)}
-              className="min-h-32 resize-none rounded-xl border-stone-200 font-mono text-xs"
+              className="min-h-24 resize-none rounded-xl border-stone-200 font-mono text-xs"
             />
             <p className="text-xs leading-5 text-stone-500">
               Cookies 会作为敏感账号凭据保存在本地，仅用于后端访问 ChatGPT session endpoint 时复用浏览器已通过的 CF 上下文。

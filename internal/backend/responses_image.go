@@ -765,21 +765,24 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 		"fork_from_shared_post": false,
 		"parent_message_id":     parentMessageID,
 		"model":                 c.officialImageModelSlug(request.Model),
-		"client_prepare_state":  "success",
-		"timezone_offset_min":   outboundTimezoneOffsetMinutes(),
-		"timezone":              util.OutboundTimeZoneName,
-		"conversation_mode":     map[string]any{"kind": "primary_assistant"},
-		"system_hints":          []any{"picture_v2"},
+		// prepare 阶段上游只发 none/sent；success 是最终 /f/conversation 的值。
+		"client_prepare_state":    "none",
+		"client_prepare_dispatch": "debounced",
+		"client_prepare_source":   "composer_editor_state",
+		"timezone_offset_min":     outboundTimezoneOffsetMinutes(),
+		"timezone":                util.OutboundTimeZoneName,
+		"conversation_mode":       map[string]any{"kind": "primary_assistant"},
+		"system_hints":            []any{"picture_v2"},
+		"model_response_contracts": officialModelResponseContracts(),
+		"local_function_names":     officialLocalFunctionNames(),
 		"partial_query": map[string]any{
 			"id":      util.NewUUID(),
 			"author":  map[string]any{"role": "user"},
 			"content": map[string]any{"content_type": "text", "parts": []any{prompt}},
 		},
-		"supports_buffering":  true,
-		"supported_encodings": []any{"v1"},
-		"client_contextual_info": map[string]any{
-			"app_name": "chatgpt.com",
-		},
+		"supports_buffering":      true,
+		"supported_encodings":     []any{"v1"},
+		"client_contextual_info":  officialClientContextualInfo(),
 	}
 	if conversationID := strings.TrimSpace(request.ConversationID); conversationID != "" {
 		payload["conversation_id"] = conversationID
@@ -808,6 +811,34 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 // 官网 /images 页面实际发送的就是 auto，由服务端路由到当前生图模型，
 // 因此跟随官方默认行为，升级上游模型时无需改动代码。
 const DefaultImageModelSlug = util.ImageModelAuto
+
+// officialModelResponseContracts 返回网页端每次请求都带的能力契约声明。
+// 上游用它协商图片/文件上传入口，缺失时服务端不会下发 photo_upload_action。
+func officialModelResponseContracts() []any {
+	return []any{
+		map[string]any{
+			"id":               "photo_upload_action.v1",
+			"protocol_version": 1,
+			"presets":          []any{"cap:image", "cap:file", "placement:end"},
+		},
+	}
+}
+
+// officialLocalFunctionNames 声明本地（客户端）函数，与网页端保持一致。
+func officialLocalFunctionNames() []any {
+	return []any{"local.continue_in_work"}
+}
+
+// officialClientContextualInfo 是网页端上报的客户端上下文。
+// app_name 与两个 web push 能力位必须同时出现，单独只给 app_name 是
+// 网页端不会产生的组合。
+func officialClientContextualInfo() map[string]any {
+	return map[string]any{
+		"app_name":                         "chatgpt.com",
+		"has_web_push_capabilities":        true,
+		"web_push_notification_permission": "granted",
+	}
+}
 
 // officialImageModelSlug 返回官方生图链路发给上游的 model slug。
 // auto 与 gpt-image-2 都走同一条官方 f/conversation 链路，因此都使用可配置的
@@ -980,7 +1011,14 @@ func (c *Client) startOfficialImageConversation(ctx context.Context, prompt stri
 		"selected_github_repos":        []any{},
 		"selected_all_github_repos":    false,
 		"system_hints":                 []any{"picture_v2"},
-		"serialization_metadata":       map[string]any{"custom_symbol_offsets": []any{}},
+		"automation_creation_attribution": map[string]any{
+			"origin":  "conversation",
+			"flow_id": util.NewUUID(),
+		},
+		"submission_mode": "manual_send",
+		// 本链路不走 composer，prompt 里没有 @ 提及，因此 custom_symbol_offsets
+		// 保持为空；填一个文本中并不存在的区间等于伪造信号。
+		"serialization_metadata": map[string]any{"custom_symbol_offsets": []any{}},
 	}
 	if len(refs) > 0 {
 		attachments := make([]map[string]any, 0, len(refs))
@@ -1027,20 +1065,25 @@ func (c *Client) startOfficialImageConversation(ctx context.Context, prompt stri
 		"timezone":                             util.OutboundTimeZoneName,
 		"conversation_mode":                    map[string]any{"kind": "primary_assistant"},
 		"enable_message_followups":             true,
+		"genui_state_snapshots":                []any{},
 		"system_hints":                         []any{"picture_v2"},
+		"model_response_contracts":             officialModelResponseContracts(),
+		"local_function_names":                 officialLocalFunctionNames(),
 		"supports_buffering":                   true,
 		"supported_encodings":                  []any{"v1"},
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
 		"client_contextual_info": map[string]any{
-			"is_dark_mode":      false,
-			"time_since_loaded": 1200,
-			"page_height":       1072,
-			"page_width":        1724,
-			"pixel_ratio":       1.2,
-			"screen_height":     1440,
-			"screen_width":      2560,
-			"app_name":          "chatgpt.com",
+			"is_dark_mode":                     false,
+			"time_since_loaded":                1200,
+			"page_height":                      1072,
+			"page_width":                       1724,
+			"pixel_ratio":                      1.2,
+			"screen_height":                    1440,
+			"screen_width":                     2560,
+			"app_name":                         "chatgpt.com",
+			"has_web_push_capabilities":        true,
+			"web_push_notification_permission": "granted",
 		},
 	}
 	headers := c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream")
@@ -1263,7 +1306,7 @@ func parseOfficialImagePayload(payload string, state *imageConversationState) (R
 		event.Text = message
 	}
 	switch eventType {
-	case "moderation", "title_generation", "message_stream_complete", "server_ste_metadata", "message_marker", "input_message", "resume_conversation_token":
+	case "moderation", "title_generation", "message_stream_complete", "server_ste_metadata", "message_marker", "input_message", "resume_conversation_token", "conversation_detail_metadata":
 		return event, true, nil
 	case "error":
 		message := util.Clean(data["message"])
@@ -2186,9 +2229,13 @@ func (c *Client) getOfficialFileDownloadURL(ctx context.Context, conversationID,
 	if conversationID == "" {
 		return "", fmt.Errorf("conversation_id is required for official image download")
 	}
+	// 上游网页端下载资产时固定带这四个参数；缺 include_library_file_state
+	// 会让响应不再回带图库状态，download_intent 缺省则被当成预览意图。
 	query := urlpkg.Values{}
+	query.Set("include_library_file_state", "true")
 	query.Set("conversation_id", conversationID)
 	query.Set("inline", "false")
+	query.Set("download_intent", "false")
 	targetPath := "/backend-api/files/download/" + urlpkg.PathEscape(fileID)
 	path := targetPath + "?" + query.Encode()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)

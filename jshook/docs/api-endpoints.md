@@ -64,17 +64,24 @@
 ### 6. POST `/backend-api/f/conversation/prepare` ✅
 - **用途**: 准备图片生成对话，获取 conduit_token
 - **认证**: Bearer Token + Sentinel Token + PoW Proof Token
-- **请求**:
+- **请求**（2026-10-09 实抓修正）:
 ```json
 {
   "action": "next",
   "parent_message_id": "<uuid>",
-  "model": "gpt-5-5",
-  "client_prepare_state": "success",
+  "model": "auto",
+  "client_prepare_state": "none",
+  "client_prepare_dispatch": "debounced",
+  "client_prepare_source": "composer_editor_state",
   "timezone_offset_min": -420,
   "timezone": "America/Los_Angeles",
   "conversation_mode": { "kind": "primary_assistant" },
   "system_hints": ["picture_v2"],
+  "model_response_contracts": [
+    { "id": "photo_upload_action.v1", "protocol_version": 1,
+      "presets": ["cap:image", "cap:file", "placement:end"] }
+  ],
+  "local_function_names": ["local.continue_in_work"],
   "partial_query": {
     "id": "<uuid>",
     "author": { "role": "user" },
@@ -85,9 +92,15 @@
   },
   "supports_buffering": true,
   "supported_encodings": ["v1"],
-  "client_contextual_info": { "app_name": "chatgpt.com" }
+  "client_contextual_info": {
+    "app_name": "chatgpt.com",
+    "has_web_push_capabilities": true,
+    "web_push_notification_permission": "granted"
+  }
 }
 ```
+- **`client_prepare_state`**: prepare 阶段只发 `none`（防抖触发）或 `sent`（立即发送）；
+  `success` 是最终 `/f/conversation` 的值，两者不可混用。
 - **响应**: `{"status": "ok", "conduit_token": "eyJ..."}`
 
 ### 7. POST `/backend-api/f/conversation` ✅ (核心生图端点)
@@ -109,7 +122,7 @@ OAI-Language: zh-CN
 OAI-Client-Version: prod-...
 OAI-Client-Build-Number: ...
 ```
-- **请求体**:
+- **请求体**（2026-10-09 实抓修正）:
 ```json
 {
   "action": "next",
@@ -123,28 +136,47 @@ OAI-Client-Build-Number: ...
     },
     "metadata": {
       "system_hints": ["picture_v2"],
-      "serialization_metadata": { "custom_symbol_offsets": [] }
+      "automation_creation_attribution": { "origin": "conversation", "flow_id": "<uuid>" },
+      "submission_mode": "manual_send",
+      "serialization_metadata": {
+        "custom_symbol_offsets": [
+          { "id": "picture_v2", "symbol": "ecosystemMention", "startIndex": 0, "endIndex": 5 }
+        ]
+      }
     }
   }],
   "parent_message_id": "<uuid>",
-  "model": "gpt-5-5",
-  "client_prepare_state": "sent",
+  "model": "auto",
+  "client_prepare_state": "success",
   "timezone_offset_min": -420,
   "timezone": "America/Los_Angeles",
   "conversation_mode": { "kind": "primary_assistant" },
+  "enable_message_followups": true,
+  "genui_state_snapshots": [],
   "system_hints": ["picture_v2"],
+  "model_response_contracts": [
+    { "id": "photo_upload_action.v1", "protocol_version": 1,
+      "presets": ["cap:image", "cap:file", "placement:end"] }
+  ],
+  "local_function_names": ["local.continue_in_work"],
   "supports_buffering": true,
   "supported_encodings": ["v1"],
+  "paragen_cot_summary_display_override": "allow",
   "client_contextual_info": {
     "is_dark_mode": false,
-    "page_height": 1072, "page_width": 1724,
-    "pixel_ratio": 1.2,
+    "time_since_loaded": 18,
+    "page_height": 753, "page_width": 1180,
+    "pixel_ratio": 1,
     "screen_height": 1440, "screen_width": 2560,
-    "app_name": "chatgpt.com"
+    "app_name": "chatgpt.com",
+    "has_web_push_capabilities": true,
+    "web_push_notification_permission": "granted"
   },
   "force_parallel_switch": "auto"
 }
 ```
+- **`custom_symbol_offsets`**: `endIndex` 是 `@创建图像`（5 个字符）在 `parts[0]` 中的结束下标，
+  **不含**其后的空格；只有走 composer 的 @ 提及才需要填，纯 API 拼接的 prompt 保持 `[]`。
 - **parts 字段说明**: parts 是**纯字符串数组** `["prompt text"]`，不是对象数组 `[{content_type: "text", text: "..."}]`
 - **SSE 响应**: 有 3 种事件格式，详见 `authenticated-api-schema.md`
 

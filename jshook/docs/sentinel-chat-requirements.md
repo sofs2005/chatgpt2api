@@ -15,10 +15,16 @@
 
 因此迁移三步流程属于**可选增强**而非兼容性修复，本仓库现有单步实现可以继续使用。
 
-**关键修正（2026-09-29 bundle 还原）**：三步流程的第二步**不是 HTTP 端点**。
-前端全程只出现三条 sentinel 路径 —— `.../prepare`、`.../finalize`、`/sentinel/heartbeat`，
-**不存在 `/sentinel/req`**。中间那一步是**浏览器内的本地求解**（PoW 暴力破解 + Turnstile VM），
-求解产物在第三步随请求体提交。此前的「第二步 `req` 契约缺失」是一个不存在的问题。
+**关键修正（2026-10-09 实抓，已登录档）**：三步流程的第二步**是 HTTP 端点**。
+实抓中出现四条 sentinel 路径 —— `.../prepare`、`/sentinel/req`、`.../finalize`、`/sentinel/ping`（另有 `/sentinel/heartbeat`），
+`POST /backend-api/sentinel/req` 确实存在（本次抓包命中 3 次，均 200，返回完整 `token` + `expire_after:540`）。
+这证伪了此前「不存在 `/sentinel/req`、第二步只是浏览器内本地求解」的结论。
+
+实测链路：`chat-requirements/prepare`（返回 `prepare_token` + `proofofwork` + `turnstile` + `so`）
+→ 本地 PoW / Turnstile / SO 求解
+→ `sentinel/req`（请求体 `{"p","id","flow":"conversation"}`，再返回一轮 `proofofwork` + `turnstile`）
+→ `chat-requirements/finalize`（请求体 `{prepare_token, proofofwork, turnstile}`，返回最终 `token`）
+→ `sentinel/ping` 保活（401 时前端重跑整条链）。
 
 ## 前置条件
 
@@ -127,7 +133,9 @@ let [proofToken, turnstileToken] = await Promise.all([
 - Promise 缓存键 `` `${conversationId}::${dx}` ``，无 conversationId 时退化为 `dx` 本身，
   求解完成即从缓存删除（`finally` 中 `dxPromiseCache.delete`）。
 
-两者都是**浏览器内计算**，没有任何中间 HTTP 往返。此前假设的 `POST /sentinel/req` 不存在。
+两者都是**浏览器内计算**（PoW 暴力破解 + Turnstile VM），求解产物随 `finalize` 请求体提交。
+**但这不代表没有中间 HTTP 往返**：`prepare` 与 `finalize` 之间还有一次 `POST /sentinel/req`
+（见上文 2026-10-09 修正），浏览器在此拿回第二轮 `proofofwork` + `turnstile` 才继续求解。
 
 ### 第三步 `finalize`
 
@@ -263,9 +271,28 @@ curl -sS -X POST "https://chatgpt.com/backend-anon/sentinel/chat-requirements" \
 
 ## 未验证项
 
-- `finalize` 成功响应中最终 token 的**准确字段集**（`Object.assign` 证明字段名与 prepare 同域，
-  但未实抓确认 `token` 是否真的出现、以及是否带 `expire_after`）；
-- `finalize` 最终 token 的有效期（bundle 中 `9e5` 秒的常量 `_Zt` 是 SDK 层 token 缓存时长，
-  不能直接当作 finalize 的 TTL）；
-- 三步流程相比单步是否真的提升通过率（需要 A/B 实测，目前无证据支持迁移的收益）；
+- ~~`finalize` 成功响应中最终 token 的准确字段集~~ → **2026-10-09 已实抓**：
+  `{persona, token, expire_after: 540, expire_at}`，与单步端点同构；
+- `finalize` 最终 token 的有效期（实抓 `expire_after` 为 540 秒，但 `expire_at` 与 `expire_after`
+  在多次抓包中并不总是自洽，暂按 540 秒保守处理）；
+- 三步流程相比单步是否真的提升通过率（需要 A/B 实测，目前无证据支持迁移的收益；
+  2026-10-09 实测单步端点仍然可用，因此**迁移不是兼容性修复**）；
 - `__skip_chatreq_finalize` 的赋值来源（服务端下发 or 分流），决定三步是否为必走链路。
+
+## 未解决：turnstile / so 载荷格式已换代（2026-10-09）
+
+本次抓包暴露出一个**比三步迁移更严重**的问题：仓库的 `solveTurnstileToken` 已经解不了当前上游数据。
+
+- 上游 `turnstile.dx` / `so.collector_dx` / `so.snapshot_dx` 三者是**同一种编码**：
+  base64 → 用请求体里的 `p`（`gAAAAAC...` requirements token）做循环 XOR → 得到 JSON 指令数组；
+- 但新格式的**操作码是浮点数**（`40.25`、`98.68`、`37.57`、`20.42`、`26.38` 等），
+  仓库 `process` 表只登记了整数 `1..24`，`turnstileKey()` 又把浮点截断成整数 → 全部落空，返回空串；
+- 用 `p` 解出的数组里，`pos0` 混着浮点与整数，说明**指令槽位含义也变了**
+  （旧格式操作码固定在 `ins[0]`），不能只补几个 opcode 了事；
+- 浏览器最终发到 `OpenAI-Sentinel-Turnstile-Token` / `OpenAI-Sentinel-SO-Token` 的值，
+  **不是**对 `dx` 做 `p`-XOR 的结果（实测四种组合都对不上），说明还有一层编码/变换；
+- `so_token` 也不是响应字段：单步与 prepare 响应里只有 `so: {required, collector_dx, snapshot_dx}`，
+  仓库读的 `data["so_token"]` 恒为空，`SOToken` 从来没被真正填过。
+
+结论：这块**必须 hook 真实 JS**（`jshook` MCP，定位 bundle 里的 VM 解释器与编码函数）才能重写，
+仅靠抓包无法还原。在还原之前，任何依赖 turnstile/so token 的链路都只能靠上游「不校验」兜底。

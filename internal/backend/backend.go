@@ -744,21 +744,24 @@ func (c *Client) prepareTextConversation(ctx context.Context, messages []map[str
 		"fork_from_shared_post": false,
 		"parent_message_id":     util.NewUUID(),
 		"model":                 textModelSlug(model),
-		"client_prepare_state":  "success",
-		"timezone_offset_min":   outboundTimezoneOffsetMinutes(),
-		"timezone":              util.OutboundTimeZoneName,
-		"conversation_mode":     map[string]any{"kind": "primary_assistant"},
-		"system_hints":          []any{},
+		// prepare 阶段上游只发 none/sent；success 是最终 /f/conversation 的值。
+		"client_prepare_state":    "none",
+		"client_prepare_dispatch": "debounced",
+		"client_prepare_source":   "composer_editor_state",
+		"timezone_offset_min":     outboundTimezoneOffsetMinutes(),
+		"timezone":                util.OutboundTimeZoneName,
+		"conversation_mode":       map[string]any{"kind": "primary_assistant"},
+		"system_hints":            []any{},
+		"model_response_contracts": officialModelResponseContracts(),
+		"local_function_names":     officialLocalFunctionNames(),
 		"partial_query": map[string]any{
 			"id":      util.NewUUID(),
 			"author":  map[string]any{"role": "user"},
 			"content": map[string]any{"content_type": "text", "parts": []any{prompt}},
 		},
-		"supports_buffering":  true,
-		"supported_encodings": []any{"v1"},
-		"client_contextual_info": map[string]any{
-			"app_name": "chatgpt.com",
-		},
+		"supports_buffering":     true,
+		"supported_encodings":    []any{"v1"},
+		"client_contextual_info": officialClientContextualInfo(),
 	}
 	if len(attachments) > 0 {
 		payload["attachments"] = buildTextPrepareAttachments(attachments)
@@ -784,7 +787,12 @@ func (c *Client) startTextConversation(ctx context.Context, messages []map[strin
 		"developer_mode_connector_ids": []any{},
 		"selected_github_repos":        []any{},
 		"selected_all_github_repos":    false,
-		"serialization_metadata":       map[string]any{"custom_symbol_offsets": []any{}},
+		"automation_creation_attribution": map[string]any{
+			"origin":  "conversation",
+			"flow_id": util.NewUUID(),
+		},
+		"submission_mode":        "manual_send",
+		"serialization_metadata": map[string]any{"custom_symbol_offsets": []any{}},
 	}
 	if len(attachments) > 0 {
 		metadata["attachments"] = buildTextMessageAttachments(attachments)
@@ -810,20 +818,25 @@ func (c *Client) startTextConversation(ctx context.Context, messages []map[strin
 		"timezone":                             util.OutboundTimeZoneName,
 		"conversation_mode":                    map[string]any{"kind": "primary_assistant"},
 		"enable_message_followups":             true,
+		"genui_state_snapshots":                []any{},
 		"system_hints":                         []any{},
+		"model_response_contracts":             officialModelResponseContracts(),
+		"local_function_names":                 officialLocalFunctionNames(),
 		"supports_buffering":                   true,
 		"supported_encodings":                  []any{"v1"},
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
 		"client_contextual_info": map[string]any{
-			"is_dark_mode":      false,
-			"time_since_loaded": 1200,
-			"page_height":       1072,
-			"page_width":        1724,
-			"pixel_ratio":       1.2,
-			"screen_height":     1440,
-			"screen_width":      2560,
-			"app_name":          "chatgpt.com",
+			"is_dark_mode":                     false,
+			"time_since_loaded":                1200,
+			"page_height":                      1072,
+			"page_width":                       1724,
+			"pixel_ratio":                      1.2,
+			"screen_height":                    1440,
+			"screen_width":                     2560,
+			"app_name":                         "chatgpt.com",
+			"has_web_push_capabilities":        true,
+			"web_push_notification_permission": "granted",
 		},
 	}
 	return c.postJSON(ctx, officialStreamPath, payload, c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream"), true)

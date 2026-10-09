@@ -1799,7 +1799,11 @@ func (s *AccountService) fetchRemoteInfo(ctx context.Context, accessToken string
 		return nil, clearance, err
 	}
 	init, err := remote.doJSON(http.MethodPost, "/backend-api/conversation/init", map[string]any{
-		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": util.OutboundTimeZoneOffsetMinutes(time.Now()),
+		"requested_default_model": nil,
+		"conversation_id":         nil,
+		"timezone":                util.OutboundTimeZoneName,
+		"timezone_offset_min":     util.OutboundTimeZoneOffsetMinutes(time.Now()),
+		"conversation_origin":     nil,
 	}, nil)
 	if err != nil {
 		return nil, clearance, err

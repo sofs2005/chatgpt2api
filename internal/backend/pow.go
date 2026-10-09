@@ -78,7 +78,10 @@ func buildProofToken(seed, difficulty, userAgent string, scriptSources []string,
 	if !solved {
 		return "", fmt.Errorf("failed to solve proof token: difficulty=%s", difficulty)
 	}
-	return "gAAAAAB" + answer, nil
+	// Upstream appends the "~S" marker to every solved proof token: it shows up on
+	// the finalize request body and on the OpenAI-Sentinel-Proof-Token header of
+	// every ping/conversation call. The requirements token (gAAAAAC) has no marker.
+	return "gAAAAAB" + answer + "~S", nil
 }
 
 func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) []any {

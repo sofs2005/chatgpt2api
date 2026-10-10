@@ -746,9 +746,6 @@ func (c *Client) officialHeaders(path string, reqs ChatRequirements, conduitToke
 	if reqs.TurnstileToken != "" {
 		extra["OpenAI-Sentinel-Turnstile-Token"] = reqs.TurnstileToken
 	}
-	if reqs.SOToken != "" {
-		extra["OpenAI-Sentinel-SO-Token"] = reqs.SOToken
-	}
 	if strings.TrimSpace(conduitToken) != "" {
 		extra["X-Conduit-Token"] = conduitToken
 	}

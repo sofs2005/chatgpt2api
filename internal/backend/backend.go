@@ -77,7 +77,6 @@ type ChatRequirements struct {
 	Token          string
 	ProofToken     string
 	TurnstileToken string
-	SOToken        string
 	Raw            map[string]any
 }
 
@@ -685,7 +684,7 @@ func (c *Client) getChatRequirements(ctx context.Context) (ChatRequirements, err
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return ChatRequirements{}, err
 	}
-	reqs, err := c.buildRequirements(payload, "")
+	reqs, err := c.buildRequirements(payload, p)
 	if err != nil {
 		return ChatRequirements{}, err
 	}
@@ -698,6 +697,8 @@ func (c *Client) getChatRequirements(ctx context.Context) (ChatRequirements, err
 	return reqs, nil
 }
 
+// buildRequirements 解析 chat-requirements 响应。sourceP 是本次请求体里的
+// `p`：turnstile.dx 与 so.*_dx 都用它做循环 XOR 解码，缺了它 VM 程序解不出来。
 func (c *Client) buildRequirements(data map[string]any, sourceP string) (ChatRequirements, error) {
 	if arkose := util.StringMap(data["arkose"]); util.ToBool(arkose["required"]) {
 		return ChatRequirements{}, fmt.Errorf("chat requirements requires arkose token, which is not implemented")
@@ -713,10 +714,28 @@ func (c *Client) buildRequirements(data map[string]any, sourceP string) (ChatReq
 	}
 	turnstileToken := ""
 	turnstile := util.StringMap(data["turnstile"])
-	if util.ToBool(turnstile["required"]) && util.Clean(turnstile["dx"]) != "" {
-		turnstileToken = solveTurnstileToken(util.Clean(turnstile["dx"]), sourceP)
+	if util.ToBool(turnstile["required"]) {
+		dx := util.Clean(turnstile["dx"])
+		if dx == "" {
+			// 上游对 required=true 但缺 dx 的情形是抛错而不是降级；静默跳过只会换来
+			// 一个缺 Turnstile 头的请求，反而更可疑。
+			return ChatRequirements{}, fmt.Errorf("chat requirements requested a turnstile challenge without a payload")
+		}
+		token, err := solveSentinelPayloadFor(dx, sourceP, c.sentinelProfile())
+		if err != nil {
+			return ChatRequirements{}, fmt.Errorf("solve turnstile: %w", err)
+		}
+		turnstileToken = token
 	}
-	return ChatRequirements{Token: util.Clean(data["token"]), ProofToken: proofToken, TurnstileToken: turnstileToken, SOToken: util.Clean(data["so_token"]), Raw: data}, nil
+	return ChatRequirements{Token: util.Clean(data["token"]), ProofToken: proofToken, TurnstileToken: turnstileToken, Raw: data}, nil
+}
+
+// sentinelProfile 把本客户端的身份摊平成 sentinel 指纹程序要读的环境值。
+// 与 PoW 载荷同源：屏幕、核数、时区都取自同一份 fp，避免同一请求里两个指纹互相矛盾。
+func (c *Client) sentinelProfile() sentinelProfile {
+	profile := defaultSentinelProfile(c.userAgent)
+	profile.BuildNumber = c.ClientBuildNumber
+	return profile
 }
 
 func (c *Client) chatTarget() string {
@@ -1134,9 +1153,6 @@ func (c *Client) conversationHeaders(path string, reqs ChatRequirements) map[str
 	}
 	if reqs.TurnstileToken != "" {
 		extra["OpenAI-Sentinel-Turnstile-Token"] = reqs.TurnstileToken
-	}
-	if reqs.SOToken != "" {
-		extra["OpenAI-Sentinel-SO-Token"] = reqs.SOToken
 	}
 	return c.headers(path, extra)
 }

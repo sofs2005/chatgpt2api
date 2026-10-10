@@ -429,14 +429,12 @@ func TestOfficialImageHeadersIncludeSentinelAndConduitTokens(t *testing.T) {
 		Token:          "req-token",
 		ProofToken:     "proof-token",
 		TurnstileToken: "turn-token",
-		SOToken:        "so-token",
 	}, "conduit-token", "text/event-stream")
 	for key, want := range map[string]string{
 		"Authorization": "Bearer token-1",
 		"OpenAI-Sentinel-Chat-Requirements-Token": "req-token",
 		"OpenAI-Sentinel-Proof-Token":             "proof-token",
 		"OpenAI-Sentinel-Turnstile-Token":         "turn-token",
-		"OpenAI-Sentinel-SO-Token":                "so-token",
 		"X-Conduit-Token":                         "conduit-token",
 		"Accept":                                  "text/event-stream",
 		"Content-Type":                            "application/json",
@@ -1977,12 +1975,18 @@ func TestConversationPayloadKeepsSystemHintsEmpty(t *testing.T) {
 	}
 }
 
-func TestSolveTurnstileTokenInterpretsEncodedProgram(t *testing.T) {
+func TestSolveSentinelPayloadRunsEncodedProgram(t *testing.T) {
+	// The turnstile payload is base64(xor(programJSON, p)); the VM must decode it
+	// with the same p and run the register program to its return value.
 	program := `[[3,"ok"]]`
 	key := "secret"
-	dx := base64.StdEncoding.EncodeToString([]byte(xorTurnstileString(program, key)))
-	if got := solveTurnstileToken(dx, key); got != "b2s=" {
-		t.Fatalf("solveTurnstileToken() = %q", got)
+	dx := base64.StdEncoding.EncodeToString([]byte(xorSentinelString(program, key)))
+	got, err := solveSentinelPayload(dx, key)
+	if err != nil {
+		t.Fatalf("solveSentinelPayload() error = %v", err)
+	}
+	if want := base64.StdEncoding.EncodeToString([]byte("ok")); got != want {
+		t.Fatalf("solveSentinelPayload() = %q, want %q", got, want)
 	}
 }
 

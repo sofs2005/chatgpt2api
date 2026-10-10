@@ -279,20 +279,53 @@ curl -sS -X POST "https://chatgpt.com/backend-anon/sentinel/chat-requirements" \
   2026-10-09 实测单步端点仍然可用，因此**迁移不是兼容性修复**）；
 - `__skip_chatreq_finalize` 的赋值来源（服务端下发 or 分流），决定三步是否为必走链路。
 
-## 未解决：turnstile / so 载荷格式已换代（2026-10-09）
+## 已解决：turnstile / so 载荷格式换代（2026-10-09 抓包 → 2026-10-10 解出）
 
-本次抓包暴露出一个**比三步迁移更严重**的问题：仓库的 `solveTurnstileToken` 已经解不了当前上游数据。
+本节曾判定「必须 hook 真实 JS 才能还原」。结论**已被推翻**：格式在纯 Go 里可完全复现，
+仓库的 `internal/backend/sentinel_vm.go` + `sentinel_env.go` 就是这套解释器，无需浏览器。
 
-- 上游 `turnstile.dx` / `so.collector_dx` / `so.snapshot_dx` 三者是**同一种编码**：
-  base64 → 用请求体里的 `p`（`gAAAAAC...` requirements token）做循环 XOR → 得到 JSON 指令数组；
-- 但新格式的**操作码是浮点数**（`40.25`、`98.68`、`37.57`、`20.42`、`26.38` 等），
-  仓库 `process` 表只登记了整数 `1..24`，`turnstileKey()` 又把浮点截断成整数 → 全部落空，返回空串；
-- 用 `p` 解出的数组里，`pos0` 混着浮点与整数，说明**指令槽位含义也变了**
-  （旧格式操作码固定在 `ins[0]`），不能只补几个 opcode 了事；
-- 浏览器最终发到 `OpenAI-Sentinel-Turnstile-Token` / `OpenAI-Sentinel-SO-Token` 的值，
-  **不是**对 `dx` 做 `p`-XOR 的结果（实测四种组合都对不上），说明还有一层编码/变换；
-- `so_token` 也不是响应字段：单步与 prepare 响应里只有 `so: {required, collector_dx, snapshot_dx}`，
-  仓库读的 `data["so_token"]` 恒为空，`SOToken` 从来没被真正填过。
+### 编码链
 
-结论：这块**必须 hook 真实 JS**（`jshook` MCP，定位 bundle 里的 VM 解释器与编码函数）才能重写，
-仅靠抓包无法还原。在还原之前，任何依赖 turnstile/so token 的链路都只能靠上游「不校验」兜底。
+`dx` 与最终 token 是两段独立编码，不能混为一谈：
+
+1. **dx → 程序**：`base64 → XOR(·, p) → JSON 指令数组`。`p` 就是同一请求体里的
+   `gAAAAAC…` requirements token。
+2. **程序 → token**：程序跑完把指纹对象 `JSON.stringify` 后，
+   用**本次程序自己生成的一个随机浮点寄存器名**当 XOR key 再 `btoa`：
+   `btoa(XOR(JSON.stringify(fingerprint), KEY))`。
+
+### 为什么「操作码是浮点数」
+
+浮点数不是新操作码，而是**寄存器别名**：程序开头用 `[8, X, 8]`（copy）把整数
+opcode 处理器（0..35）拷进随机命名的浮点寄存器，后续就通过别名调用。
+所以 `40.25` 是「某个寄存器里存着的处理器」，不是 opcode 40.25。
+仓库旧实现把 `ins[0]` 当整数 opcode 直接查表、又把 key 截断成整数，因此全落空。
+
+### 为什么 token 无法与浏览器逐字节对齐
+
+XOR key 与字段寄存器名**每次程序运行都重新随机生成**（实测 key 出现过
+23.55 / 3.39 / 86.17 / 93.03 / 4.82，字段数 22~24 不等）。
+逐字节比对在构造上就不可能相等，只能做语义/结构对齐。已对齐的观测面：
+
+- `navigator`（UA / platform / vendor / hardwareConcurrency / deviceMemory / maxTouchPoints）；
+- `screen`（宽高 / avail* / colorDepth / pixelDepth）；
+- `document.location`（href/origin/pathname/protocol/host/hostname，与 `window.location` 同一个对象）；
+- `localStorage`：Chrome 把每个条目暴露成**以 key 命名的可枚举自有属性**，
+  `Object.keys(localStorage)` 返回 key 名而非数字下标，`length/key/getItem/…` 藏在原型上；
+- WebGL：`getExtension("WEBGL_debug_renderer_info")` + `getParameter(0x9245/0x9246/0x0d33)`；
+- sentinel SDK 自身脚本名：`findScript(pattern).src.split("/").pop()`，命中分支与
+  fallback `"/sdk.js"` 都得到 `"sdk.js"`。
+
+### SO token 在本后端是死代码
+
+`/f/conversation` 只发 `OpenAI-Sentinel-Chat-Requirements-Token`、
+`OpenAI-Sentinel-Proof-Token`、`OpenAI-Sentinel-Turnstile-Token`、`x-conduit-token`、
+`OAI-Telemetry`，**不发 SO-Token**；只有 `/sentinel/ping` 才带六个头，而本后端从不调 ping。
+因此 `ChatRequirements.SOToken` 已删除，`conversationHeaders` / `officialHeaders` 里的
+SO 分支一并移除，而不是去实现它。Turnstile 会随 `/f/conversation` 发出，故已接入。
+
+### 复现
+
+`internal/backend/sentinel_vm_test.go` 覆盖脚本名解析与 `split/pop` 链；
+用抓包 fixture 跑 `solveSentinelPayloadFor(dx, p, profile)` 可复现整条链。
+注意：真实抓包含 `p`/dx/header，属敏感数据，勿入库。

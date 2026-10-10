@@ -1161,6 +1161,34 @@ func (s *AccountService) sessionRefreshContext(accessToken string, overrideCooki
 		Headers: headers,
 		Proxy:   AccountProxy(account),
 		Profile: accountImpersonation(account),
+		// 与 bootstrap 链路同源的 CF 兜底：挑战不是靠重试自愈的，换一份
+		// cf_clearance 才有可能。闭包捕获 accessToken，因为 SessionRefresher
+		// 只认请求上下文，拿不到账号——出口与凭证的持久化都要账号身份。
+		ClearanceFallback: s.clearanceFallbackFor(accessToken),
+	}
+}
+
+// clearanceFallbackFor 返回一个「为该账号现取一份 cf_clearance」的回调。
+//
+// 未部署 FlareSolverr 时返回 nil，SessionRefresher 据此走「撞上挑战但没有兜底」
+// 的分支并如实上报 Skipped，而不是把两种情况混成同一句失败。
+func (s *AccountService) clearanceFallbackFor(accessToken string) func(context.Context) (ClearanceBundle, ClearanceOutcome, error) {
+	clearance := s.proxy.Clearance()
+	if clearance == nil || !clearance.Enabled() {
+		return nil
+	}
+	return func(ctx context.Context) (ClearanceBundle, ClearanceOutcome, error) {
+		// 出口必须与触发挑战的那次请求同源，否则新凭证签发 IP 与请求出口不符，
+		// 当场作废。这里与 bootstrapRemote 用同一个解析入口。
+		proxyURL := s.proxy.EgressProxy(AccountProxy(s.GetAccount(accessToken)))
+		bundle, outcome, err := clearance.RefreshWithOutcome(ctx, proxyURL)
+		if err != nil {
+			return bundle, outcome, err
+		}
+		// 解出的凭证要落回账号：重放用的是它，后续的常规请求也应当复用，
+		// 否则下一个请求又带着被挑战的旧凭证，等于白解一次。
+		s.rememberClearanceCookies(accessToken, s.accountSessionCookies(accessToken), bundle)
+		return bundle, outcome, nil
 	}
 }
 
@@ -1455,6 +1483,12 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 				detail["message"] = message
 				detail["error"] = message
 				detail["account_status"] = "异常"
+				// 第二段的 CF 兜底必须逐账号记录：它整条路径都在 service 层静默 return，
+				// 日志里看不出「没配 FlareSolverr」「命中了缓存」「真解了一次」「求解报错」
+				// 的区别，而这四种情况的表现完全一样——都是刷新失败。
+				if fallback := clearanceDetail(data.Clearance); fallback != nil {
+					detail["clearance"] = fallback
+				}
 			}
 			continue
 		}
@@ -1474,6 +1508,9 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 				detail["message"] = message
 				detail["error"] = message
 				detail["account_status"] = "异常"
+				if fallback := clearanceDetail(data.Clearance); fallback != nil {
+					detail["clearance"] = fallback
+				}
 			}
 			continue
 		}
@@ -1507,6 +1544,12 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 			// 又不看 success，会把一个实际刷新成功的账号同时算成 CF 拦截和失败。
 			delete(detail, "cf_challenge")
 			delete(detail, "clearance")
+			// 续期这一跳自己也可能撞上挑战并走兜底。它先写、后面的 bootstrap 兜底
+			// 若也有结果则覆盖：两条链路同一批刷新里同时求解的情况极少，而 bootstrap
+			// 是最终决定这次刷新成败的那一跳。
+			if sessionFallback := clearanceDetail(data.Clearance); sessionFallback != nil {
+				detail["clearance"] = sessionFallback
+			}
 			// 第二段自己也可能撞上挑战并走兜底，如实记下来：第一段的结论已被上面
 			// 清掉，这次续期是不是靠兜底过的，只能看这里。
 			if second := clearanceDetail(clearance); second != nil {

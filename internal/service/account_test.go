@@ -3766,8 +3766,144 @@ func TestRefreshAccountsKeepsRotatedSessionCookie(t *testing.T) {
 	}
 }
 
-// 上游在 session 已失效时也会返回 200，但给出的还是原来那个（已过期的）
-// accessToken。此前这条链路只看「请求成没成功」，于是把这种空转换记成续期成功：
+// 续期这一跳命中 CF 挑战时也必须动用兜底，且解出的凭证要落回账号。
+//
+// 这是刷新链路最后一条没有兜底的路径：bootstrap 与生图早就有了，唯独
+// /api/auth/session 命中挑战就直挺挺失败。凭证不落回账号同样等于白解——
+// 重放过了，紧接着的常规请求还带着被挑战的旧凭证。
+func TestRefreshAccountsSolvesCloudflareChallengeOnSessionEndpoint(t *testing.T) {
+	var solverCalls int32
+	solver := flareSolverrStub(t, &solverCalls, func(map[string]any) map[string]any {
+		return map[string]any{"status": "ok", "solution": map[string]any{
+			"userAgent": DefaultBrowserUserAgent,
+			"cookies":   []any{map[string]any{"name": "cf_clearance", "value": "solved-cf"}},
+		}}
+	})
+	defer solver.Close()
+
+	var meCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			// 第一段用的是那个已过期的 token，这一跳注定 401；续期换成新 token 后放行。
+			if atomic.AddInt32(&meCalls, 1) == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				writeJSON(t, w, map[string]any{"detail": "authentication token is expired"})
+				return
+			}
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			writeJSON(t, w, map[string]any{"limits_progress": []map[string]any{{
+				"feature_name": "image_gen",
+				"remaining":    7,
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	expired := testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+	fresh := testJWT(t, map[string]any{"exp": time.Now().Add(24 * time.Hour).Unix()})
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = upstream.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return upstream.Client()
+	}
+	accounts.proxy.SetClearance(NewClearanceService(testClearanceConfig{enabled: true, url: solver.URL, ttl: 3600}))
+	var sessionCalls int32
+	accounts.refresher = NewSessionRefresher(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&sessionCalls, 1)
+		// 只有带上兜底解出的凭证才放行，断言的是「重放确实换了凭证」，
+		// 而不是靠调用次数猜。
+		if cookie, err := req.Cookie("cf_clearance"); err == nil && cookie.Value == "solved-cf" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"accessToken":"` + fresh + `","sessionToken":"rotated-session","expires":"2026-05-12T00:00:00Z"}`)),
+			}, nil
+		}
+		return challengeResponse(), nil
+	})
+	accounts.AddAccounts([]string{expired})
+	accounts.UpdateAccount(expired, map[string]any{
+		"status":        "过期待刷新",
+		"quota":         5,
+		"session_token": "refresh-session-token",
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{expired})
+	if result["session_refreshed"] != 1 || result["failed"] != 0 {
+		t.Fatalf("refresh result = %#v, want the challenge solved into a renewal", result)
+	}
+	if got := atomic.LoadInt32(&solverCalls); got != 1 {
+		t.Fatalf("flaresolverr calls = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&sessionCalls); got != 2 {
+		t.Fatalf("session endpoint calls = %d, want the challenge plus one replay", got)
+	}
+	// 解出的凭证必须落回账号，否则下一个常规请求又带着被挑战的旧凭证。
+	account := accounts.GetAccount(fresh)
+	if account == nil {
+		t.Fatalf("account %q missing after the renewal", util.AnonymizeToken(fresh))
+	}
+	solved := SessionCookieStringMap(account["session_cookies"])["cf_clearance"]
+	if solved != "solved-cf" {
+		t.Fatalf("stored cf_clearance = %q, want the solved clearance", solved)
+	}
+	// 兜底解开了必须能被日志读出来，否则「解开了」和「没配 FlareSolverr」长得一样。
+	clearance := clearanceDetailOf(t, result)
+	if clearance["attempted"] != true || clearance["solved"] != true {
+		t.Fatalf("clearance detail = %#v, want attempted and solved", clearance)
+	}
+}
+
+// 续期这一跳撞上挑战但没配 FlareSolverr 时，行为与引入兜底之前一致（照样失败），
+// 但原因必须可读：「撞上挑战却没有兜底」要能让运维看出该去配 .env。
+func TestRefreshAccountsReportsSessionChallengeWithoutClearance(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	expired := testJWT(t, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = upstream.URL
+	accounts.browserHTTPClient = func(string, string, time.Duration) *http.Client {
+		return upstream.Client()
+	}
+	accounts.refresher = NewSessionRefresher(func(*http.Request) (*http.Response, error) {
+		return challengeResponse(), nil
+	})
+	accounts.AddAccounts([]string{expired})
+	accounts.UpdateAccount(expired, map[string]any{
+		"status":        "过期待刷新",
+		"quota":         5,
+		"session_token": "refresh-session-token",
+	})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{expired})
+	errors, _ := result["errors"].([]map[string]string)
+	if len(errors) != 1 || !strings.Contains(errors[0]["error"], "Cloudflare challenge") {
+		t.Fatalf("errors = %#v, want the challenge surfaced so it is not mistaken for a dead account", result["errors"])
+	}
+	clearance := clearanceDetailOf(t, result)
+	if clearance["skipped"] != "clearance disabled" {
+		t.Fatalf("clearance detail = %#v, want the missing-fallback reason recorded", clearance)
+	}
+}
+
 // 账号被标成正常，而 token 依旧过期——自动续期此后不再管它（refreshableExpiredToken
 // 只挑过期的），实时请求则一直失败。用户看到的就是「刷新成功 1 个」加上一句
 // 额度拉取失败，而账号 JWT 的 exp 根本没动。

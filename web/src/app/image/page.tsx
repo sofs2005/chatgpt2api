@@ -56,12 +56,13 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import {
   cancelCreationTask,
-  CHAT_MODEL_OPTIONS,
   createChatCompletionTask,
   createImageEditTask,
   createImageGenerationTask,
   DEFAULT_CHAT_MODEL,
   DEFAULT_IMAGE_MODEL,
+  FALLBACK_CHAT_MODELS,
+  fetchChatModels,
   fetchCreationTasks,
   fetchProfile,
   getImageProgressLabel,
@@ -1085,6 +1086,8 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
   const [imagePrompt, setImagePrompt] = useState("");
   const [composerMode, setComposerMode] = useState<ComposerMode>(getStoredComposerMode);
   const [imageModel, setImageModel] = useState<ImageModel>(getStoredImageModel);
+  // 上游实时模型列表；为空表示尚未拉到或上游不可达，此时回落到内置清单。
+  const [liveChatModels, setLiveChatModels] = useState<string[]>([]);
   const [imageCount, setImageCount] = useState("1");
   const [imageSizeMode, setImageSizeMode] = useState<ImageSizeMode>(() => getStoredImageSizeSelection().mode);
   const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>(() => getStoredImageSizeSelection().aspectRatio);
@@ -1205,7 +1208,14 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
   const editingDraftSizeIsHighResolution = Boolean(
     editingDraftStructuredParameters && editingDraftImageSize && isHighResolutionImageSize(editingDraftImageSize),
   );
-  const composerModelOptions = composerMode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_CREATION_MODEL_OPTIONS;
+  // 文本模型下拉：优先用上游实时列表（已与内置白名单取交集），拉不到就用内置清单。
+  // auto 始终置顶，它是默认值且一定可用。
+  const chatModelOptions = useMemo(() => {
+    const values = liveChatModels.length > 0 ? liveChatModels : FALLBACK_CHAT_MODELS;
+    const ordered = values.includes(DEFAULT_CHAT_MODEL) ? values : [DEFAULT_CHAT_MODEL, ...values];
+    return ordered.map((value) => ({ value, label: value }));
+  }, [liveChatModels]);
+  const composerModelOptions = composerMode === "chat" ? chatModelOptions : IMAGE_CREATION_MODEL_OPTIONS;
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
@@ -1474,6 +1484,24 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
 
     window.localStorage.setItem(COMPOSER_MODE_STORAGE_KEY, composerMode);
   }, [composerMode]);
+
+  // 拉一次上游实时模型列表。失败时保持为空，下拉自动回落到内置清单，
+  // 不弹错误提示——这只是个增强项，不该打断创作页。
+  useEffect(() => {
+    let cancelled = false;
+    fetchChatModels()
+      .then((payload) => {
+        if (!cancelled && payload.available) {
+          setLiveChatModels(payload.models);
+        }
+      })
+      .catch(() => {
+        // 上游不可达：保持内置清单。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (composerMode === "chat") {
@@ -3134,7 +3162,7 @@ function ImagePageContent({ session }: { session: NonNullable<ReturnType<typeof 
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>
-                            {(editingTurnDraft.mode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_CREATION_MODEL_OPTIONS).map((option) => (
+                            {(editingTurnDraft.mode === "chat" ? chatModelOptions : IMAGE_CREATION_MODEL_OPTIONS).map((option) => (
                               <SelectItem key={option.value} value={option.value}>
                                 {option.label}
                               </SelectItem>

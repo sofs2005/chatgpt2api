@@ -596,6 +596,37 @@ func (e *Engine) listModels(ctx context.Context) (map[string]any, error) {
 	return backend.NewClient("", e.Accounts, e.Proxy).ListModels(ctx)
 }
 
+// ListChatModels returns the upstream model slugs that this build actually accepts
+// on /f/conversation, in upstream order.
+//
+// The list is the intersection of what upstream currently offers and what the client
+// can pass through (util.IsOptionalModel), so it follows upstream renames (gpt-5-5 →
+// gpt-6) without a release, while keeping upstream-internal codenames such as
+// "i-5-mini-m" out of the picker.
+func (e *Engine) ListChatModels(ctx context.Context) ([]string, error) {
+	result, err := e.listModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	for _, item := range util.AsMapSlice(result["data"]) {
+		id := util.Clean(item["id"])
+		if id == "" || !util.IsOptionalModel(id) {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		models = append(models, id)
+	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("upstream returned no usable chat models")
+	}
+	return models, nil
+}
+
 func (e *Engine) StreamTextDeltas(ctx context.Context, client *backend.Client, request ConversationRequest) (<-chan string, <-chan error) {
 	out := make(chan string)
 	errCh := make(chan error, 1)

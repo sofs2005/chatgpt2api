@@ -27,6 +27,7 @@ const (
 	ImageModelGPT55Mini = "gpt-5-5-mini"
 	ImageModelGPT56     = "gpt-5-6"
 	ImageModelGPT56Mini = "gpt-5-6-mini"
+	ImageModelGPT6      = "gpt-6"
 )
 
 var ImageModels = map[string]struct{}{
@@ -45,6 +46,7 @@ var ModelIDs = []string{
 	ImageModelGPT55Mini,
 	ImageModelGPT56,
 	ImageModelGPT56Mini,
+	ImageModelGPT6,
 }
 
 var ImageGenerationModelIDs = []string{
@@ -72,6 +74,42 @@ var ResponsesImageToolModels = map[string]struct{}{
 	ImageModelGPT55Mini: {},
 	ImageModelGPT56:     {},
 	ImageModelGPT56Mini: {},
+	ImageModelGPT6:      {},
+}
+
+// IsOptionalModel reports whether model is a plain text model the client may pass
+// through to upstream /f/conversation.
+//
+// The check is deliberately a shape test rather than a fixed list: upstream renames
+// these models every few weeks (gpt-5-5 → gpt-6), so a hardcoded list is stale the
+// moment it is written. The shape also keeps upstream-internal codenames out of the
+// picker — slugs like "i-5-mini-m" appear in server metadata but are not user models.
+// The image tool slugs (gpt-image-2, codex-gpt-image-2) are excluded: they route to
+// the image pipeline, not to plain conversation.
+func IsOptionalModel(model string) bool {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" || trimmed == ImageModelGPT || trimmed == ImageModelCodex {
+		return false
+	}
+	parts := strings.Split(trimmed, "-")
+	if len(parts) < 2 || parts[0] != "gpt" {
+		return false
+	}
+	// Version segment must start with a digit (5, 6, 5.1), not an internal letter code.
+	if parts[1] == "" || parts[1][0] < '0' || parts[1][0] > '9' {
+		return false
+	}
+	for _, part := range parts[2:] {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '.' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func Clean(v any) string {

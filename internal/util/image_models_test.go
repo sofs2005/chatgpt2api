@@ -17,6 +17,7 @@ func TestImageGenerationModelSetExcludesTextModels(t *testing.T) {
 		ImageModelGPT55Mini,
 		ImageModelGPT56,
 		ImageModelGPT56Mini,
+		ImageModelGPT6,
 	} {
 		if IsImageGenerationModel(model) {
 			t.Fatalf("IsImageGenerationModel(%q) = true, want false", model)
@@ -36,6 +37,7 @@ func TestResponsesImageToolModelsIncludeTextModels(t *testing.T) {
 		ImageModelGPT55Mini,
 		ImageModelGPT56,
 		ImageModelGPT56Mini,
+		ImageModelGPT6,
 	} {
 		if !IsResponsesImageToolModel(model) {
 			t.Fatalf("IsResponsesImageToolModel(%q) = false, want true", model)
@@ -61,6 +63,7 @@ func TestModelListIncludesTextAndImageModels(t *testing.T) {
 		ImageModelGPT55Mini,
 		ImageModelGPT56,
 		ImageModelGPT56Mini,
+		ImageModelGPT6,
 	}
 	gotOrder := ModelList()
 	if len(gotOrder) != len(wantOrder) {
@@ -88,9 +91,49 @@ func TestModelListIncludesTextAndImageModels(t *testing.T) {
 		ImageModelGPT55Mini,
 		ImageModelGPT56,
 		ImageModelGPT56Mini,
+		ImageModelGPT6,
 	} {
 		if _, ok := got[model]; !ok {
 			t.Fatalf("ModelList() missing %q", model)
+		}
+	}
+}
+
+// IsOptionalModel 决定上游实时模型能不能进下拉：既要放行 gpt-6 这类真实模型，
+// 又要挡住 i-5-mini-m 这类只出现在服务端元数据里的内部代号。
+func TestIsOptionalModelAcceptsUserModelsAndRejectsCodenames(t *testing.T) {
+	for _, model := range []string{
+		"gpt-5",
+		"gpt-5-5",
+		"gpt-5-5-mini",
+		"gpt-5-6",
+		"gpt-6",
+		"gpt-6-mini",
+		"gpt-5.1",
+		"gpt-4o",
+		"gpt-4o-mini",
+	} {
+		if !IsOptionalModel(model) {
+			t.Fatalf("IsOptionalModel(%q) = false, want true", model)
+		}
+	}
+
+	for _, model := range []string{
+		"",
+		"auto",
+		"gpt-image-2",
+		"codex-gpt-image-2",
+		"i-5-mini-m",
+		"n7jupd",
+		"gpt",
+		"gpt-",
+		"gpt-6-",
+		"gpt-6-Mini",
+		"o3",
+		"gpt 6",
+	} {
+		if IsOptionalModel(model) {
+			t.Fatalf("IsOptionalModel(%q) = true, want false", model)
 		}
 	}
 }

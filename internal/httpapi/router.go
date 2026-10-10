@@ -75,6 +75,7 @@ func (a *App) routes() []appRoute {
 		exact("", "/api/settings", a.handleSettings),
 		exact("", "/api/settings/login-page-image", a.handleLoginPageImageSettings),
 		exact(http.MethodGet, "/api/app-meta", a.handleAppMeta),
+		exact(http.MethodGet, "/api/chat-models", a.handleChatModels),
 		exact(http.MethodGet, "/api/admin/permissions", a.handlePermissionCatalog),
 		exact("", "/api/images/visibility", a.handleImageVisibility),
 		exact("", "/api/images", a.handleImages),

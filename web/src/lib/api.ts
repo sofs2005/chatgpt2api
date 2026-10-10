@@ -14,8 +14,11 @@ export const IMAGE_MODEL_OPTIONS = [
   { value: "gpt-5-5-mini", label: "gpt-5-5-mini" },
   { value: "gpt-5-6", label: "gpt-5-6" },
   { value: "gpt-5-6-mini", label: "gpt-5-6-mini" },
+  { value: "gpt-6", label: "gpt-6" },
 ] as const;
-export type ImageModel = (typeof IMAGE_MODEL_OPTIONS)[number]["value"];
+// 上游会隔几周改名一次，模型下拉改为从 /api/chat-models 拉实时列表；
+// 这里保留的内置清单只作为拉取失败时的回落，同时约束 ImageModel 的取值形状。
+export type ImageModel = string;
 export const DEFAULT_IMAGE_MODEL: ImageModel = "auto";
 export const DEFAULT_CHAT_MODEL: ImageModel = "auto";
 export const CODEX_IMAGE_MODEL: ImageModel = "codex-gpt-image-2";
@@ -25,19 +28,32 @@ export const CODEX_IMAGE_MODEL: ImageModel = "codex-gpt-image-2";
 export const DEFAULT_UPDATE_REPO = "sofs2005/chatgpt2api";
 const IMAGE_MODEL_VALUES = new Set<string>(IMAGE_MODEL_OPTIONS.map((option) => option.value));
 const IMAGE_TASK_MODEL_VALUES = new Set<ImageModel>(["auto", "gpt-image-2", "codex-gpt-image-2"]);
-const CHAT_MODEL_VALUES = new Set<ImageModel>([
-  "auto",
-  "gpt-5",
-  "gpt-5-3-mini",
-  "gpt-5-4",
-  "gpt-5-5",
-  "gpt-5-5-mini",
-  "gpt-5-6",
-  "gpt-5-6-mini",
-]);
+// 与后端 util.IsOptionalModel 同一套形状判定：放行 gpt-6 这类真实模型，
+// 挡住 i-5-mini-m 这类只出现在上游元数据里的内部代号。两边必须一致，
+// 否则会出现「下拉里有、后端拒绝」或反之。
+const OPTIONAL_MODEL_RE = /^gpt-[0-9][0-9a-z.]*(?:-[0-9a-z.]+)*$/;
 export const IMAGE_TASK_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => IMAGE_TASK_MODEL_VALUES.has(option.value));
 export const IMAGE_CREATION_MODEL_OPTIONS = IMAGE_TASK_MODEL_OPTIONS;
-export const CHAT_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => CHAT_MODEL_VALUES.has(option.value));
+
+// 内置回落清单：上游不可达时文本下拉用这份。
+export const FALLBACK_CHAT_MODELS: string[] = IMAGE_MODEL_OPTIONS.map((option) => option.value).filter(isChatModelValue);
+
+export function isOptionalModel(value: unknown): value is ImageModel {
+  return typeof value === "string" && OPTIONAL_MODEL_RE.test(value);
+}
+
+function isChatModelValue(value: string): boolean {
+  return value === "auto" || isOptionalModel(value);
+}
+
+// 上游实时模型列表（交集后）。available=false 表示上游不可达，调用方应回落到内置清单。
+export type ChatModelsPayload = { available: boolean; models: string[] };
+
+export async function fetchChatModels(): Promise<ChatModelsPayload> {
+  const payload = await httpRequest<ChatModelsPayload>("/api/chat-models");
+  const models = Array.isArray(payload?.models) ? payload.models.filter(isChatModelValue) : [];
+  return { available: Boolean(payload?.available) && models.length > 0, models };
+}
 export const IMAGE_MODEL_ROUTE_DETAILS: Partial<Record<
   ImageModel,
   {
@@ -60,8 +76,10 @@ export const IMAGE_MODEL_ROUTE_DETAILS: Partial<Record<
   },
 };
 
+// isImageModel 是所有「模型字符串」的通用形状校验：内置清单之外的实时 slug
+// （如 gpt-6）也必须通过，否则从下拉选中的值会在存储与轮次回填时被丢弃。
 export function isImageModel(value: unknown): value is ImageModel {
-  return typeof value === "string" && IMAGE_MODEL_VALUES.has(value);
+  return typeof value === "string" && (IMAGE_MODEL_VALUES.has(value) || isOptionalModel(value));
 }
 
 export function isImageTaskModel(value: unknown): value is ImageModel {
@@ -73,7 +91,7 @@ export function isImageCreationModel(value: unknown): value is ImageModel {
 }
 
 export function isChatModel(value: unknown): value is ImageModel {
-  return isImageModel(value) && CHAT_MODEL_VALUES.has(value);
+  return isImageModel(value) && isChatModelValue(value);
 }
 
 export function usesOfficialImageRoute(model: ImageModel) {

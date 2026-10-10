@@ -64,6 +64,10 @@ type App struct {
 	globalLimiter *service.GlobalLimiter
 	// egressPool 是未绑定代理账号的出口池；为 nil 或未配置出口时行为与之前一致。
 	egressPool *service.EgressPool
+	// chatModels 缓存上游实时模型列表。列表要引导一次上游才能拿到，不能让每次
+	// 打开创作页都打一遍上游；但上游会隔几周改名（gpt-5-5 → gpt-6），所以只缓存
+	// 一小段时间。拉取失败时沿用上一次结果，没有结果就回落到内置清单。
+	chatModels *chatModelCache
 	cancel     context.CancelFunc
 }
 
@@ -121,7 +125,7 @@ func NewApp() (*App, error) {
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	imageSessions := service.NewImageConversationSessionService(filepath.Join(cfg.DataDir, "image_conversation_sessions.json"), storageBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger, ImageConversationSessions: imageSessions}
-	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), imageSessions: imageSessions, cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), globalLimiter: service.NewGlobalLimiter(cfg.GlobalConcurrentLimit()), egressPool: pool, cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, billing: billing, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(storageBackend), prompts: service.NewPromptFavoriteService(storageBackend), imageSessions: imageSessions, cpa: service.NewCPAConfig(storageBackend), sub2: service.NewSub2APIConfig(storageBackend), update: newUpdateService(cfg), globalLimiter: service.NewGlobalLimiter(cfg.GlobalConcurrentLimit()), egressPool: pool, chatModels: newChatModelCache(), cancel: cancel}
 	app.editableFiles = service.NewEditableFileTaskService(documentStore, cfg.DataDir, func(ctx context.Context, kind, prompt string, base64Images []string, outputDir string) (service.EditableFileRunResult, error) {
 		if app.engine == nil {
 			return service.EditableFileRunResult{}, fmt.Errorf("editable file engine is not configured")
@@ -832,6 +836,113 @@ func (a *App) handleAppMeta(w http.ResponseWriter, r *http.Request) {
 		"login_page_image_position_x": a.config.LoginPageImagePositionX(),
 		"login_page_image_position_y": a.config.LoginPageImagePositionY(),
 	})
+}
+
+// chatModelCacheTTL 是上游模型列表的缓存时长。
+//
+// 上游每隔几周才改名一次（gpt-5-5 → gpt-6），分钟级缓存足够跟上，又不会让每次
+// 打开创作页都去引导一遍上游——引导要花一次匿名会话，成本远高于一次 GET。
+const chatModelCacheTTL = 10 * time.Minute
+
+// chatModelCacheFailureTTL 限制失败后的重试频率。
+//
+// 没有它的话，上游不可达时每次打开创作页都要等满拉取超时，页面白白卡住。
+const chatModelCacheFailureTTL = time.Minute
+
+// chatModelCache 缓存上游实时模型列表，并在上游不可达时回退到上一次的成功结果。
+type chatModelCache struct {
+	mu      sync.Mutex
+	models  []string
+	ok      bool
+	fetched time.Time
+}
+
+func newChatModelCache() *chatModelCache {
+	return &chatModelCache{}
+}
+
+// get 在缓存仍新鲜时返回它。fresh 为 false 表示调用方需要去拉一次；
+// ok 表示 models 是否是一份可用的上游列表。
+func (c *chatModelCache) get(now time.Time) (models []string, ok bool, fresh bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fetched.IsZero() {
+		return nil, false, false
+	}
+	ttl := chatModelCacheTTL
+	if !c.ok {
+		ttl = chatModelCacheFailureTTL
+	}
+	if now.Sub(c.fetched) >= ttl {
+		return nil, false, false
+	}
+	return append([]string(nil), c.models...), c.ok, true
+}
+
+// lastGood 返回最近一次成功的列表，即便已经过期。刷新失败时用它：
+// 一份略旧的实时列表，好过让下拉在前端来回切回内置清单。
+func (c *chatModelCache) lastGood() ([]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.ok || len(c.models) == 0 {
+		return nil, false
+	}
+	return append([]string(nil), c.models...), true
+}
+
+func (c *chatModelCache) putSuccess(now time.Time, models []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.models = append([]string(nil), models...)
+	c.ok = true
+	c.fetched = now
+}
+
+func (c *chatModelCache) putFailure(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.models = nil
+	c.ok = false
+	c.fetched = now
+}
+
+// handleChatModels 返回上游实时模型与内置清单的交集，供创作页的下拉框渲染。
+//
+// 前端拿不到 /v1/models（那条路由要 API key），所以单独开一条走会话身份的接口。
+// 失败时返回 available=false 而不是 5xx：前端据此回落到内置清单，页面照常可用。
+func (a *App) handleChatModels(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireIdentity(w, r, ""); !ok {
+		return
+	}
+	now := time.Now()
+	if models, ok, fresh := a.chatModels.get(now); fresh {
+		writeChatModels(w, models, ok)
+		return
+	}
+	// 拉取用独立的超时上下文：上游不可达时不能让创作页一直转圈。
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	models, err := a.engine.ListChatModels(ctx)
+	if err != nil {
+		if stale, ok := a.chatModels.lastGood(); ok {
+			// 记成一次成功，这样 TTL 内不再重复去撞一个已知不可达的上游。
+			a.chatModels.putSuccess(now, stale)
+			writeChatModels(w, stale, true)
+			return
+		}
+		a.chatModels.putFailure(now)
+		writeChatModels(w, nil, false)
+		return
+	}
+	a.chatModels.putSuccess(now, models)
+	writeChatModels(w, models, true)
+}
+
+func writeChatModels(w http.ResponseWriter, models []string, available bool) {
+	if models == nil {
+		models = []string{}
+	}
+	util.WriteJSON(w, http.StatusOK, map[string]any{"available": available, "models": models})
 }
 
 func (a *App) handlePermissionCatalog(w http.ResponseWriter, r *http.Request) {

@@ -4981,3 +4981,145 @@ func TestStartupSummarySurvivesErrorOnlyLogLevels(t *testing.T) {
 		t.Fatalf("startup summary missing under error-only levels: %q", string(data))
 	}
 }
+
+// /api/chat-models 只透出「上游有 且 客户端能直通」的模型：
+// gpt-6 是当前真实模型必须放行，i-5-mini-m 这类内部代号必须挡掉。
+func TestHandleChatModelsIntersectsUpstreamWithWhitelist(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	calls := 0
+	app.engine.ListModelsFunc = func(context.Context) (map[string]any, error) {
+		calls++
+		return map[string]any{"object": "list", "data": []map[string]any{
+			{"id": "gpt-6"},
+			{"id": "gpt-5-5"},
+			{"id": "gpt-image-2"},
+			{"id": "i-5-mini-m"},
+			{"id": "gpt-6"},
+		}}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat-models", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Available bool     `json:"available"`
+		Models    []string `json:"models"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if !payload.Available {
+		t.Fatalf("available = false, body = %s", res.Body.String())
+	}
+	if want := []string{"gpt-6", "gpt-5-5"}; !reflect.DeepEqual(payload.Models, want) {
+		t.Fatalf("models = %#v, want %#v", payload.Models, want)
+	}
+
+	// 第二次请求必须命中缓存，不再打上游。
+	req = httptest.NewRequest(http.MethodGet, "/api/chat-models", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (second request should hit the cache)", calls)
+	}
+}
+
+// 上游不可达时必须返回 available=false，而不是 5xx —— 前端据此回落到内置清单。
+func TestHandleChatModelsFallsBackWhenUpstreamUnavailable(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	app.engine.ListModelsFunc = func(context.Context) (map[string]any, error) {
+		return nil, errors.New("upstream down")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat-models", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with available=false", res.Code)
+	}
+	var payload struct {
+		Available bool     `json:"available"`
+		Models    []string `json:"models"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if payload.Available || len(payload.Models) != 0 {
+		t.Fatalf("payload = %#v, want available=false with no models", payload)
+	}
+}
+
+// 上游临时抖动时沿用上一次的成功结果，避免前端在实时列表与内置清单之间来回跳。
+func TestChatModelCacheServesStaleOnFailure(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	app.engine.ListModelsFunc = func(context.Context) (map[string]any, error) {
+		return map[string]any{"object": "list", "data": []map[string]any{{"id": "gpt-6"}}}, nil
+	}
+	fetch := func() []string {
+		req := httptest.NewRequest(http.MethodGet, "/api/chat-models", nil)
+		req.Header.Set("Authorization", adminAuthHeader(t, app))
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		var payload struct {
+			Available bool     `json:"available"`
+			Models    []string `json:"models"`
+		}
+		if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("json: %v", err)
+		}
+		if !payload.Available {
+			t.Fatalf("available = false, body = %s", res.Body.String())
+		}
+		return payload.Models
+	}
+
+	if got := fetch(); !reflect.DeepEqual(got, []string{"gpt-6"}) {
+		t.Fatalf("first fetch = %#v", got)
+	}
+
+	// 让缓存过期，再把上游打挂。
+	app.chatModels.putSuccess(time.Now().Add(-2*chatModelCacheTTL), []string{"gpt-6"})
+	app.engine.ListModelsFunc = func(context.Context) (map[string]any, error) {
+		return nil, errors.New("upstream down")
+	}
+	if got := fetch(); !reflect.DeepEqual(got, []string{"gpt-6"}) {
+		t.Fatalf("stale fetch = %#v, want the last good list", got)
+	}
+}
+
+// 上游持续不可达时不能每次请求都去撞一遍（每次都等满拉取超时），
+// 失败要负缓存一分钟：期间只打一次上游。
+func TestChatModelCacheThrottlesRepeatedFailures(t *testing.T) {
+	app := newTestApp(t)
+	defer app.Close()
+
+	calls := 0
+	app.engine.ListModelsFunc = func(context.Context) (map[string]any, error) {
+		calls++
+		return nil, errors.New("upstream down")
+	}
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/chat-models", nil)
+		req.Header.Set("Authorization", adminAuthHeader(t, app))
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d", i, res.Code)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (failures must be negative-cached)", calls)
+	}
+}

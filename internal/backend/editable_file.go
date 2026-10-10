@@ -127,7 +127,7 @@ func BuildEditablePreparePayload(prompt string, refs []uploadedImageRef) map[str
 	}
 }
 
-func BuildEditableConversationPayload(kind, prompt, conduitToken string, refs []uploadedImageRef) map[string]any {
+func BuildEditableConversationPayload(hw hardwareIdentity, kind, prompt, conduitToken string, refs []uploadedImageRef) map[string]any {
 	contentType := "text"
 	parts := []any{strings.TrimSpace(prompt)}
 	if len(refs) > 0 {
@@ -168,16 +168,7 @@ func BuildEditableConversationPayload(kind, prompt, conduitToken string, refs []
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
 		"force_use_sse":                        true,
-		"client_contextual_info": map[string]any{
-			"is_dark_mode":      false,
-			"time_since_loaded": 1200,
-			"page_height":       1072,
-			"page_width":        1724,
-			"pixel_ratio":       1.2,
-			"screen_height":     1440,
-			"screen_width":      2560,
-			"app_name":          "chatgpt.com",
-		},
+		"client_contextual_info":               conversationContextualInfoFor(hw),
 	}
 }
 
@@ -388,7 +379,7 @@ func (c *Client) prepareEditableFileConversation(ctx context.Context, prompt str
 }
 
 func (c *Client) startEditableFileConversation(ctx context.Context, kind, prompt, conduitToken string, reqs ChatRequirements, refs []uploadedImageRef) (*http.Response, error) {
-	payload := BuildEditableConversationPayload(kind, prompt, conduitToken, refs)
+	payload := BuildEditableConversationPayload(c.hardware(), kind, prompt, conduitToken, refs)
 	return c.postJSON(ctx, officialStreamPath, payload, c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream"), true)
 }
 

@@ -87,7 +87,7 @@ func TestBuildEditablePayloadsIncludeMultimodalPointers(t *testing.T) {
 		t.Fatalf("prepare image part = %#v", imagePart)
 	}
 
-	conversation := BuildEditableConversationPayload("ppt", "make slides", "conduit-token", []uploadedImageRef{ref})
+	conversation := BuildEditableConversationPayload(hardwareIdentityForSeed(""), "ppt", "make slides", "conduit-token", []uploadedImageRef{ref})
 	if got := conversation["model"]; got != editableFileModel {
 		t.Fatalf("conversation model = %#v, want %q", got, editableFileModel)
 	}

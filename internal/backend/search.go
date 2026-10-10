@@ -184,16 +184,7 @@ func (c *Client) runSearchConversation(ctx context.Context, query, conduitToken,
 		"client_reported_search_source":        "conversation_composer_web_icon",
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
-		"client_contextual_info": map[string]any{
-			"is_dark_mode":      false,
-			"time_since_loaded": 36,
-			"page_height":       925,
-			"page_width":        886,
-			"pixel_ratio":       2,
-			"screen_height":     1440,
-			"screen_width":      2560,
-			"app_name":          "chatgpt.com",
-		},
+		"client_contextual_info":               c.clientContextualInfo(),
 	}
 	resp, err := c.postJSON(ctx, officialStreamPath, payload, c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream"), true)
 	if err != nil {

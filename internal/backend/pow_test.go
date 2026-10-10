@@ -13,7 +13,7 @@ import (
 
 // 验证 buildPOWConfig 已对齐 ChatGPT 网页最新版 PoW 格式（上游 commit 86a4977）。
 func TestBuildPOWConfigMatchesLatestWebFormat(t *testing.T) {
-	config := buildPOWConfig("UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
+	config := buildPOWConfig(hardwareIdentityForSeed(""), "UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
 
 	if len(config) != 25 {
 		t.Fatalf("config length = %d, want 25", len(config))
@@ -53,7 +53,7 @@ func TestBuildPOWConfigMatchesLatestWebFormat(t *testing.T) {
 // 判据取自 util 的共享常量，而不是在这里再抄一份字面量：抄一份的话，
 // 改了身份却漏改测试，测试反而会「通过」。
 func TestBuildPOWConfigIdentityIsSelfConsistent(t *testing.T) {
-	config := buildPOWConfig("UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
+	config := buildPOWConfig(hardwareIdentityForSeed(""), "UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
 
 	// index 7/8 是 navigator.language 与 languages，必须与请求身份一致。
 	if got := config[7]; got != util.OutboundLocaleTag {
@@ -110,7 +110,7 @@ func TestBuildPOWConfigIdentityIsSelfConsistent(t *testing.T) {
 
 // 验证 legacy requirements token 已简化为直接 base64 编码 config（不再求解 PoW）。
 func TestBuildLegacyRequirementsTokenIsPlainBase64Config(t *testing.T) {
-	token := buildLegacyRequirementsToken("UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
+	token := buildLegacyRequirementsToken(hardwareIdentityForSeed(""), "UA/1.0", []string{"https://chatgpt.com/sdk.js"}, "c/x/_")
 	const prefix = "gAAAAAC"
 	if !strings.HasPrefix(token, prefix) {
 		t.Fatalf("token = %q, want prefix %q", token, prefix)

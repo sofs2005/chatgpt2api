@@ -67,13 +67,13 @@ func parseWebBuildNumber(html string) string {
 	return ""
 }
 
-func buildLegacyRequirementsToken(userAgent string, scriptSources []string, dataBuild string) string {
-	config := buildPOWConfig(userAgent, scriptSources, dataBuild)
+func buildLegacyRequirementsToken(hw hardwareIdentity, userAgent string, scriptSources []string, dataBuild string) string {
+	config := buildPOWConfig(hw, userAgent, scriptSources, dataBuild)
 	return "gAAAAAC" + base64.StdEncoding.EncodeToString(mustMarshal(config))
 }
 
-func buildProofToken(seed, difficulty, userAgent string, scriptSources []string, dataBuild string) (string, error) {
-	config := buildPOWConfig(userAgent, scriptSources, dataBuild)
+func buildProofToken(hw hardwareIdentity, seed, difficulty, userAgent string, scriptSources []string, dataBuild string) (string, error) {
+	config := buildPOWConfig(hw, userAgent, scriptSources, dataBuild)
 	answer, solved := powGenerate(seed, difficulty, config, 500000)
 	if !solved {
 		return "", fmt.Errorf("failed to solve proof token: difficulty=%s", difficulty)
@@ -84,7 +84,10 @@ func buildProofToken(seed, difficulty, userAgent string, scriptSources []string,
 	return "gAAAAAB" + answer + "~S", nil
 }
 
-func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) []any {
+// buildPOWConfig renders the PoW probe array. hw is the same machine identity the
+// sentinel fingerprint and client_contextual_info are built from, so the screen
+// sum (index 0) and core count (index 16) cannot disagree with them.
+func buildPOWConfig(hw hardwareIdentity, userAgent string, scriptSources []string, dataBuild string) []any {
 	if len(scriptSources) == 0 {
 		scriptSources = []string{defaultPOWScript}
 	}
@@ -97,20 +100,15 @@ func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) 
 		"__NEXT_DATA__", "__BUILD_MANIFEST", "__NEXT_PRELOADREADY",
 	}
 	documentKeys := []string{"__reactContainer$fzelfjyxej8", "_reactListening5dehydibo78", "location"}
-	cores := []int{8, 16, 24, 32}
-	// 先定硬件核数，再据此构造 navigator 探针。
-	// 若二者独立随机，会出现「navigator.hardwareConcurrency 报 32、但载荷核数字段是 8」
-	// 这种同一份配置内部自相矛盾的组合。
-	core := randomChoiceInt(cores)
+	// 核数取自共享身份，navigator 探针再据它构造，避免「探针报 32、核数字段是 8」。
+	core := hw.Core
 	navigatorKeys := powNavigatorKeys(core)
-	screenResolutions := [][2]int{{1920, 1080}, {1440, 900}, {2560, 1440}, {3840, 2160}}
-	resolution := screenResolutions[rand.Intn(len(screenResolutions))]
 	now := time.Now()
 	// index 13 对应浏览器 performance.now()：页面加载以来的单调毫秒数。
 	// 这里用进程启动以来的毫秒数近似，避免填入绝对 Unix 毫秒（量级差 7 个数量级）。
 	pageUptimeMillis := float64(time.Since(powProcessStart).Nanoseconds()) / 1e6
 	return []any{
-		resolution[0] + resolution[1],
+		hw.Resolution[0] + hw.Resolution[1],
 		powLocalTimeString(now),
 		4294705152,
 		1,
@@ -239,13 +237,6 @@ func mustMarshal(v any) []byte {
 func randomChoice(items []string) string {
 	if len(items) == 0 {
 		return ""
-	}
-	return items[rand.Intn(len(items))]
-}
-
-func randomChoiceInt(items []int) int {
-	if len(items) == 0 {
-		return 0
 	}
 	return items[rand.Intn(len(items))]
 }

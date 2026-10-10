@@ -12,6 +12,8 @@ import (
 	"math/rand"
 	"strings"
 	"time"
+
+	"chatgpt2api/internal/util"
 )
 
 // sentinelProfile carries the environment-derived values a fingerprint program
@@ -34,7 +36,6 @@ type sentinelProfile struct {
 	PixelRatio       float64
 	ViewportWidth    int
 	ViewportHeight   int
-	TimeZone         string
 	Href             string
 	BuildNumber      string
 	WebGLVendor      string
@@ -51,28 +52,40 @@ type sentinelProfile struct {
 	SessionObserverOwner string
 }
 
-// defaultSentinelProfile mirrors the identity the rest of the backend sends.
+// defaultSentinelProfile mirrors the identity the rest of the backend sends for
+// a client that has no fingerprint of its own.
 func defaultSentinelProfile(userAgent string) sentinelProfile {
+	return sentinelProfileFor(hardwareIdentityForSeed(""), userAgent, "")
+}
+
+// sentinelProfileFor renders one machine identity into the environment values
+// the sentinel fingerprint programs read. Locale and timezone come from the same
+// util constants the request body and headers use, and the screen/GPU/cores come
+// from the shared hardwareIdentity, so the fingerprint cannot contradict the PoW
+// payload or client_contextual_info in the same request.
+func sentinelProfileFor(hw hardwareIdentity, userAgent, buildNumber string) sentinelProfile {
+	viewportWidth, viewportHeight := hw.viewport()
+	availWidth, availHeight := hw.avail()
 	return sentinelProfile{
 		UserAgent:            userAgent,
-		Language:             "zh-CN",
-		Platform:             "Win32",
-		Vendor:               "Google Inc.",
-		HardwareConc:         8,
-		DeviceMemory:         8,
-		ScreenWidth:          2560,
-		ScreenHeight:         1440,
-		AvailWidth:           2560,
-		AvailHeight:          1400,
+		Language:             util.OutboundLocaleTag,
+		Platform:             hw.Platform,
+		Vendor:               hw.Vendor,
+		HardwareConc:         hw.Core,
+		DeviceMemory:         hw.DeviceMemory,
+		ScreenWidth:          hw.Resolution[0],
+		ScreenHeight:         hw.Resolution[1],
+		AvailWidth:           availWidth,
+		AvailHeight:          availHeight,
 		ColorDepth:           24,
-		PixelRatio:           1,
-		ViewportWidth:        1180,
-		ViewportHeight:       753,
-		TimeZone:             "America/Los_Angeles",
+		PixelRatio:           hw.PixelRatio,
+		ViewportWidth:        viewportWidth,
+		ViewportHeight:       viewportHeight,
 		Href:                 "https://chatgpt.com/",
-		WebGLVendor:          "Google Inc. (NVIDIA)",
-		WebGLRenderer:        "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-		MaxTextureSize:       16384,
+		BuildNumber:          buildNumber,
+		WebGLVendor:          hw.WebGLVendor,
+		WebGLRenderer:        hw.WebGLRenderer,
+		MaxTextureSize:       hw.MaxTextureSize,
 		SessionObserverOwner: "145595fb-49b5-4aa6-afaf-79e04f09396d",
 		LocalStorageKeys: []string{
 			"STATSIG_LOCAL_STORAGE_INTERNAL_STORE_V4",
@@ -84,6 +97,19 @@ func defaultSentinelProfile(userAgent string) sentinelProfile {
 			"UiState.isNavigationCollapsed.1",
 		},
 	}
+}
+
+// localeListValues renders util.OutboundLocaleList ("en-US,en") into the array
+// navigator.languages exposes.
+func localeListValues() []vmValue {
+	parts := strings.Split(util.OutboundLocaleList, ",")
+	out := make([]vmValue, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // sentinelObject is a small ordered property bag standing in for a JS object.
@@ -200,7 +226,9 @@ func newSentinelWindowFor(p sentinelProfile) vmValue {
 	navigator := newSentinelObject()
 	navigator.set("userAgent", p.UserAgent)
 	navigator.set("language", p.Language)
-	navigator.set("languages", []vmValue{p.Language, "zh"})
+	// navigator.languages is the full preference list, not just the primary tag:
+	// a real browser reports "en-US,en" here while navigator.language is "en-US".
+	navigator.set("languages", localeListValues())
 	navigator.set("platform", p.Platform)
 	navigator.set("vendor", p.Vendor)
 	navigator.set("hardwareConcurrency", float64(p.HardwareConc))

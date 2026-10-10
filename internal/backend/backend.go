@@ -670,7 +670,7 @@ func (c *Client) getChatRequirements(ctx context.Context) (ChatRequirements, err
 		path = "/backend-api/sentinel/chat-requirements"
 		contextName = "auth_chat_requirements"
 	}
-	p := buildLegacyRequirementsToken(c.userAgent, c.powSources, c.powDataBuild)
+	p := buildLegacyRequirementsToken(c.hardware(), c.userAgent, c.powSources, c.powDataBuild)
 	resp, err := c.postJSON(ctx, path, map[string]any{"p": p}, c.headers(path, map[string]string{"Content-Type": "application/json"}), false)
 	if err != nil {
 		return ChatRequirements{}, err
@@ -706,7 +706,7 @@ func (c *Client) buildRequirements(data map[string]any, sourceP string) (ChatReq
 	proofToken := ""
 	proof := util.StringMap(data["proofofwork"])
 	if util.ToBool(proof["required"]) {
-		token, err := buildProofToken(util.Clean(proof["seed"]), util.Clean(proof["difficulty"]), c.userAgent, c.powSources, c.powDataBuild)
+		token, err := buildProofToken(c.hardware(), util.Clean(proof["seed"]), util.Clean(proof["difficulty"]), c.userAgent, c.powSources, c.powDataBuild)
 		if err != nil {
 			return ChatRequirements{}, err
 		}
@@ -731,11 +731,62 @@ func (c *Client) buildRequirements(data map[string]any, sourceP string) (ChatReq
 }
 
 // sentinelProfile 把本客户端的身份摊平成 sentinel 指纹程序要读的环境值。
-// 与 PoW 载荷同源：屏幕、核数、时区都取自同一份 fp，避免同一请求里两个指纹互相矛盾。
+//
+// 机器身份（屏幕、核数、显存、GPU）与 PoW 载荷、client_contextual_info 同源，
+// 都来自 c.hardware()；语言与时区取自 util 的共享常量，与请求头、请求体同源。
+// 这样同一请求里三个位置报出的屏幕、核数、语言、时区不会互相矛盾。
 func (c *Client) sentinelProfile() sentinelProfile {
-	profile := defaultSentinelProfile(c.userAgent)
-	profile.BuildNumber = c.ClientBuildNumber
-	return profile
+	return sentinelProfileFor(c.hardware(), c.userAgent, c.ClientBuildNumber)
+}
+
+// hardware 返回本客户端的机器身份，按账号的 oai-device-id 稳定派生：
+// 同一账号每次请求都得到同一台机器，而不是每次请求重新掷一次骰子。
+// device id 缺失时退化为固定身份（见 hardwareIdentityForSeed）。
+func (c *Client) hardware() hardwareIdentity {
+	return hardwareIdentityForSeed(c.deviceID)
+}
+
+// clientContextualInfo 是网页端在搜索链路里上报的客户端上下文。屏幕与窗口
+// 尺寸取自共享机器身份，因此与 PoW 载荷、sentinel 指纹同源。
+func (c *Client) clientContextualInfo() map[string]any {
+	return clientContextualInfoFor(c.hardware())
+}
+
+func clientContextualInfoFor(hw hardwareIdentity) map[string]any {
+	pageWidth, pageHeight := hw.viewport()
+	return map[string]any{
+		"is_dark_mode":      false,
+		"time_since_loaded": 1200,
+		"page_height":       pageHeight,
+		"page_width":        pageWidth,
+		"pixel_ratio":       hw.PixelRatio,
+		"screen_height":     hw.Resolution[1],
+		"screen_width":      hw.Resolution[0],
+		"app_name":          "chatgpt.com",
+	}
+}
+
+// conversationContextualInfo 是网页端在 /f/conversation 里上报的客户端上下文。
+// 屏幕与窗口尺寸取自共享机器身份，因此与 PoW 载荷、sentinel 指纹同源，
+// 不会在同一请求里互相矛盾。
+func (c *Client) conversationContextualInfo() map[string]any {
+	return conversationContextualInfoFor(c.hardware())
+}
+
+func conversationContextualInfoFor(hw hardwareIdentity) map[string]any {
+	pageWidth, pageHeight := hw.viewport()
+	return map[string]any{
+		"is_dark_mode":                     false,
+		"time_since_loaded":                1200,
+		"page_height":                      pageHeight,
+		"page_width":                       pageWidth,
+		"pixel_ratio":                      hw.PixelRatio,
+		"screen_height":                    hw.Resolution[1],
+		"screen_width":                     hw.Resolution[0],
+		"app_name":                         "chatgpt.com",
+		"has_web_push_capabilities":        true,
+		"web_push_notification_permission": "granted",
+	}
 }
 
 func (c *Client) chatTarget() string {
@@ -764,13 +815,13 @@ func (c *Client) prepareTextConversation(ctx context.Context, messages []map[str
 		"parent_message_id":     util.NewUUID(),
 		"model":                 textModelSlug(model),
 		// prepare 阶段上游只发 none/sent；success 是最终 /f/conversation 的值。
-		"client_prepare_state":    "none",
-		"client_prepare_dispatch": "debounced",
-		"client_prepare_source":   "composer_editor_state",
-		"timezone_offset_min":     outboundTimezoneOffsetMinutes(),
-		"timezone":                util.OutboundTimeZoneName,
-		"conversation_mode":       map[string]any{"kind": "primary_assistant"},
-		"system_hints":            []any{},
+		"client_prepare_state":     "none",
+		"client_prepare_dispatch":  "debounced",
+		"client_prepare_source":    "composer_editor_state",
+		"timezone_offset_min":      outboundTimezoneOffsetMinutes(),
+		"timezone":                 util.OutboundTimeZoneName,
+		"conversation_mode":        map[string]any{"kind": "primary_assistant"},
+		"system_hints":             []any{},
 		"model_response_contracts": officialModelResponseContracts(),
 		"local_function_names":     officialLocalFunctionNames(),
 		"partial_query": map[string]any{
@@ -845,18 +896,7 @@ func (c *Client) startTextConversation(ctx context.Context, messages []map[strin
 		"supported_encodings":                  []any{"v1"},
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
-		"client_contextual_info": map[string]any{
-			"is_dark_mode":                     false,
-			"time_since_loaded":                1200,
-			"page_height":                      1072,
-			"page_width":                       1724,
-			"pixel_ratio":                      1.2,
-			"screen_height":                    1440,
-			"screen_width":                     2560,
-			"app_name":                         "chatgpt.com",
-			"has_web_push_capabilities":        true,
-			"web_push_notification_permission": "granted",
-		},
+		"client_contextual_info":               c.conversationContextualInfo(),
 	}
 	return c.postJSON(ctx, officialStreamPath, payload, c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream"), true)
 }
@@ -987,16 +1027,7 @@ func (c *Client) startMultimodalConversation(ctx context.Context, messages []map
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
 		"force_use_sse":                        true,
-		"client_contextual_info": map[string]any{
-			"is_dark_mode":      false,
-			"time_since_loaded": 1200,
-			"page_height":       1072,
-			"page_width":        1724,
-			"pixel_ratio":       1.2,
-			"screen_height":     1440,
-			"screen_width":      2560,
-			"app_name":          "chatgpt.com",
-		},
+		"client_contextual_info":               c.clientContextualInfo(),
 	}
 	return c.postJSON(ctx, officialStreamPath, payload, c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream"), true)
 }
@@ -1055,7 +1086,7 @@ func (c *Client) conversationPayload(messages []map[string]any, model string) ma
 		"enable_message_followups": true, "supports_buffering": true,
 		"system_hints": []any{}, "timezone": util.OutboundTimeZoneName, "timezone_offset_min": outboundTimezoneOffsetMinutes(),
 		"variant_purpose": "comparison_implicit", "websocket_request_id": util.NewUUID(),
-		"client_contextual_info": map[string]any{"is_dark_mode": false, "time_since_loaded": 120, "page_height": 900, "page_width": 1400, "pixel_ratio": 2, "screen_height": 1440, "screen_width": 2560},
+		"client_contextual_info": c.conversationContextualInfo(),
 	}
 }
 

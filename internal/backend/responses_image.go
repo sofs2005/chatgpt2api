@@ -763,13 +763,13 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 		"parent_message_id":     parentMessageID,
 		"model":                 c.officialImageModelSlug(request.Model),
 		// prepare 阶段上游只发 none/sent；success 是最终 /f/conversation 的值。
-		"client_prepare_state":    "none",
-		"client_prepare_dispatch": "debounced",
-		"client_prepare_source":   "composer_editor_state",
-		"timezone_offset_min":     outboundTimezoneOffsetMinutes(),
-		"timezone":                util.OutboundTimeZoneName,
-		"conversation_mode":       map[string]any{"kind": "primary_assistant"},
-		"system_hints":            []any{"picture_v2"},
+		"client_prepare_state":     "none",
+		"client_prepare_dispatch":  "debounced",
+		"client_prepare_source":    "composer_editor_state",
+		"timezone_offset_min":      outboundTimezoneOffsetMinutes(),
+		"timezone":                 util.OutboundTimeZoneName,
+		"conversation_mode":        map[string]any{"kind": "primary_assistant"},
+		"system_hints":             []any{"picture_v2"},
 		"model_response_contracts": officialModelResponseContracts(),
 		"local_function_names":     officialLocalFunctionNames(),
 		"partial_query": map[string]any{
@@ -777,9 +777,9 @@ func (c *Client) prepareOfficialImageConversation(ctx context.Context, prompt st
 			"author":  map[string]any{"role": "user"},
 			"content": map[string]any{"content_type": "text", "parts": []any{prompt}},
 		},
-		"supports_buffering":      true,
-		"supported_encodings":     []any{"v1"},
-		"client_contextual_info":  officialClientContextualInfo(),
+		"supports_buffering":     true,
+		"supported_encodings":    []any{"v1"},
+		"client_contextual_info": officialClientContextualInfo(),
 	}
 	if conversationID := strings.TrimSpace(request.ConversationID); conversationID != "" {
 		payload["conversation_id"] = conversationID
@@ -1070,18 +1070,7 @@ func (c *Client) startOfficialImageConversation(ctx context.Context, prompt stri
 		"supported_encodings":                  []any{"v1"},
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
-		"client_contextual_info": map[string]any{
-			"is_dark_mode":                     false,
-			"time_since_loaded":                1200,
-			"page_height":                      1072,
-			"page_width":                       1724,
-			"pixel_ratio":                      1.2,
-			"screen_height":                    1440,
-			"screen_width":                     2560,
-			"app_name":                         "chatgpt.com",
-			"has_web_push_capabilities":        true,
-			"web_push_notification_permission": "granted",
-		},
+		"client_contextual_info":               c.conversationContextualInfo(),
 	}
 	headers := c.officialHeaders(officialStreamPath, reqs, conduitToken, "text/event-stream")
 	if conversationID := strings.TrimSpace(request.ConversationID); conversationID != "" {

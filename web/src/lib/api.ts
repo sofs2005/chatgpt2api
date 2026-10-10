@@ -3,18 +3,12 @@ import type { LoginPageImageMode } from "@/lib/login-page-image-layout";
 
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用" | "刷新中" | "过期待刷新";
+// 本客户端自有路由的图片模型。文本模型不在此列：它们由 /api/chat-models 从上游实时拉取，
+// 写死具体版本号（gpt-5-5、gpt-5-6 …）只会在上游改名后过期。
 export const IMAGE_MODEL_OPTIONS = [
   { value: "gpt-image-2", label: "gpt-image-2" },
   { value: "codex-gpt-image-2", label: "codex-gpt-image-2" },
   { value: "auto", label: "auto" },
-  { value: "gpt-5", label: "gpt-5" },
-  { value: "gpt-5-3-mini", label: "gpt-5-3-mini" },
-  { value: "gpt-5-4", label: "gpt-5-4" },
-  { value: "gpt-5-5", label: "gpt-5-5" },
-  { value: "gpt-5-5-mini", label: "gpt-5-5-mini" },
-  { value: "gpt-5-6", label: "gpt-5-6" },
-  { value: "gpt-5-6-mini", label: "gpt-5-6-mini" },
-  { value: "gpt-6", label: "gpt-6" },
 ] as const;
 // 上游会隔几周改名一次，模型下拉改为从 /api/chat-models 拉实时列表；
 // 这里保留的内置清单只作为拉取失败时的回落，同时约束 ImageModel 的取值形状。
@@ -35,8 +29,9 @@ const OPTIONAL_MODEL_RE = /^gpt-[0-9][0-9a-z.]*(?:-[0-9a-z.]+)*$/;
 export const IMAGE_TASK_MODEL_OPTIONS = IMAGE_MODEL_OPTIONS.filter((option) => IMAGE_TASK_MODEL_VALUES.has(option.value));
 export const IMAGE_CREATION_MODEL_OPTIONS = IMAGE_TASK_MODEL_OPTIONS;
 
-// 内置回落清单：上游不可达时文本下拉用这份。
-export const FALLBACK_CHAT_MODELS: string[] = IMAGE_MODEL_OPTIONS.map((option) => option.value).filter(isChatModelValue);
+// 内置回落清单：上游不可达时文本下拉用这份。只有 auto —— 其余真实模型名来自上游，
+// 本地猜一个版本号会在上游改名后变成死名字。
+export const FALLBACK_CHAT_MODELS: string[] = [DEFAULT_CHAT_MODEL];
 
 export function isOptionalModel(value: unknown): value is ImageModel {
   return typeof value === "string" && OPTIONAL_MODEL_RE.test(value);

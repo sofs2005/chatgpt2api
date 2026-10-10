@@ -14,7 +14,10 @@ import (
 )
 
 const (
-	searchModel            = "gpt-5-5"
+	// searchModel is what the web UI sends on /f/conversation for a search turn:
+	// the literal "auto" plus system_hints=["search"], letting upstream pick the
+	// model. Pinning a version here goes stale on every upstream rename.
+	searchModel            = "auto"
 	searchTimeoutSecs      = 300 * time.Second
 	searchPollIntervalSecs = 3 * time.Second
 )

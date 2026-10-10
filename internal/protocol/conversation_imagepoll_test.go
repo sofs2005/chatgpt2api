@@ -15,7 +15,7 @@ func TestNewImageClientAppliesPollOptionsFromConfig(t *testing.T) {
 			settleEnabled:  true,
 			checkBeforeHit: false,
 			settleSecs:     1.5,
-			modelSlug:      "gpt-5-6",
+			modelSlug:      "gpt-6",
 		},
 	}
 
@@ -31,7 +31,7 @@ func TestNewImageClientAppliesPollOptionsFromConfig(t *testing.T) {
 	if opts.SettleSecs != 1500*time.Millisecond {
 		t.Fatalf("SettleSecs = %v, want 1.5s", opts.SettleSecs)
 	}
-	if got := client.ImageModelSlug(); got != "gpt-5-6" {
-		t.Fatalf("ImageModelSlug() = %q, want %q", got, "gpt-5-6")
+	if got := client.ImageModelSlug(); got != "gpt-6" {
+		t.Fatalf("ImageModelSlug() = %q, want %q", got, "gpt-6")
 	}
 }

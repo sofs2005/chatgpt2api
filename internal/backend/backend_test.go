@@ -473,10 +473,10 @@ func TestOfficialImageModelSlug(t *testing.T) {
 			"codex-gpt-image-2": "codex-gpt-image-2",
 			"gpt-5-5":           "auto",
 		}},
-		{slug: "gpt-5-6", want: map[string]string{
-			"":                  "gpt-5-6",
-			"auto":              "gpt-5-6",
-			"gpt-image-2":       "gpt-5-6",
+		{slug: "gpt-6", want: map[string]string{
+			"":                  "gpt-6",
+			"auto":              "gpt-6",
+			"gpt-image-2":       "gpt-6",
 			"codex-gpt-image-2": "codex-gpt-image-2",
 			"gpt-5-5":           "auto",
 		}},
@@ -492,9 +492,9 @@ func TestOfficialImageModelSlug(t *testing.T) {
 
 func TestSetImageModelSlugTrimsAndExposes(t *testing.T) {
 	client := &Client{}
-	client.SetImageModelSlug("  gpt-5-6  ")
-	if got := client.ImageModelSlug(); got != "gpt-5-6" {
-		t.Fatalf("ImageModelSlug() = %q, want %q", got, "gpt-5-6")
+	client.SetImageModelSlug("  gpt-6  ")
+	if got := client.ImageModelSlug(); got != "gpt-6" {
+		t.Fatalf("ImageModelSlug() = %q, want %q", got, "gpt-6")
 	}
 	client.SetImageModelSlug("   ")
 	if got := client.ImageModelSlug(); got != "" {
@@ -1431,7 +1431,7 @@ func TestStreamResponsesImageReturnsPolledConversationText(t *testing.T) {
 			pollCount++
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"mapping":{
-				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + finalText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-5-5"}}}
+				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + finalText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-6"}}}
 			}}`))
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -1552,7 +1552,7 @@ func TestStreamResponsesImageFetchesHistoryTextForTextTurn(t *testing.T) {
 			_, _ = w.Write([]byte(`{"mapping":{
 				"user-node":{"message":{"author":{"role":"user"},"create_time":1,"content":{"content_type":"text","parts":["你好，你是什么模型？"]},"status":"finished_successfully","recipient":"all","metadata":{}}},
 				"assistant-context":{"message":{"author":{"role":"assistant"},"create_time":2,"content":{"content_type":"model_editable_context"},"status":"finished_successfully","recipient":"all","metadata":{"is_visually_hidden_from_conversation":true}}},
-				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + finalText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-5-5"}}}
+				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + finalText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-6"}}}
 			}}`))
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -1955,10 +1955,10 @@ func TestConversationPayloadKeepsSystemHintsEmpty(t *testing.T) {
 	client := &Client{}
 	payload := client.conversationPayload([]map[string]any{
 		{"role": "user", "content": "draw\n\n输出为 16:9 横屏构图"},
-	}, "gpt-5-5")
+	}, "gpt-6")
 
-	if payload["model"] != "gpt-5-5" {
-		t.Fatalf("model = %q, want gpt-5-5", payload["model"])
+	if payload["model"] != "gpt-6" {
+		t.Fatalf("model = %q, want gpt-6", payload["model"])
 	}
 	hints, ok := payload["system_hints"].([]any)
 	if !ok {

@@ -7,6 +7,11 @@
 > 身份字段说明（2026-09-30）：文档中的身份取值已改写为
 > `America/Los_Angeles` + `-420`，与后端 `util.OutboundTimeZone*` 一致；
 > 原始实抓记录的是 `Asia/Shanghai` + `-480`。两个取值未经重新抓包确认。
+>
+> 模型 slug 时效说明（2026-10-10 复核）：本文档成文时抓到的 `gpt-5-5`、`gpt-5.4-mini`
+> 等 slug 已过期。后续抓包（`gpt-2026-10-09`）中 `/f/conversation` 请求体为 `model: "auto"`，
+> 由上游路由，`server_ste_metadata.model_slug` 返回 `gpt-6`，`gpt-5-*` 零出现。
+> 下文涉及具体 slug 的段落只作历史记录，改协议代码前请重新抓包。
 
 ---
 
@@ -204,13 +209,16 @@ codex-gpt-image-2 → gpt-5.4-mini  ← Codex Responses 链路 (需 Plus/Team/Pr
 
 ### 4.2 模型路由逻辑 (Go 后端实现)
 
+成文时的实现（已过期，仅作历史记录）：`gpt-image-2` 映射到写死的 `gpt-5-5`。
+当前实现不再写死版本号，而是取「设置里的 slug，缺省 `auto`」：
+
 ```go
-func officialImageModelSlug(model string) string {
-    switch strings.TrimSpace(model) {
-    case "gpt-image-2":      return "gpt-5-5"       // 官方图片工具
-    case "codex-gpt-image-2": return "codex-gpt-image-2"  // Codex 链路
-    case "", "auto":          return "auto"          // 服务端自动路由 → gpt-5-5
-    default:                  return "auto"
+func (c *Client) officialImageModelSlug(model string) string {
+    configured := firstNonEmpty(c.imageModelSlug, DefaultImageModelSlug) // 默认 "auto"
+    switch strings.ToLower(strings.TrimSpace(model)) {
+    case "", util.ImageModelAuto, util.ImageModelGPT: return configured
+    case util.ImageModelCodex:                        return util.ImageModelCodex
+    default:                                          return util.ImageModelAuto
     }
 }
 ```

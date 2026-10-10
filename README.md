@@ -71,7 +71,7 @@
 - 面向图片工具调用场景的 Responses：`POST /v1/responses`。
 - Anthropic Messages 风格入口：`POST /v1/messages`。
 - 异步创作任务资源：`/api/creation-tasks`。
-- 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto` 和多个 `gpt-5*` 文本/图片场景模型选项（`gpt-5-5`、`gpt-5-5-mini`、`gpt-5-6`、`gpt-5-6-mini` 等）。
+- 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto`；文本模型下拉跟随上游实时列表（`gpt-6` 等），不在本地写死版本号。
 
 ### 账号池与导入
 
@@ -716,7 +716,7 @@ curl http://localhost:3000/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <session-or-api-token>" \
   -d '{
-    "model": "gpt-5-6",
+    "model": "gpt-6",
     "input": "生成一张未来感城市天际线图片",
     "tools": [
       {

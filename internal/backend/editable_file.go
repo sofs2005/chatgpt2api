@@ -27,7 +27,11 @@ import (
 	"chatgpt2api/internal/util"
 )
 
-const editableFileModel = "gpt-5-5-thinking"
+// editableFileModel is what the web UI sends on /f/conversation for a PPT/PSD
+// export turn: the literal "auto", letting upstream route. The thinking budget
+// is carried separately by the thinking_effort field, not by a "-thinking"
+// model suffix, which upstream no longer uses.
+const editableFileModel = "auto"
 
 type EditableFileImage struct {
 	Data        []byte

@@ -1077,7 +1077,7 @@ func TestStreamResponsesImageOutputsCompletesWithUpstreamRefusalText(t *testing.
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-refused":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"mapping":{
-				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + upstreamText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-5-5"}}}
+				"assistant-text":{"message":{"author":{"role":"assistant"},"create_time":3,"content":{"content_type":"text","parts":["` + upstreamText + `"]},"status":"finished_successfully","recipient":"all","metadata":{"model_slug":"gpt-6"}}}
 			}}`))
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)

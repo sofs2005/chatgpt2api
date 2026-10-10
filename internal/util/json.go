@@ -16,18 +16,12 @@ import (
 	"time"
 )
 
+// 本客户端自有路由的模型名。文本模型不在此列：它们由上游实时列表提供
+// （见 protocol.Engine.ListChatModels），写死具体版本号只会在上游改名后过期。
 const (
-	ImageModelAuto      = "auto"
-	ImageModelGPT       = "gpt-image-2"
-	ImageModelCodex     = "codex-gpt-image-2"
-	ImageModelGPT5      = "gpt-5"
-	ImageModelGPT53Mini = "gpt-5-3-mini"
-	ImageModelGPT54     = "gpt-5-4"
-	ImageModelGPT55     = "gpt-5-5"
-	ImageModelGPT55Mini = "gpt-5-5-mini"
-	ImageModelGPT56     = "gpt-5-6"
-	ImageModelGPT56Mini = "gpt-5-6-mini"
-	ImageModelGPT6      = "gpt-6"
+	ImageModelAuto  = "auto"
+	ImageModelGPT   = "gpt-image-2"
+	ImageModelCodex = "codex-gpt-image-2"
 )
 
 var ImageModels = map[string]struct{}{
@@ -35,18 +29,12 @@ var ImageModels = map[string]struct{}{
 	ImageModelCodex: {},
 }
 
+// ModelIDs 是 /v1/models 的兜底清单，只列本客户端自有路由的图片模型。
+// 文本模型来自上游，不在本地重复声明。
 var ModelIDs = []string{
 	ImageModelGPT,
 	ImageModelCodex,
 	ImageModelAuto,
-	ImageModelGPT5,
-	ImageModelGPT53Mini,
-	ImageModelGPT54,
-	ImageModelGPT55,
-	ImageModelGPT55Mini,
-	ImageModelGPT56,
-	ImageModelGPT56Mini,
-	ImageModelGPT6,
 }
 
 var ImageGenerationModelIDs = []string{
@@ -61,20 +49,6 @@ func init() {
 	for _, model := range ImageGenerationModelIDs {
 		ImageGenerationModels[model] = struct{}{}
 	}
-}
-
-var ResponsesImageToolModels = map[string]struct{}{
-	ImageModelAuto:      {},
-	ImageModelGPT:       {},
-	ImageModelCodex:     {},
-	ImageModelGPT5:      {},
-	ImageModelGPT53Mini: {},
-	ImageModelGPT54:     {},
-	ImageModelGPT55:     {},
-	ImageModelGPT55Mini: {},
-	ImageModelGPT56:     {},
-	ImageModelGPT56Mini: {},
-	ImageModelGPT6:      {},
 }
 
 // IsOptionalModel reports whether model is a plain text model the client may pass
@@ -405,9 +379,19 @@ func IsImageGenerationModel(model string) bool {
 	return ok
 }
 
+// IsResponsesImageToolModel reports whether model is acceptable as the image_generation
+// tool model on /v1/responses.
+//
+// It accepts the client's own image slugs (auto, gpt-image-2, codex-gpt-image-2) plus any
+// user-facing text model: responseImageGenerationModel maps text models onto the official
+// image flow. Like IsOptionalModel this is a shape test, so it follows upstream renames
+// (gpt-5-5 → gpt-6) without a release.
 func IsResponsesImageToolModel(model string) bool {
-	_, ok := ResponsesImageToolModels[strings.TrimSpace(model)]
-	return ok
+	trimmed := strings.TrimSpace(model)
+	if _, ok := ImageGenerationModels[trimmed]; ok {
+		return true
+	}
+	return IsOptionalModel(trimmed)
 }
 
 func ModelList() []string {

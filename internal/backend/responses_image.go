@@ -28,6 +28,11 @@ const (
 	officialPreparePath = "/backend-api/f/conversation/prepare"
 	officialStreamPath  = "/backend-api/f/conversation"
 
+	// Codex chain (/backend-api/codex/responses) is a separate route with its own
+	// codex-tui user agent. The 2026-10-09 web capture contains no traffic on it,
+	// so these slugs are carried over from the JS reverse engineering notes
+	// (jshook/docs/ChatGPT-gpt-image-2-generation-pipeline-analysis.md) rather than
+	// confirmed by a fresh capture. Re-capture before changing them.
 	ResponsesImageMainModel      = "gpt-5.4-mini"
 	ResponsesImageCodexToolModel = "gpt-5.4-mini"
 
@@ -353,22 +358,8 @@ func normalizeResponsesImageToolModel(model string) string {
 	switch strings.ToLower(strings.TrimSpace(model)) {
 	case "", util.ImageModelAuto, "gpt-image-1", util.ImageModelGPT:
 		return ""
-	case util.ImageModelCodex:
+	case util.ImageModelCodex, ResponsesImageCodexToolModel:
 		return ResponsesImageCodexToolModel
-	case ResponsesImageCodexToolModel:
-		return ResponsesImageCodexToolModel
-	case util.ImageModelGPT54:
-		return util.ImageModelGPT54
-	case util.ImageModelGPT55:
-		return util.ImageModelGPT55
-	case util.ImageModelGPT55Mini:
-		return util.ImageModelGPT55Mini
-	case util.ImageModelGPT56:
-		return util.ImageModelGPT56
-	case util.ImageModelGPT56Mini:
-		return util.ImageModelGPT56Mini
-	case "gpt-5-5-thinking":
-		return "gpt-5-5-thinking"
 	default:
 		return ""
 	}

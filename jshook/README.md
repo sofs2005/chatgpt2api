@@ -108,9 +108,14 @@ jshook/
 
 ### 1. 模型路由
 
+> **时效提示（2026-10-10 复核）**：下面 `gpt-5-5` / `i-5-mini-m` 等 slug 是本文档成文时那次抓包的结果。
+> 后续抓包（`gpt-2026-10-09`）里 `/f/conversation` 请求体已改为 `model: "auto"`，
+> 由上游路由，`server_ste_metadata.model_slug` 返回 `gpt-6`；`gpt-5-*` 在抓包中零出现。
+> 引用本节的 slug 前请先重新抓包确认。
+
 - `default_model_slug: "auto"`: 后端自动路由，前端不指定具体模型名。
 - 页面标题显示 "ChatGPT Images 2.0"，当前链路推测对应 `gpt-image-2`。
-- 实抓生图模型路由为 `gpt-5-5`，文本回复可出现 `i-5-mini-m`。
+- 成文时实抓生图模型路由为 `gpt-5-5`，文本回复可出现 `i-5-mini-m`。
 
 ### 2. 生图工具标识
 
@@ -176,7 +181,7 @@ Bootstrap
 
 - 准备端点: `POST /backend-api/f/conversation/prepare` -> `conduit_token`。
 - 生图端点: `POST /backend-api/f/conversation`，不是 `/backend-api/conversation`。
-- 模型映射: `gpt-image-2` -> `gpt-5-5`。
+- 模型映射（成文时）：`gpt-image-2` -> `gpt-5-5`。当前前端已改为发 `model: "auto"`，见「核心发现摘要」的时效提示。
 - 纯文本 prompt 可使用 `content_type: "text"`。
 - SSE 响应返回 `image_asset_pointer`，资产指针使用 `sediment://`。
 - 图片下载通过 `/backend-api/conversation/{cid}/attachment/{sid}/download` 获取 estuary CDN URL。

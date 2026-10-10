@@ -244,13 +244,13 @@ func TestStoreNormalizesImageModelSlug(t *testing.T) {
 		t.Fatalf("default ImageModelSlug() = %q, want empty (falls back to auto)", got)
 	}
 
-	got, err := store.Update(map[string]any{"image_model_slug": "  gpt-5-6  "})
+	got, err := store.Update(map[string]any{"image_model_slug": "  gpt-6  "})
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	assertConfigValue(t, got, "image_model_slug", "gpt-5-6")
-	if store.ImageModelSlug() != "gpt-5-6" {
-		t.Fatalf("ImageModelSlug() = %q, want %q", store.ImageModelSlug(), "gpt-5-6")
+	assertConfigValue(t, got, "image_model_slug", "gpt-6")
+	if store.ImageModelSlug() != "gpt-6" {
+		t.Fatalf("ImageModelSlug() = %q, want %q", store.ImageModelSlug(), "gpt-6")
 	}
 }
 

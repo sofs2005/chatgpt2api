@@ -9,7 +9,7 @@ func TestImageGenerationModelSetExcludesTextModels(t *testing.T) {
 		}
 	}
 
-	for _, model := range []string{"gpt-5", "gpt-5-5", "gpt-5.4-mini", "gpt-5-5-thinking", "gpt-6"} {
+	for _, model := range []string{"gpt-5", "gpt-5-5", "gpt-6-luna", "gpt-5-5-thinking", "gpt-6"} {
 		if IsImageGenerationModel(model) {
 			t.Fatalf("IsImageGenerationModel(%q) = true, want false", model)
 		}
@@ -23,7 +23,7 @@ func TestResponsesImageToolModelsIncludeTextModels(t *testing.T) {
 		ImageModelCodex,
 		"gpt-5",
 		"gpt-5-5",
-		"gpt-5.4-mini",
+		"gpt-6-luna",
 		"gpt-5-5-thinking",
 		"gpt-6",
 	} {

@@ -30,11 +30,12 @@ const (
 
 	// Codex chain (/backend-api/codex/responses) is a separate route with its own
 	// codex-tui user agent. The 2026-10-09 web capture contains no traffic on it,
-	// so these slugs are carried over from the JS reverse engineering notes
-	// (jshook/docs/ChatGPT-gpt-image-2-generation-pipeline-analysis.md) rather than
-	// confirmed by a fresh capture. Re-capture before changing them.
-	ResponsesImageMainModel      = "gpt-5.4-mini"
-	ResponsesImageCodexToolModel = "gpt-5.4-mini"
+	// so "gpt-6-luna" is a configured value rather than one confirmed by a capture:
+	// the previous slug was carried over from the JS reverse engineering notes
+	// (jshook/docs/ChatGPT-gpt-image-2-generation-pipeline-analysis.md) and had gone
+	// stale. Re-capture before changing it again.
+	ResponsesImageMainModel      = "gpt-6-luna"
+	ResponsesImageCodexToolModel = "gpt-6-luna"
 
 	codexResponsesPath       = "/backend-api/codex/responses"
 	codexResponsesUserAgent  = "codex-tui/0.128.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.128.0)"
